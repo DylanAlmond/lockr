@@ -1,6 +1,7 @@
 use std::sync::Mutex;
 
 use tauri::State;
+use uuid::Uuid;
 
 use crate::{vault_manager::VaultManager, Vault};
 
@@ -34,9 +35,71 @@ pub fn unlock_vault(
     let mut manager = state.lock().map_err(|e| e.to_string())?;
 
     // Vue sends a string but Rust needs a Uuid
-    let id = uuid::Uuid::parse_str(&vault_id).map_err(|e| e.to_string())?;
+    let id = Uuid::parse_str(&vault_id).map_err(|e| e.to_string())?;
 
     manager
         .unlock_vault(id, master_password)
         .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn lock_vault(state: ManagerState) -> Result<(), String> {
+    let mut manager = state.lock().map_err(|e| e.to_string())?;
+    manager.lock_vault();
+    Ok(())
+}
+
+#[tauri::command]
+pub fn add_service(state: ManagerState, name: String) -> Result<crate::models::Service, String> {
+    let mut manager = state.lock().map_err(|e| e.to_string())?;
+    manager.add_service(name).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn delete_service(state: ManagerState, service_id: String) -> Result<(), String> {
+    let mut manager = state.lock().map_err(|e| e.to_string())?;
+    let id = Uuid::parse_str(&service_id).map_err(|e| e.to_string())?;
+    manager.delete_service(id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn add_account(
+    state: ManagerState,
+    service_id: String,
+    username: String,
+    password: String,
+) -> Result<crate::models::Account, String> {
+    let mut manager = state.lock().map_err(|e| e.to_string())?;
+    let id = Uuid::parse_str(&service_id).map_err(|e| e.to_string())?;
+    manager.add_account(id, username, password).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn update_account(
+    state: ManagerState,
+    service_id: String,
+    account_id: String,
+    username: Option<String>, // Option<String> in Rust becomes string | null in TS
+    password: Option<String>,
+) -> Result<crate::models::Account, String> {
+    let mut manager = state.lock().map_err(|e| e.to_string())?;
+    
+    let sid = Uuid::parse_str(&service_id).map_err(|e| e.to_string())?;
+    let aid = Uuid::parse_str(&account_id).map_err(|e| e.to_string())?;
+    
+    manager.update_account(sid, aid, username, password).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn delete_account(
+    state: ManagerState,
+    service_id: String,
+    account_id: String,
+) -> Result<(), String> {
+    let mut manager = state.lock().map_err(|e| e.to_string())?;
+    
+    let sid = Uuid::parse_str(&service_id).map_err(|e| e.to_string())?;
+    let aid = Uuid::parse_str(&account_id).map_err(|e| e.to_string())?;
+    
+    manager.delete_account(sid, aid).map_err(|e| e.to_string())
 }

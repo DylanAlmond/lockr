@@ -1,5 +1,5 @@
 import { ref } from 'vue';
-import { Vault } from '../types';
+import { Account, Service, Vault } from '../types';
 import { invoke } from '@tauri-apps/api/core';
 
 const currentVault = ref<Vault | null>(null);
@@ -59,12 +59,76 @@ export function useVault() {
     }
   }
 
+  async function addService(name: string) {
+    try {
+      const newService = await invoke<Service>('add_service', { name });
+      // Find the service in our local state and add it so Vue updates instantly
+      currentVault.value?.services.push(newService);
+      return newService;
+    } catch (e) {
+      error.value = String(e);
+      return null;
+    }
+  }
+
+  async function deleteService(serviceId: string) {
+    try {
+      await invoke('delete_service', { serviceId });
+      // Remove from local state
+      if (currentVault.value) {
+        currentVault.value.services = currentVault.value.services.filter((s) => s.id !== serviceId);
+      }
+    } catch (e) {
+      error.value = String(e);
+    }
+  }
+
+  async function addAccount(serviceId: string, username: string, password: string) {
+    try {
+      const newAccount = await invoke<Account>('add_account', { serviceId, username, password });
+      // Find the service and push the account
+      const service = currentVault.value?.services.find((s) => s.id === serviceId);
+      service?.accounts.push(newAccount);
+      return newAccount;
+    } catch (e) {
+      error.value = String(e);
+      return null;
+    }
+  }
+
+  async function deleteAccount(serviceId: string, accountId: string) {
+    try {
+      await invoke('delete_account', { serviceId, accountId });
+      // Remove from local state
+      const service = currentVault.value?.services.find((s) => s.id === serviceId);
+      if (service) {
+        service.accounts = service.accounts.filter((a) => a.id !== accountId);
+      }
+    } catch (e) {
+      error.value = String(e);
+    }
+  }
+
+  async function lockVault() {
+    try {
+      await invoke('lock_vault');
+      currentVault.value = null; // Clear frontend state
+    } catch (e) {
+      error.value = String(e);
+    }
+  }
+
   return {
     currentVault,
     isLoading,
     error,
     createVault,
     listVaultIds,
-    unlockVault
+    unlockVault,
+    addService,
+    deleteService,
+    addAccount,
+    deleteAccount,
+    lockVault
   };
 }

@@ -32,7 +32,13 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::create_vault,
             commands::list_vault_ids,
-            commands::unlock_vault
+            commands::unlock_vault,
+            commands::lock_vault,
+            commands::add_service,
+            commands::delete_service,
+            commands::add_account,
+            commands::update_account,
+            commands::delete_account,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

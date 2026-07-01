@@ -166,8 +166,22 @@ impl VaultManager {
         vault.services.push(service.clone());
 
         self.save_vault()?;
-
         Ok(service)
+    }
+
+    /// Delete an existing service
+    pub fn delete_service(&mut self, service_id: ServiceId) -> Result<(), VaultError> {
+        let vault = self.get_vault_mut()?;
+
+        let len_before = vault.services.len();
+        vault.services.retain(|s| s.id != service_id);
+
+        if vault.services.len() == len_before {
+            return Err(VaultError::ServiceNotFound(service_id.to_string()));
+        }
+
+        self.save_vault()?;
+        Ok(())
     }
 
     /// Create a new service account

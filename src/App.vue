@@ -1,17 +1,21 @@
 <script setup lang="ts">
 import CreateVault from './components/CreateVault.vue';
 import UnlockVault from './components/UnlockVault.vue';
+import VaultView from './components/VaultView.vue';
 import { useVault } from './composables/useVault.ts';
 
 const { currentVault } = useVault();
 </script>
 
 <template>
-  <CreateVault />
+  <VaultView />
 
-  <hr />
+  <hr style="margin: 2rem 0" />
 
-  <UnlockVault />
+  <div style="display: flex; gap: 2rem">
+    <CreateVault />
+    <UnlockVault />
+  </div>
 
   <!-- View result -->
   <div v-if="currentVault" style="margin: 2rem; padding: 1rem; background: #eee">
