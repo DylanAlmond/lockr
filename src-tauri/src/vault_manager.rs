@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{fs::read_dir, path::PathBuf};
 
 use chrono::Utc;
 use uuid::Uuid;
@@ -53,6 +53,32 @@ impl VaultManager {
     /// Get a mutable reference to the vault, or error if unlocked
     fn get_vault_mut(&mut self) -> Result<&mut Vault, VaultError> {
         self.unlocked_vault.as_mut().ok_or(VaultError::VaultLocked)
+    }
+
+    /// Returns a list of existing vault IDs (filenames) without unlocking them
+    pub fn list_vault_ids(&self) -> Result<Vec<String>, VaultError> {
+        let mut ids = Vec::new();
+
+        if !self.vaults_dir.exists() {
+            return Ok(ids);
+        }
+
+        for entry in read_dir(&self.vaults_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+
+            if let Some(extension) = path.extension() {
+                if extension == "vault" {
+                    if let Some(stem) = path.file_stem() {
+                        if let Some(id_str) = stem.to_str() {
+                            ids.push(id_str.to_string());
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(ids)
     }
 
     /// Create a new vault and save to disk
