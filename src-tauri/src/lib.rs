@@ -1,3 +1,4 @@
+mod crypto;
 mod error;
 mod models;
 mod vault_manager;

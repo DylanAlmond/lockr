@@ -20,6 +20,9 @@ pub enum VaultError {
     #[error("Encryption error: {0}")]
     Encryption(String),
 
+    #[error("Decryption Error: {0}")]
+    Decryption(String),
+
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 
