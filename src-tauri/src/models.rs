@@ -1,8 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-
-use crate::VaultError;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 pub type VaultId = Uuid;
 pub type ServiceId = Uuid;
@@ -39,8 +38,9 @@ pub struct Account {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
 pub struct AccountSecret {
+    #[zeroize(skip)]
     pub id: SecretId,
     pub password: String,
 }

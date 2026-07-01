@@ -2,6 +2,7 @@ use std::{fs::read_dir, path::PathBuf};
 
 use chrono::Utc;
 use uuid::Uuid;
+use zeroize::Zeroize;
 
 use crate::{
     crypto::{decrypt, encrypt},
@@ -110,6 +111,11 @@ impl VaultManager {
     /// Lock the currently unlocked vault
     pub fn lock_vault(&mut self) {
         self.unlocked_vault = None;
+
+        // Zeroize master password on drop
+        if let Some(mut pw) = self.master_password.take() {
+            pw.zeroize();
+        }
     }
 
     /// Load vault file from a given id
