@@ -1,8 +1,9 @@
 use std::path::PathBuf;
 
+use chrono::Utc;
 use uuid::Uuid;
 
-use crate::{Service, Vault, VaultError, VaultId};
+use crate::{AccountId, Service, ServiceId, Vault, VaultError, VaultId};
 
 pub struct VaultManager {
     /// Where to store vault files
@@ -115,6 +116,100 @@ impl VaultManager {
 
         Ok(service)
     }
+
+    /// Create a new service account
+    pub fn add_account(
+        &mut self,
+        service_id: ServiceId,
+        username: String,
+        password: String,
+    ) -> Result<crate::models::Account, VaultError> {
+        let vault = self.get_vault_mut()?;
+
+        let service = vault
+            .find_service_mut(service_id)
+            .ok_or(VaultError::ServiceNotFound(service_id.to_string()))?;
+
+        let now = Utc::now();
+        let account = crate::models::Account {
+            id: Uuid::new_v4(),
+            display_name: None,
+            username,
+            email: None,
+            secret: crate::models::AccountSecret {
+                id: Uuid::new_v4(),
+                password,
+            },
+            created_at: now,
+            updated_at: now,
+        };
+
+        service.accounts.push(account.clone());
+
+        self.save_vault()?;
+
+        Ok(account)
+    }
+
+    /// Update a service account
+    pub fn update_account(
+        &mut self,
+        service_id: ServiceId,
+        account_id: AccountId,
+        username: Option<String>,
+        password: Option<String>,
+    ) -> Result<crate::models::Account, VaultError> {
+        let vault = self.get_vault_mut()?;
+
+        let service = vault
+            .find_service_mut(service_id)
+            .ok_or(VaultError::ServiceNotFound(service_id.to_string()))?;
+
+        let account = service
+            .accounts
+            .iter_mut()
+            .find(|a| a.id == account_id)
+            .ok_or(VaultError::AccountNotFound(account_id.to_string()))?;
+
+        if let Some(new_username) = username {
+            account.username = new_username;
+        }
+        if let Some(new_password) = password {
+            account.secret.password = new_password;
+        }
+
+        account.updated_at = Utc::now();
+
+        let updated = account.clone();
+
+        self.save_vault()?;
+
+        Ok(updated)
+    }
+
+    // Delete a service account
+    pub fn delete_account(
+        &mut self,
+        service_id: ServiceId,
+        account_id: AccountId,
+    ) -> Result<(), VaultError> {
+        let vault = self.get_vault_mut()?;
+
+        let service = vault
+            .find_service_mut(service_id)
+            .ok_or(VaultError::ServiceNotFound(service_id.to_string()))?;
+
+        let exists = service.accounts.iter().any(|a| a.id == account_id);
+        if !exists {
+            return Err(VaultError::AccountNotFound(account_id.to_string()));
+        }
+
+        service.accounts.retain(|a| a.id != account_id);
+
+        self.save_vault()?;
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -182,6 +277,102 @@ mod tests {
         assert_eq!(vault.services.len(), 1);
 
         // Clean up
+        std::fs::remove_dir_all(temp_dir).ok();
+    }
+
+    #[test]
+    fn test_add_account() {
+        let temp_dir = std::env::temp_dir().join("vault_test_account");
+
+        let mut manager = VaultManager::new(temp_dir.clone()).unwrap();
+        manager.create_vault("Test".to_string()).unwrap();
+
+        let service = manager.add_service("GitHub".to_string()).unwrap();
+        let account = manager
+            .add_account(service.id, "octocat".to_string(), "secret123".to_string())
+            .unwrap();
+
+        assert_eq!(account.username, "octocat");
+        assert_eq!(account.secret.password, "secret123");
+
+        // Verify it persisted
+        let vault = manager.get_vault().unwrap();
+        assert_eq!(vault.services[0].accounts.len(), 1);
+
+        std::fs::remove_dir_all(temp_dir).ok();
+    }
+
+    #[test]
+    fn test_add_account_wrong_service() {
+        let temp_dir = std::env::temp_dir().join("vault_test_wrong");
+
+        let mut manager = VaultManager::new(temp_dir.clone()).unwrap();
+        manager.create_vault("Test".to_string()).unwrap();
+
+        let fake_id = uuid::Uuid::new_v4();
+        let result = manager.add_account(fake_id, "user".to_string(), "pass".to_string());
+
+        assert!(result.is_err());
+        match result {
+            Err(VaultError::ServiceNotFound(_)) => {} // expected
+            _ => panic!("Expected ServiceNotFound error"),
+        }
+
+        std::fs::remove_dir_all(temp_dir).ok();
+    }
+
+    #[test]
+    fn test_update_account() {
+        let temp_dir = std::env::temp_dir().join("vault_test_update");
+
+        let mut manager = VaultManager::new(temp_dir.clone()).unwrap();
+        manager.create_vault("Test".to_string()).unwrap();
+        let service = manager.add_service("GitHub".to_string()).unwrap();
+        let account = manager
+            .add_account(service.id, "octocat".to_string(), "old_pass".to_string())
+            .unwrap();
+
+        // Update only password
+        let updated = manager
+            .update_account(service.id, account.id, None, Some("new_pass".to_string()))
+            .unwrap();
+
+        assert_eq!(updated.username, "octocat"); // unchanged
+        assert_eq!(updated.secret.password, "new_pass"); // changed
+
+        std::fs::remove_dir_all(temp_dir).ok();
+    }
+
+    #[test]
+    fn test_delete_account() {
+        let temp_dir = std::env::temp_dir().join("vault_test_delete");
+
+        let mut manager = VaultManager::new(temp_dir.clone()).unwrap();
+        manager.create_vault("Test".to_string()).unwrap();
+        let service = manager.add_service("GitHub".to_string()).unwrap();
+        let account = manager
+            .add_account(service.id, "octocat".to_string(), "pass".to_string())
+            .unwrap();
+
+        manager.delete_account(service.id, account.id).unwrap();
+
+        let vault = manager.get_vault().unwrap();
+        assert_eq!(vault.services[0].accounts.len(), 0);
+
+        std::fs::remove_dir_all(temp_dir).ok();
+    }
+
+    #[test]
+    fn test_delete_nonexistent_account() {
+        let temp_dir = std::env::temp_dir().join("vault_test_delete_missing");
+
+        let mut manager = VaultManager::new(temp_dir.clone()).unwrap();
+        manager.create_vault("Test".to_string()).unwrap();
+        let service = manager.add_service("GitHub".to_string()).unwrap();
+
+        let result = manager.delete_account(service.id, uuid::Uuid::new_v4());
+        assert!(matches!(result, Err(VaultError::AccountNotFound(_))));
+
         std::fs::remove_dir_all(temp_dir).ok();
     }
 }
