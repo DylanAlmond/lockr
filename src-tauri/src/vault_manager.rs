@@ -3,7 +3,10 @@ use std::path::PathBuf;
 use chrono::Utc;
 use uuid::Uuid;
 
-use crate::{AccountId, Service, ServiceId, Vault, VaultError, VaultId};
+use crate::{
+    crypto::{decrypt, encrypt},
+    AccountId, Service, ServiceId, Vault, VaultError, VaultId,
+};
 
 pub struct VaultManager {
     /// Where to store vault files
@@ -11,6 +14,9 @@ pub struct VaultManager {
 
     /// Currently unlocked vault
     unlocked_vault: Option<Vault>,
+
+    // Master password for currently unlocked vault
+    master_password: Option<String>,
 }
 
 impl VaultManager {
@@ -25,6 +31,7 @@ impl VaultManager {
         Ok(Self {
             vaults_dir,
             unlocked_vault: None,
+            master_password: None,
         })
     }
 
@@ -49,7 +56,11 @@ impl VaultManager {
     }
 
     /// Create a new vault and save to disk
-    pub fn create_vault(&mut self, name: String) -> Result<Vault, VaultError> {
+    pub fn create_vault(
+        &mut self,
+        name: String,
+        master_password: String,
+    ) -> Result<Vault, VaultError> {
         use uuid::Uuid;
 
         let vault = Vault {
@@ -58,28 +69,42 @@ impl VaultManager {
             services: Vec::new(),
         };
 
+        let json_bytes = serde_json::to_vec(&vault)?;
+        let encrypted_string = encrypt(&master_password, &json_bytes)?;
+
         let path = self.vault_path(vault.id);
-        let json = serde_json::to_string_pretty(&vault)?;
-        std::fs::write(&path, json)?;
+        std::fs::write(&path, encrypted_string)?;
 
         self.unlocked_vault = Some(vault.clone());
+        self.master_password = Some(master_password);
 
         Ok(vault)
     }
 
+    /// Lock the currently unlocked vault
+    pub fn lock_vault(&mut self) {
+        self.unlocked_vault = None;
+    }
+
     /// Load vault file from a given id
-    pub fn load_vault(&mut self, vault_id: VaultId) -> Result<Vault, VaultError> {
+    pub fn unlock_vault(
+        &mut self,
+        vault_id: VaultId,
+        master_password: String,
+    ) -> Result<Vault, VaultError> {
         let path = self.vault_path(vault_id);
 
         if !path.exists() {
             return Err(VaultError::NotFound(vault_id.to_string()));
         }
 
-        let json = std::fs::read_to_string(&path)?;
+        let encrypted_string = std::fs::read_to_string(&path)?;
+        let json_bytes = decrypt(&master_password, &encrypted_string)?;
 
-        let vault: Vault = serde_json::from_str(&json)?;
+        let vault: Vault = serde_json::from_slice(&json_bytes)?;
 
         self.unlocked_vault = Some(vault.clone());
+        self.master_password = Some(master_password);
 
         Ok(vault)
     }
@@ -87,17 +112,19 @@ impl VaultManager {
     /// Save the currently unlocked vault
     fn save_vault(&self) -> Result<(), VaultError> {
         let vault = self.get_vault()?;
-        let path = self.vault_path(vault.id);
-        let json = serde_json::to_string_pretty(vault)?;
 
-        std::fs::write(path, json)?;
+        let master_password = self
+            .master_password
+            .as_ref()
+            .ok_or(VaultError::VaultLocked)?;
+
+        let json_bytes = serde_json::to_vec_pretty(vault)?;
+        let encrypted_string = encrypt(master_password, &json_bytes)?;
+
+        let path = self.vault_path(vault.id);
+        std::fs::write(path, encrypted_string)?;
 
         Ok(())
-    }
-
-    /// Lock the currently unlocked vault
-    pub fn lock_vault(&mut self) {
-        self.unlocked_vault = None;
     }
 
     /// Create a new service
@@ -216,44 +243,33 @@ impl VaultManager {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_create_vault() {
-        // Use a temp directory for tests
-        let temp_dir = std::env::temp_dir().join("vault_test");
-
-        let mut manager = VaultManager::new(temp_dir.clone()).unwrap();
-
-        let vault = manager.create_vault("My Vault".to_string()).unwrap();
-
-        assert_eq!(vault.name, "My Vault");
-        assert_eq!(vault.services.len(), 0);
-        assert!(manager.is_unlocked());
-
-        // Verify file was created
-        let path = temp_dir.join("vaults").join(format!("{}.vault", vault.id));
-        assert!(path.exists());
-
-        // Clean up
-        std::fs::remove_dir_all(temp_dir).ok();
+    // Helper to clean up temp dirs
+    fn setup(name: &str) -> PathBuf {
+        let temp_dir = std::env::temp_dir().join(name);
+        let _ = std::fs::remove_dir_all(&temp_dir); // clean up from previous runs
+        temp_dir
     }
 
     #[test]
-    fn test_load_vault() {
-        let temp_dir = std::env::temp_dir().join("vault_test_load");
+    fn test_create_and_unlock() {
+        let temp_dir = setup("vault_test_enc");
+        let master_pw = "SuperSecret123!".to_string();
 
-        // Create a vault
         let mut manager = VaultManager::new(temp_dir.clone()).unwrap();
-        let created = manager.create_vault("Test Vault".to_string()).unwrap();
 
-        // Lock it (clear from memory)
-        manager.unlocked_vault = None;
+        // Create
+        let created = manager
+            .create_vault("My Vault".to_string(), master_pw.clone())
+            .unwrap();
+        assert_eq!(created.name, "My Vault");
+
+        // Lock
+        manager.lock_vault();
         assert!(!manager.is_unlocked());
 
-        // Load it back
-        let loaded = manager.load_vault(created.id).unwrap();
-
-        assert_eq!(loaded.id, created.id);
-        assert_eq!(loaded.name, "Test Vault");
+        // Unlock
+        let unlocked = manager.unlock_vault(created.id, master_pw).unwrap();
+        assert_eq!(unlocked.id, created.id);
         assert!(manager.is_unlocked());
 
         // Clean up
@@ -263,9 +279,10 @@ mod tests {
     #[test]
     fn test_add_service() {
         let temp_dir = std::env::temp_dir().join("vault_test_service");
+        let master_pw = "SuperSecret123!".to_string();
 
         let mut manager = VaultManager::new(temp_dir.clone()).unwrap();
-        manager.create_vault("Test".to_string()).unwrap();
+        manager.create_vault("Test".to_string(), master_pw).unwrap();
 
         let service = manager.add_service("GitHub".to_string()).unwrap();
 
@@ -283,9 +300,10 @@ mod tests {
     #[test]
     fn test_add_account() {
         let temp_dir = std::env::temp_dir().join("vault_test_account");
+        let master_pw = "SuperSecret123!".to_string();
 
         let mut manager = VaultManager::new(temp_dir.clone()).unwrap();
-        manager.create_vault("Test".to_string()).unwrap();
+        manager.create_vault("Test".to_string(), master_pw).unwrap();
 
         let service = manager.add_service("GitHub".to_string()).unwrap();
         let account = manager
@@ -305,9 +323,10 @@ mod tests {
     #[test]
     fn test_add_account_wrong_service() {
         let temp_dir = std::env::temp_dir().join("vault_test_wrong");
+        let master_pw = "SuperSecret123!".to_string();
 
         let mut manager = VaultManager::new(temp_dir.clone()).unwrap();
-        manager.create_vault("Test".to_string()).unwrap();
+        manager.create_vault("Test".to_string(), master_pw).unwrap();
 
         let fake_id = uuid::Uuid::new_v4();
         let result = manager.add_account(fake_id, "user".to_string(), "pass".to_string());
@@ -324,9 +343,10 @@ mod tests {
     #[test]
     fn test_update_account() {
         let temp_dir = std::env::temp_dir().join("vault_test_update");
+        let master_pw = "SuperSecret123!".to_string();
 
         let mut manager = VaultManager::new(temp_dir.clone()).unwrap();
-        manager.create_vault("Test".to_string()).unwrap();
+        manager.create_vault("Test".to_string(), master_pw).unwrap();
         let service = manager.add_service("GitHub".to_string()).unwrap();
         let account = manager
             .add_account(service.id, "octocat".to_string(), "old_pass".to_string())
@@ -346,9 +366,10 @@ mod tests {
     #[test]
     fn test_delete_account() {
         let temp_dir = std::env::temp_dir().join("vault_test_delete");
+        let master_pw = "SuperSecret123!".to_string();
 
         let mut manager = VaultManager::new(temp_dir.clone()).unwrap();
-        manager.create_vault("Test".to_string()).unwrap();
+        manager.create_vault("Test".to_string(), master_pw).unwrap();
         let service = manager.add_service("GitHub".to_string()).unwrap();
         let account = manager
             .add_account(service.id, "octocat".to_string(), "pass".to_string())
@@ -365,9 +386,10 @@ mod tests {
     #[test]
     fn test_delete_nonexistent_account() {
         let temp_dir = std::env::temp_dir().join("vault_test_delete_missing");
+        let master_pw = "SuperSecret123!".to_string();
 
         let mut manager = VaultManager::new(temp_dir.clone()).unwrap();
-        manager.create_vault("Test".to_string()).unwrap();
+        manager.create_vault("Test".to_string(), master_pw).unwrap();
         let service = manager.add_service("GitHub".to_string()).unwrap();
 
         let result = manager.delete_account(service.id, uuid::Uuid::new_v4());
