@@ -312,6 +312,29 @@ impl VaultManager {
 
         Ok(())
     }
+
+    /// Returns only the password string for a specific account
+    pub fn get_secret(
+        &self,
+        service_id: uuid::Uuid,
+        account_id: uuid::Uuid,
+    ) -> Result<String, VaultError> {
+        let vault = self.get_vault()?;
+
+        let service = vault
+            .services
+            .iter()
+            .find(|s| s.id == service_id)
+            .ok_or(VaultError::ServiceNotFound(service_id.to_string()))?;
+
+        let account = service
+            .accounts
+            .iter()
+            .find(|a| a.id == account_id)
+            .ok_or(VaultError::AccountNotFound(account_id.to_string()))?;
+
+        Ok(account.secret.password.clone())
+    }
 }
 
 #[cfg(test)]

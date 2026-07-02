@@ -12,7 +12,8 @@ const {
   deleteAccount,
   updateVaultName,
   updateServiceName,
-  lockVault
+  lockVault,
+  getSecret
 } = useVault();
 
 // --- Service State ---
@@ -26,6 +27,8 @@ const newDisplayName = ref('');
 const newUsername = ref('');
 const newEmail = ref('');
 const newPassword = ref('');
+
+const revealedPasswords = ref<Record<string, string>>({});
 
 // --- Edit Account State ---
 const editingAccountId = ref<string | null>(null);
@@ -136,6 +139,21 @@ async function handleDeleteAccount(serviceId: string, accountId: string) {
     await deleteAccount(serviceId, accountId);
   }
 }
+
+async function revealPassword(serviceId: string, accountId: string) {
+  const pw = await getSecret(serviceId, accountId);
+  if (pw !== null) {
+    revealedPasswords.value[accountId] = pw;
+  }
+}
+
+async function copyToClipboard(text: string) {
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch (err) {
+    console.error('Failed to copy: ', err);
+  }
+}
 </script>
 
 <template>
@@ -216,24 +234,22 @@ async function handleDeleteAccount(serviceId: string, accountId: string) {
                 <strong v-else>{{ a.username }}</strong>
                 <div v-if="a.email" class="email">{{ a.email }}</div>
               </div>
-              <button @click="startEditAccount(a)" class="btn-sm">Edit</button>
+              <div class="account-actions">
+                <button @click="revealPassword(selectedService.id, a.id)" class="btn-sm">
+                  {{ revealedPasswords[a.id] ? 'Hide' : 'Reveal' }}
+                </button>
+                <button @click="startEditAccount(a)" class="btn-sm">Edit</button>
+              </div>
             </div>
 
-            <!-- Account Edit Form -->
-            <form v-else @submit.prevent="handleUpdateAccount(a.id)" class="edit-account-form">
-              <input v-model="editForm.displayName" placeholder="Display Name" />
-              <input v-model="editForm.username" placeholder="Username" required />
-              <input v-model="editForm.email" placeholder="Email" type="email" />
-              <input
-                v-model="editForm.password"
-                placeholder="New Password (leave blank to keep)"
-                type="password"
-              />
-              <div class="edit-actions">
-                <button type="submit">Save</button>
-                <button type="button" @click="editingAccountId = null">Cancel</button>
-              </div>
-            </form>
+            <!-- The Revealed Password (only shown if it exists in our local map) -->
+            <div v-if="revealedPasswords[a.id]" class="revealed-pw">
+              <code>{{ revealedPasswords[a.id] }}</code>
+              <button @click="copyToClipboard(revealedPasswords[a.id])" class="btn-sm">Copy</button>
+            </div>
+
+            <!-- Account Edit Form (keep your existing edit form here) -->
+            <!-- ... -->
 
             <button @click="handleDeleteAccount(selectedService.id, a.id)" class="danger sm">
               Delete Account
@@ -386,5 +402,22 @@ li.active {
   cursor: pointer;
   border-radius: 4px;
   border: 1px solid #ccc;
+}
+.account-actions {
+  display: flex;
+  gap: 0.5rem;
+}
+.revealed-pw {
+  margin: 0.5rem 0;
+  padding: 0.5rem;
+  background: #e0e0e0;
+  border-radius: 4px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  word-break: break-all;
+}
+code {
+  font-family: monospace;
 }
 </style>

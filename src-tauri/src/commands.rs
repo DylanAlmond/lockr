@@ -3,7 +3,8 @@ use std::sync::Mutex;
 use tauri::State;
 use uuid::Uuid;
 
-use crate::{vault_manager::VaultManager, Vault};
+use crate::vault_manager::VaultManager;
+use crate::{IntoSafe, SafeAccount, SafeService, SafeVault};
 
 type ManagerState<'a> = State<'a, Mutex<VaultManager>>;
 
@@ -12,12 +13,14 @@ pub fn create_vault(
     state: ManagerState,
     name: String,
     master_password: String,
-) -> Result<Vault, String> {
+) -> Result<SafeVault, String> {
     let mut manager = state.lock().map_err(|e| e.to_string())?;
 
-    manager
+    let vault = manager
         .create_vault(name, master_password)
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+
+    Ok(vault.into_safe())
 }
 
 #[tauri::command]
@@ -31,15 +34,17 @@ pub fn unlock_vault(
     state: ManagerState,
     vault_id: String,
     master_password: String,
-) -> Result<Vault, String> {
+) -> Result<SafeVault, String> {
     let mut manager = state.lock().map_err(|e| e.to_string())?;
 
     // Vue sends a string but Rust needs a Uuid
     let id = Uuid::parse_str(&vault_id).map_err(|e| e.to_string())?;
 
-    manager
+    let vault = manager
         .unlock_vault(id, master_password)
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+
+    Ok(vault.into_safe())
 }
 
 #[tauri::command]
@@ -58,9 +63,11 @@ pub fn lock_vault(state: ManagerState) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn add_service(state: ManagerState, name: String) -> Result<crate::models::Service, String> {
+pub fn add_service(state: ManagerState, name: String) -> Result<SafeService, String> {
     let mut manager = state.lock().map_err(|e| e.to_string())?;
-    manager.add_service(name).map_err(|e| e.to_string())
+    let service = manager.add_service(name).map_err(|e| e.to_string())?;
+
+    Ok(service.into_safe())
 }
 
 #[tauri::command]
@@ -91,12 +98,14 @@ pub fn add_account(
     username: String,
     email: Option<String>,
     password: String,
-) -> Result<crate::models::Account, String> {
+) -> Result<SafeAccount, String> {
     let mut manager = state.lock().map_err(|e| e.to_string())?;
     let id = Uuid::parse_str(&service_id).map_err(|e| e.to_string())?;
-    manager
+    let account = manager
         .add_account(id, display_name, username, email, password)
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+
+    Ok(account.into_safe())
 }
 
 #[tauri::command]
@@ -108,15 +117,17 @@ pub fn update_account(
     username: Option<String>,
     email: Option<String>,
     password: Option<String>,
-) -> Result<crate::models::Account, String> {
+) -> Result<SafeAccount, String> {
     let mut manager = state.lock().map_err(|e| e.to_string())?;
 
     let sid = Uuid::parse_str(&service_id).map_err(|e| e.to_string())?;
     let aid = Uuid::parse_str(&account_id).map_err(|e| e.to_string())?;
 
-    manager
+    let account = manager
         .update_account(sid, aid, display_name, username, email, password)
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+
+    Ok(account.into_safe())
 }
 
 #[tauri::command]
@@ -131,4 +142,18 @@ pub fn delete_account(
     let aid = Uuid::parse_str(&account_id).map_err(|e| e.to_string())?;
 
     manager.delete_account(sid, aid).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn get_secret(
+    state: ManagerState,
+    service_id: String,
+    account_id: String,
+) -> Result<String, String> {
+    let manager = state.lock().map_err(|e| e.to_string())?;
+
+    let sid = Uuid::parse_str(&service_id).map_err(|e| e.to_string())?;
+    let aid = Uuid::parse_str(&account_id).map_err(|e| e.to_string())?;
+
+    manager.get_secret(sid, aid).map_err(|e| e.to_string())
 }

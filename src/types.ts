@@ -17,7 +17,6 @@ export interface Account {
   email: string | null;
   // favourite: boolean;
   // tags: string[];
-  secret: AccountSecret;
   created_at: string;
   updated_at: string;
 }

@@ -181,6 +181,15 @@ export function useVault() {
     }
   }
 
+  async function getSecret(serviceId: string, accountId: string): Promise<string | null> {
+    try {
+      return await invoke<string>('get_secret', { serviceId, accountId });
+    } catch (e) {
+      error.value = String(e);
+      return null;
+    }
+  }
+
   return {
     currentVault,
     isLoading,
@@ -195,6 +204,7 @@ export function useVault() {
     lockVault,
     updateAccount,
     updateServiceName,
-    updateVaultName
+    updateVaultName,
+    getSecret
   };
 }
