@@ -43,6 +43,14 @@ pub fn unlock_vault(
 }
 
 #[tauri::command]
+pub fn update_vault_name(state: ManagerState, new_name: String) -> Result<(), String> {
+    let mut manager = state.lock().map_err(|e| e.to_string())?;
+    manager
+        .update_vault_name(new_name)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 pub fn lock_vault(state: ManagerState) -> Result<(), String> {
     let mut manager = state.lock().map_err(|e| e.to_string())?;
     manager.lock_vault();
@@ -56,6 +64,19 @@ pub fn add_service(state: ManagerState, name: String) -> Result<crate::models::S
 }
 
 #[tauri::command]
+pub fn update_service_name(
+    state: ManagerState,
+    service_id: String,
+    new_name: String,
+) -> Result<(), String> {
+    let mut manager = state.lock().map_err(|e| e.to_string())?;
+    let id = uuid::Uuid::parse_str(&service_id).map_err(|e| e.to_string())?;
+    manager
+        .update_service_name(id, new_name)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 pub fn delete_service(state: ManagerState, service_id: String) -> Result<(), String> {
     let mut manager = state.lock().map_err(|e| e.to_string())?;
     let id = Uuid::parse_str(&service_id).map_err(|e| e.to_string())?;
@@ -66,12 +87,16 @@ pub fn delete_service(state: ManagerState, service_id: String) -> Result<(), Str
 pub fn add_account(
     state: ManagerState,
     service_id: String,
+    display_name: Option<String>,
     username: String,
+    email: Option<String>,
     password: String,
 ) -> Result<crate::models::Account, String> {
     let mut manager = state.lock().map_err(|e| e.to_string())?;
     let id = Uuid::parse_str(&service_id).map_err(|e| e.to_string())?;
-    manager.add_account(id, username, password).map_err(|e| e.to_string())
+    manager
+        .add_account(id, display_name, username, email, password)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -79,15 +104,19 @@ pub fn update_account(
     state: ManagerState,
     service_id: String,
     account_id: String,
-    username: Option<String>, // Option<String> in Rust becomes string | null in TS
+    display_name: Option<String>,
+    username: Option<String>,
+    email: Option<String>,
     password: Option<String>,
 ) -> Result<crate::models::Account, String> {
     let mut manager = state.lock().map_err(|e| e.to_string())?;
-    
+
     let sid = Uuid::parse_str(&service_id).map_err(|e| e.to_string())?;
     let aid = Uuid::parse_str(&account_id).map_err(|e| e.to_string())?;
-    
-    manager.update_account(sid, aid, username, password).map_err(|e| e.to_string())
+
+    manager
+        .update_account(sid, aid, display_name, username, email, password)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -97,9 +126,9 @@ pub fn delete_account(
     account_id: String,
 ) -> Result<(), String> {
     let mut manager = state.lock().map_err(|e| e.to_string())?;
-    
+
     let sid = Uuid::parse_str(&service_id).map_err(|e| e.to_string())?;
     let aid = Uuid::parse_str(&account_id).map_err(|e| e.to_string())?;
-    
+
     manager.delete_account(sid, aid).map_err(|e| e.to_string())
 }

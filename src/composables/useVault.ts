@@ -59,6 +59,24 @@ export function useVault() {
     }
   }
 
+  async function updateVaultName(newName: string) {
+    try {
+      await invoke('update_vault_name', { newName });
+      if (currentVault.value) currentVault.value.name = newName;
+    } catch (e) {
+      error.value = String(e);
+    }
+  }
+
+  async function lockVault() {
+    try {
+      await invoke('lock_vault');
+      currentVault.value = null; // Clear frontend state
+    } catch (e) {
+      error.value = String(e);
+    }
+  }
+
   async function addService(name: string) {
     try {
       const newService = await invoke<Service>('add_service', { name });
@@ -68,6 +86,16 @@ export function useVault() {
     } catch (e) {
       error.value = String(e);
       return null;
+    }
+  }
+
+  async function updateServiceName(serviceId: string, newName: string) {
+    try {
+      await invoke('update_service_name', { serviceId, newName });
+      const service = currentVault.value?.services.find((s) => s.id === serviceId);
+      if (service) service.name = newName;
+    } catch (e) {
+      error.value = String(e);
     }
   }
 
@@ -83,13 +111,57 @@ export function useVault() {
     }
   }
 
-  async function addAccount(serviceId: string, username: string, password: string) {
+  async function addAccount(
+    serviceId: string,
+    username: string,
+    password: string,
+    displayName?: string | null,
+    email?: string | null
+  ) {
     try {
-      const newAccount = await invoke<Account>('add_account', { serviceId, username, password });
-      // Find the service and push the account
+      const newAccount = await invoke<Account>('add_account', {
+        serviceId,
+        displayName: displayName || null,
+        username,
+        email: email || null,
+        password
+      });
       const service = currentVault.value?.services.find((s) => s.id === serviceId);
       service?.accounts.push(newAccount);
       return newAccount;
+    } catch (e) {
+      error.value = String(e);
+      return null;
+    }
+  }
+
+  async function updateAccount(
+    serviceId: string,
+    accountId: string,
+    data: {
+      displayName?: string | null;
+      username?: string;
+      email?: string | null;
+      password?: string;
+    }
+  ) {
+    try {
+      const updated = await invoke<Account>('update_account', {
+        serviceId,
+        accountId,
+        displayName: data.displayName ?? undefined, // undefined means "don't send to Rust"
+        username: data.username ?? undefined,
+        email: data.email ?? undefined,
+        password: data.password ?? undefined
+      });
+
+      // Update local state
+      const service = currentVault.value?.services.find((s) => s.id === serviceId);
+      const accountIndex = service?.accounts.findIndex((a) => a.id === accountId) ?? -1;
+      if (service && accountIndex >= 0) {
+        service.accounts[accountIndex] = updated;
+      }
+      return updated;
     } catch (e) {
       error.value = String(e);
       return null;
@@ -109,15 +181,6 @@ export function useVault() {
     }
   }
 
-  async function lockVault() {
-    try {
-      await invoke('lock_vault');
-      currentVault.value = null; // Clear frontend state
-    } catch (e) {
-      error.value = String(e);
-    }
-  }
-
   return {
     currentVault,
     isLoading,
@@ -129,6 +192,9 @@ export function useVault() {
     deleteService,
     addAccount,
     deleteAccount,
-    lockVault
+    lockVault,
+    updateAccount,
+    updateServiceName,
+    updateVaultName
   };
 }

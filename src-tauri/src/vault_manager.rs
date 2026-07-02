@@ -6,7 +6,7 @@ use zeroize::Zeroize;
 
 use crate::{
     crypto::{decrypt, encrypt},
-    AccountId, Service, ServiceId, Vault, VaultError, VaultId,
+    Account, AccountId, AccountSecret, Service, ServiceId, Vault, VaultError, VaultId,
 };
 
 pub struct VaultManager {
@@ -159,6 +159,13 @@ impl VaultManager {
         Ok(())
     }
 
+    // Update the currently active vaults name
+    pub fn update_vault_name(&mut self, new_name: String) -> Result<(), VaultError> {
+        let vault = self.get_vault_mut()?;
+        vault.name = new_name;
+        self.save_vault()
+    }
+
     /// Create a new service
     pub fn add_service(&mut self, name: String) -> Result<Service, VaultError> {
         let vault = self.get_vault_mut()?;
@@ -173,6 +180,22 @@ impl VaultManager {
 
         self.save_vault()?;
         Ok(service)
+    }
+
+    // Update a given services name
+    pub fn update_service_name(
+        &mut self,
+        service_id: uuid::Uuid,
+        new_name: String,
+    ) -> Result<(), VaultError> {
+        let vault = self.get_vault_mut()?;
+
+        let service = vault
+            .find_service_mut(service_id)
+            .ok_or(VaultError::ServiceNotFound(service_id.to_string()))?;
+
+        service.name = new_name;
+        self.save_vault()
     }
 
     /// Delete an existing service
@@ -194,9 +217,11 @@ impl VaultManager {
     pub fn add_account(
         &mut self,
         service_id: ServiceId,
+        display_name: Option<String>,
         username: String,
+        email: Option<String>,
         password: String,
-    ) -> Result<crate::models::Account, VaultError> {
+    ) -> Result<Account, VaultError> {
         let vault = self.get_vault_mut()?;
 
         let service = vault
@@ -204,12 +229,12 @@ impl VaultManager {
             .ok_or(VaultError::ServiceNotFound(service_id.to_string()))?;
 
         let now = Utc::now();
-        let account = crate::models::Account {
+        let account = Account {
             id: Uuid::new_v4(),
-            display_name: None,
+            display_name: display_name.filter(|s| !s.is_empty()),
             username,
-            email: None,
-            secret: crate::models::AccountSecret {
+            email: email.filter(|s| !s.is_empty()),
+            secret: AccountSecret {
                 id: Uuid::new_v4(),
                 password,
             },
@@ -218,7 +243,6 @@ impl VaultManager {
         };
 
         service.accounts.push(account.clone());
-
         self.save_vault()?;
 
         Ok(account)
@@ -229,9 +253,11 @@ impl VaultManager {
         &mut self,
         service_id: ServiceId,
         account_id: AccountId,
+        display_name: Option<String>,
         username: Option<String>,
+        email: Option<String>,
         password: Option<String>,
-    ) -> Result<crate::models::Account, VaultError> {
+    ) -> Result<Account, VaultError> {
         let vault = self.get_vault_mut()?;
 
         let service = vault
@@ -250,6 +276,9 @@ impl VaultManager {
         if let Some(new_password) = password {
             account.secret.password = new_password;
         }
+
+        account.display_name = display_name.filter(|s| !s.is_empty());
+        account.email = email.filter(|s| !s.is_empty());
 
         account.updated_at = Utc::now();
 
@@ -353,10 +382,18 @@ mod tests {
 
         let service = manager.add_service("GitHub".to_string()).unwrap();
         let account = manager
-            .add_account(service.id, "octocat".to_string(), "secret123".to_string())
+            .add_account(
+                service.id,
+                Some("octocat pass".to_string()),
+                "octocat".to_string(),
+                None,
+                "secret123".to_string(),
+            )
             .unwrap();
 
+        assert_eq!(account.display_name, Some("octocat pass".to_string()));
         assert_eq!(account.username, "octocat");
+        assert_eq!(account.email, None);
         assert_eq!(account.secret.password, "secret123");
 
         // Verify it persisted
@@ -375,7 +412,8 @@ mod tests {
         manager.create_vault("Test".to_string(), master_pw).unwrap();
 
         let fake_id = uuid::Uuid::new_v4();
-        let result = manager.add_account(fake_id, "user".to_string(), "pass".to_string());
+        let result =
+            manager.add_account(fake_id, None, "user".to_string(), None, "pass".to_string());
 
         assert!(result.is_err());
         match result {
@@ -395,15 +433,30 @@ mod tests {
         manager.create_vault("Test".to_string(), master_pw).unwrap();
         let service = manager.add_service("GitHub".to_string()).unwrap();
         let account = manager
-            .add_account(service.id, "octocat".to_string(), "old_pass".to_string())
+            .add_account(
+                service.id,
+                Some("octocat pass".to_string()),
+                "octocat".to_string(),
+                None,
+                "secret123".to_string(),
+            )
             .unwrap();
 
         // Update only password
         let updated = manager
-            .update_account(service.id, account.id, None, Some("new_pass".to_string()))
+            .update_account(
+                service.id,
+                account.id,
+                None,
+                None,
+                Some("hello@example.com".to_string()),
+                Some("new_pass".to_string()),
+            )
             .unwrap();
 
+        assert_eq!(updated.display_name, None);
         assert_eq!(updated.username, "octocat"); // unchanged
+        assert_eq!(updated.email, Some("hello@example.com".to_string()));
         assert_eq!(updated.secret.password, "new_pass"); // changed
 
         std::fs::remove_dir_all(temp_dir).ok();
@@ -418,7 +471,13 @@ mod tests {
         manager.create_vault("Test".to_string(), master_pw).unwrap();
         let service = manager.add_service("GitHub".to_string()).unwrap();
         let account = manager
-            .add_account(service.id, "octocat".to_string(), "pass".to_string())
+            .add_account(
+                service.id,
+                None,
+                "octocat".to_string(),
+                None,
+                "pass".to_string(),
+            )
             .unwrap();
 
         manager.delete_account(service.id, account.id).unwrap();
