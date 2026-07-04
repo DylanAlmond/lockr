@@ -51,7 +51,7 @@ This project is built around a strict separation of concerns to minimize the att
 
 ```bash
 # Clone the repository
-git clone https://github.com/DylanAlmond
+git clone https://github.com/DylanAlmond/lockr
 cd lockr
 
 # Install frontend dependencies
