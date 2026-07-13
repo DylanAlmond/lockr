@@ -40,6 +40,18 @@ __metadata:
   languageName: node
   linkType: hard
 
+"@calcom/cal-sans-ui@npm:^1.3.0":
+  version: 1.3.0
+  resolution: "@calcom/cal-sans-ui@npm:1.3.0"
+  peerDependencies:
+    next: ">=13.2.0"
+  peerDependenciesMeta:
+    next:
+      optional: true
+  checksum: 10c0/6c417fd8fb5acd97d31d5d2ec316218fe1dccc5dd67fafb53821a42b0a557d5d512e8730508145f8c18f5edbaa75cfef7ad111a50fe61775be96dd243e34cee8
+  languageName: node
+  linkType: hard
+
 "@esbuild/aix-ppc64@npm:0.25.12":
   version: 0.25.12
   resolution: "@esbuild/aix-ppc64@npm:0.25.12"
@@ -235,6 +247,15 @@ __metadata:
   version: 1.5.5
   resolution: "@jridgewell/sourcemap-codec@npm:1.5.5"
   checksum: 10c0/f9e538f302b63c0ebc06eecb1dd9918dd4289ed36147a0ddce35d6ea4d7ebbda243cda7b2213b6a5e1d8087a298d5cf630fb2bd39329cdecb82017023f6081a0
+  languageName: node
+  linkType: hard
+
+"@lucide/vue@npm:^1.24.0":
+  version: 1.24.0
+  resolution: "@lucide/vue@npm:1.24.0"
+  peerDependencies:
+    vue: ">=3.0.1"
+  checksum: 10c0/cd4430751cfaf48edb61853ed8f4303de743f4e1752c281babd13e44c86ecb28b1b30da0ae7c14f7e370b05511fc3992e4dd7a168551bbe670834b7a52179f21
   languageName: node
   linkType: hard
 
@@ -951,6 +972,8 @@ __metadata:
   version: 0.0.0-use.local
   resolution: "lockr@workspace:."
   dependencies:
+    "@calcom/cal-sans-ui": "npm:^1.3.0"
+    "@lucide/vue": "npm:^1.24.0"
     "@tauri-apps/api": "npm:^2"
     "@tauri-apps/cli": "npm:^2"
     "@tauri-apps/plugin-opener": "npm:^2"

@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { ref } from 'vue';
 import { useVault } from '../composables/useVault';
+import Button from './ui/Button.vue';
+import { RefreshCcw } from '@lucide/vue';
 
 const { isLoading, error, listVaultIds, unlockVault } = useVault();
 
@@ -29,7 +31,15 @@ async function handleUnlock() {
 
     <!-- Show list of vaults -->
     <div v-if="!selectedVaultId">
-      <button @click="loadIds" :disabled="isLoading">Refresh Vault List</button>
+      <Button
+        @click="loadIds"
+        variant="outline"
+        size="small"
+        :icon-component="RefreshCcw"
+        :disabled="isLoading"
+      >
+        Refresh Vault List
+      </Button>
 
       <ul v-if="vaultIds.length > 0" class="vault-list">
         <li v-for="id in vaultIds" :key="id" @click="selectedVaultId = id" class="vault-item">
@@ -51,10 +61,10 @@ async function handleUnlock() {
       </div>
 
       <div class="button-group">
-        <button type="button" @click="selectedVaultId = null">Back</button>
-        <button type="submit" :disabled="isLoading">
+        <Button type="button" @click="selectedVaultId = null">Back</Button>
+        <Button type="submit" :disabled="isLoading">
           {{ isLoading ? 'Decrypting...' : 'Unlock' }}
-        </button>
+        </Button>
       </div>
     </form>
 

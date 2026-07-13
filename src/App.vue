@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import CreateVault from './components/CreateVault.vue';
+import UiTest from './components/ui/UiTest.vue';
 import UnlockVault from './components/UnlockVault.vue';
 import VaultView from './components/VaultView.vue';
 import { useVault } from './composables/useVault.ts';
@@ -16,6 +17,8 @@ const { currentVault } = useVault();
     <CreateVault />
     <UnlockVault />
   </div>
+
+  <UiTest />
 
   <!-- View result -->
   <div v-if="currentVault" style="margin: 2rem; padding: 1rem; background: #eee">

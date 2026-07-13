@@ -1,0 +1,38 @@
+@import '@calcom/cal-sans-ui/ui.css';
+@import '@calcom/cal-sans-ui/text.css';
+@import '@calcom/cal-sans-ui/geo.css';
+
+:root {
+  --color-bg: hsl(0 0 100%);
+  --color-bg-nav: hsl(0 0 98% / 0.9);
+  --color-border: hsl(0 0 90%);
+  --color-hover: hsl(0 0 94%);
+
+  --color-text: hsl(0 0 0%);
+  --color-text-muted: hsl(0 0 50%);
+  --color-text-secondary: hsl(0 0 20%);
+  --color-text-tertiary: hsl(0 0 60%);
+
+  --color-accent: hsl(256 100% 63%);
+  --color-accent-dark: hsl(256 50% 30%);
+  --color-accent-hover: hsl(256 80% 94%);
+  --color-accent-muted: hsl(256 50% 50%);
+
+  --color-green: hsl(131 50% 50%);
+
+  --font-ui: 'Cal Sans UI', ui-sans-serif, sans-serif;
+  --font-geo: 'Cal Sans UI Geo', ui-sans-serif, sans-serif;
+  --font-text: 'Cal Sans UI Text', ui-sans-serif, sans-serif;
+
+  --shadow-sm: 0px 2px 4px rgba(0, 0, 0, 0.05), inset 0px 2px 4px rgba(255, 255, 255, 0.3);
+  --inset-sm: inset 0px 2px 4px rgba(0, 0, 0, 0.15);
+}
+
+* {
+  font-family: var(--font-ui);
+}
+
+body {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}

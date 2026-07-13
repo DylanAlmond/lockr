@@ -1,6 +1,9 @@
 <script setup lang="ts">
 import { ref } from 'vue';
 import { useVault } from '../composables/useVault';
+import Button from './ui/Button.vue';
+import { Hash, KeyRound, Link2, Phone, Plus, Search } from '@lucide/vue';
+import Input from './ui/Input.vue';
 
 const { currentVault, isLoading, error, createVault } = useVault();
 
@@ -26,13 +29,19 @@ async function handleSubmit() {
 
     <form @submit.prevent="handleSubmit">
       <div>
-        <label for="name">Vault Name:</label>
-        <input id="name" v-model="name" type="text" placeholder="e.g., Personal Vaults" required />
+        <Input
+          :icon-component="Search"
+          id="name"
+          v-model="name"
+          type="text"
+          placeholder="e.g., Personal Vaults"
+          required
+        />
       </div>
 
       <div>
-        <label for="password">Master Password:</label>
-        <input
+        <Input
+          :icon-component="KeyRound"
           id="password"
           v-model="masterPassword"
           type="password"
@@ -41,9 +50,9 @@ async function handleSubmit() {
         />
       </div>
 
-      <button type="submit" :disabled="isLoading">
-        {{ isLoading ? 'Creating...' : 'Create Vault' }}
-      </button>
+      <Button variant="accent" :icon-component="Plus" type="submit" :disabled="isLoading">
+        {{ isLoading ? 'Creating...' : 'Create' }}
+      </Button>
     </form>
 
     <!-- Error display -->

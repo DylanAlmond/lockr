@@ -2,6 +2,7 @@
 import { ref, computed, nextTick } from 'vue';
 import { useVault } from '../composables/useVault';
 import { Account } from '../types';
+import Button from './ui/Button.vue';
 
 const {
   currentVault,
@@ -162,7 +163,7 @@ async function copyToClipboard(text: string) {
     <div class="header">
       <div v-if="!editingVaultName" class="vault-title">
         <h2 @dblclick="startEditVaultName">{{ currentVault.name }}</h2>
-        <button @click="startEditVaultName" class="btn-sm">Edit Name</button>
+        <Button @click="startEditVaultName" class="btn-sm">Edit Name</Button>
       </div>
       <div v-else class="vault-title">
         <input
@@ -173,7 +174,7 @@ async function copyToClipboard(text: string) {
           class="edit-input"
         />
       </div>
-      <button @click="lockVault" class="lock-btn">Lock Vault</button>
+      <Button @click="lockVault" class="lock-btn">Lock Vault</Button>
     </div>
 
     <div class="columns">
@@ -182,7 +183,7 @@ async function copyToClipboard(text: string) {
         <h3>Services</h3>
         <form @submit.prevent="handleAddService">
           <input v-model="newServiceName" placeholder="New service name..." required />
-          <button type="submit">Add</button>
+          <Button type="submit">Add</Button>
         </form>
         <ul>
           <li
@@ -195,8 +196,8 @@ async function copyToClipboard(text: string) {
             <div v-if="editingServiceId !== s.id" class="service-row">
               <span>{{ s.name }} ({{ s.accounts.length }})</span>
               <div>
-                <button @click.stop="startEditService(s.id, s.name)" class="btn-sm">Edit</button>
-                <button @click.stop="handleDeleteService(s.id)" class="danger btn-sm">X</button>
+                <Button @click.stop="startEditService(s.id, s.name)" class="btn-sm">Edit</Button>
+                <Button @click.stop="handleDeleteService(s.id)" class="danger btn-sm">X</Button>
               </div>
             </div>
             <div v-else @click.stop class="service-row">
@@ -221,7 +222,7 @@ async function copyToClipboard(text: string) {
           <input v-model="newUsername" placeholder="Username" required />
           <input v-model="newEmail" placeholder="Email (optional)" type="email" />
           <input v-model="newPassword" type="password" placeholder="Password" required />
-          <button type="submit">Add Account</button>
+          <Button type="submit">Add Account</Button>
         </form>
 
         <div v-if="selectedService" class="accounts-list">
@@ -235,10 +236,10 @@ async function copyToClipboard(text: string) {
                 <div v-if="a.email" class="email">{{ a.email }}</div>
               </div>
               <div class="account-actions">
-                <button @click="revealPassword(selectedService.id, a.id)" class="btn-sm">
+                <Button @click="revealPassword(selectedService.id, a.id)" class="btn-sm">
                   {{ revealedPasswords[a.id] ? 'Hide' : 'Reveal' }}
-                </button>
-                <button @click="startEditAccount(a)" class="btn-sm">Edit</button>
+                </Button>
+                <Button @click="startEditAccount(a)" class="btn-sm">Edit</Button>
               </div>
             </div>
 
@@ -251,9 +252,9 @@ async function copyToClipboard(text: string) {
             <!-- Account Edit Form (keep your existing edit form here) -->
             <!-- ... -->
 
-            <button @click="handleDeleteAccount(selectedService.id, a.id)" class="danger sm">
+            <Button @click="handleDeleteAccount(selectedService.id, a.id)" class="danger sm">
               Delete Account
-            </button>
+            </Button>
           </div>
         </div>
       </div>
