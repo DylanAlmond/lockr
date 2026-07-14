@@ -30,9 +30,19 @@
 
 * {
   font-family: var(--font-ui);
+  margin: 0;
+  padding: 0;
 }
 
 body {
+  width: 100%;
+  height: 100dvh;
+
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+}
+
+#app {
+  width: 100%;
+  height: 100%;
 }

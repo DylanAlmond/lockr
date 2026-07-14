@@ -11,6 +11,7 @@ interface Props {
   iconComponent?: Component;
   type?: 'button' | 'submit' | 'reset';
   disabled?: boolean;
+  iconSize?: number;
 }
 
 withDefaults(defineProps<Props>(), {
@@ -58,6 +59,7 @@ withDefaults(defineProps<Props>(), {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  flex-shrink: 0;
   gap: 0.5rem;
 
   width: fit-content;

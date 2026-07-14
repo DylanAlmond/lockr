@@ -14,7 +14,8 @@
       {
         "title": "lockr",
         "width": 1440,
-        "height": 980
+        "height": 980,
+        "decorations": false
       }
     ],
     "security": {
