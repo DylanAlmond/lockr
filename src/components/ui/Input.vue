@@ -133,6 +133,11 @@ function togglePassword() {
   flex: 1;
   min-width: 0;
 
+  padding: 0;
+  padding-block: 0;
+  padding-inline: 0;
+  margin: 0;
+
   appearance: none;
   border: none;
   outline: none;
