@@ -53,6 +53,7 @@ pub fn run() {
             commands::unlock_vault,
             commands::lock_vault,
             commands::update_vault,
+            commands::delete_vault,
             // Accounts
             commands::add_account,
             commands::get_account,

@@ -221,6 +221,19 @@ impl VaultManager {
         self.save_vault(vault_id)
     }
 
+    // Delete a given vault
+    pub fn delete_vault(&mut self, vault_id: VaultId) -> Result<(), VaultError> {
+        if self.is_vault_unlocked(vault_id) {
+            self.lock_vault(Some(vault_id));
+        }
+
+        let path = self.vault_path(vault_id);
+
+        std::fs::remove_file(path).map_err(VaultError::Io)?;
+
+        Ok(())
+    }
+
     /// Create a new service account
     pub fn add_account(
         &mut self,

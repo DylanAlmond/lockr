@@ -1,5 +1,5 @@
 import { ref } from 'vue';
-import { Account, Service, Vault } from '../types';
+import { Account, AccountFilter, Vault } from '../types';
 import { invoke } from '@tauri-apps/api/core';
 
 const currentVault = ref<Vault | null>(null);
@@ -7,6 +7,42 @@ const isLoading = ref(false);
 const error = ref<string | null>(null);
 
 export function useVault() {
+  async function isVaultUnlocked(vaultId: string): Promise<boolean> {
+    try {
+      return await invoke<boolean>('is_vault_unlocked', { vaultId });
+    } catch (e) {
+      error.value = String(e);
+      return false;
+    }
+  }
+
+  async function isAnyUnlocked(): Promise<boolean> {
+    try {
+      return await invoke<boolean>('is_any_unlocked');
+    } catch (e) {
+      error.value = String(e);
+      return false;
+    }
+  }
+
+  async function listVaultIds(): Promise<string[]> {
+    try {
+      return await invoke<string[]>('list_vault_ids');
+    } catch (e) {
+      error.value = String(e);
+      return [];
+    }
+  }
+
+  async function getUnlockedVaults(): Promise<Vault[]> {
+    try {
+      return await invoke<Vault[]>('get_unlocked_vaults');
+    } catch (e) {
+      error.value = String(e);
+      return [];
+    }
+  }
+
   async function createVault(name: string, masterPassword: string): Promise<Vault | null> {
     isLoading.value = true;
     error.value = null;
@@ -19,21 +55,6 @@ export function useVault() {
     } catch (e) {
       error.value = String(e);
       return null;
-    } finally {
-      isLoading.value = false;
-    }
-  }
-
-  async function listVaultIds(): Promise<string[]> {
-    isLoading.value = true;
-    error.value = null;
-
-    try {
-      // invoke returns a promise. We specify it returns an array of strings
-      return await invoke<string[]>('list_vault_ids');
-    } catch (e) {
-      error.value = String(e);
-      return [];
     } finally {
       isLoading.value = false;
     }
@@ -59,15 +80,6 @@ export function useVault() {
     }
   }
 
-  async function updateVaultName(newName: string) {
-    try {
-      await invoke('update_vault_name', { newName });
-      if (currentVault.value) currentVault.value.name = newName;
-    } catch (e) {
-      error.value = String(e);
-    }
-  }
-
   async function lockVault() {
     try {
       await invoke('lock_vault');
@@ -77,107 +89,113 @@ export function useVault() {
     }
   }
 
-  async function addService(name: string) {
+  async function updateVault(
+    vaultId: string,
+    data: { name?: string | null; color?: string | null }
+  ): Promise<boolean> {
     try {
-      const newService = await invoke<Service>('add_service', { name });
-      // Find the service in our local state and add it so Vue updates instantly
-      currentVault.value?.services.push(newService);
-      return newService;
+      await invoke('update_vault', {
+        vaultId,
+        name: data.name ?? undefined,
+        color: data.color ?? undefined
+      });
+      return true;
     } catch (e) {
       error.value = String(e);
-      return null;
+      return false;
     }
   }
 
-  async function updateServiceName(serviceId: string, newName: string) {
+  async function deleteVault(vaultId: string): Promise<boolean> {
     try {
-      await invoke('update_service_name', { serviceId, newName });
-      const service = currentVault.value?.services.find((s) => s.id === serviceId);
-      if (service) service.name = newName;
+      await invoke('delete_vault', { vaultId });
+      return true;
     } catch (e) {
       error.value = String(e);
-    }
-  }
-
-  async function deleteService(serviceId: string) {
-    try {
-      await invoke('delete_service', { serviceId });
-      // Remove from local state
-      if (currentVault.value) {
-        currentVault.value.services = currentVault.value.services.filter((s) => s.id !== serviceId);
-      }
-    } catch (e) {
-      error.value = String(e);
+      return false;
     }
   }
 
   async function addAccount(
-    serviceId: string,
+    vaultId: string,
     username: string,
     password: string,
     displayName?: string | null,
     email?: string | null
-  ) {
+  ): Promise<Account | null> {
     try {
-      const newAccount = await invoke<Account>('add_account', {
-        serviceId,
+      return await invoke<Account>('add_account', {
+        vaultId,
         displayName: displayName || null,
         username,
         email: email || null,
         password
       });
-      const service = currentVault.value?.services.find((s) => s.id === serviceId);
-      service?.accounts.push(newAccount);
-      return newAccount;
     } catch (e) {
       error.value = String(e);
       return null;
+    }
+  }
+
+  async function getAccount(vaultId: string, accountId: string): Promise<Account | null> {
+    try {
+      return await invoke<Account>('get_account', { vaultId, accountId });
+    } catch (e) {
+      error.value = String(e);
+      return null;
+    }
+  }
+
+  async function getAllAccounts(filter?: AccountFilter): Promise<Account[]> {
+    try {
+      // If no filter is provided, pass an empty object so Rust uses defaults
+      return await invoke<Account[]>('get_all_accounts', { filter: filter || {} });
+    } catch (e) {
+      error.value = String(e);
+      return [];
     }
   }
 
   async function updateAccount(
-    serviceId: string,
+    vaultId: string,
     accountId: string,
     data: {
       displayName?: string | null;
-      username?: string;
+      username?: string | null;
       email?: string | null;
-      password?: string;
+      password?: string | null;
+      favourite?: boolean | null;
+      tags?: string[] | null;
+      icon?: string | null;
+      color?: string | null;
     }
-  ) {
+  ): Promise<Account | null> {
     try {
-      const updated = await invoke<Account>('update_account', {
-        serviceId,
+      return await invoke<Account>('update_account', {
+        vaultId,
         accountId,
-        displayName: data.displayName ?? undefined, // undefined means "don't send to Rust"
+        displayName: data.displayName ?? undefined,
         username: data.username ?? undefined,
         email: data.email ?? undefined,
-        password: data.password ?? undefined
+        password: data.password ?? undefined,
+        favourite: data.favourite ?? undefined,
+        tags: data.tags ?? undefined,
+        icon: data.icon ?? undefined,
+        color: data.color ?? undefined
       });
-
-      // Update local state
-      const service = currentVault.value?.services.find((s) => s.id === serviceId);
-      const accountIndex = service?.accounts.findIndex((a) => a.id === accountId) ?? -1;
-      if (service && accountIndex >= 0) {
-        service.accounts[accountIndex] = updated;
-      }
-      return updated;
     } catch (e) {
       error.value = String(e);
       return null;
     }
   }
 
-  async function deleteAccount(serviceId: string, accountId: string) {
+  async function deleteAccount(vaultId: string, accountId: string): Promise<boolean> {
     try {
-      await invoke('delete_account', { serviceId, accountId });
-      // Remove from local state
-      const service = currentVault.value?.services.find((s) => s.id === serviceId);
-      if (service) {
-        service.accounts = service.accounts.filter((a) => a.id !== accountId);
-      }
+      await invoke('delete_account', { vaultId, accountId });
+      return true;
     } catch (e) {
       error.value = String(e);
+      return false;
     }
   }
 
@@ -191,20 +209,28 @@ export function useVault() {
   }
 
   return {
-    currentVault,
     isLoading,
     error,
-    createVault,
+
+    // Vault Meta
+    isVaultUnlocked,
+    isAnyUnlocked,
     listVaultIds,
+    getUnlockedVaults,
+
+    // Vault Mutations
+    createVault,
     unlockVault,
-    addService,
-    deleteService,
-    addAccount,
-    deleteAccount,
     lockVault,
+    updateVault,
+    deleteVault,
+
+    // Accounts
+    getAccount,
+    getAllAccounts,
+    addAccount,
     updateAccount,
-    updateServiceName,
-    updateVaultName,
+    deleteAccount,
     getSecret
   };
 }

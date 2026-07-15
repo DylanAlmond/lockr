@@ -124,16 +124,26 @@ pub fn lock_vault(state: AppState, vault_id: Option<String>) -> Result<(), Strin
 pub fn update_vault(
     state: AppState,
     vault_id: String,
-
     name: Option<String>,
     color: Option<String>,
 ) -> Result<(), String> {
     let mut state = state.lock().map_err(|e| e.to_string())?;
-    let id = uuid::Uuid::parse_str(&vault_id).map_err(|e| e.to_string())?;
+    let id: Uuid = uuid::Uuid::parse_str(&vault_id).map_err(|e| e.to_string())?;
 
     state
         .vault_manager
         .update_vault(id, name, color)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn delete_vault(state: AppState, vault_id: String) -> Result<(), String> {
+    let mut state = state.lock().map_err(|e| e.to_string())?;
+    let id: Uuid = uuid::Uuid::parse_str(&vault_id).map_err(|e| e.to_string())?;
+
+    state
+        .vault_manager
+        .delete_vault(id)
         .map_err(|e| e.to_string())
 }
 
