@@ -5,9 +5,6 @@ pub enum VaultError {
     #[error("Vault not found: {0}")]
     NotFound(String),
 
-    #[error("Service not found: {0}")]
-    ServiceNotFound(String),
-
     #[error("Account not found: {0}")]
     AccountNotFound(String),
 
