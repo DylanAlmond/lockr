@@ -48,6 +48,10 @@ This project is built around a strict separation of concerns to minimize the att
 2. **On-Demand Decryption**: Passwords are only fetched individually via a dedicated `get_secret` command when the user explicitly requests to view or copy them.
 3. **Multi-Vault Memory Management**: Unlocked vaults are held in a secure `HashMap` in RAM. When a specific vault is locked (or the app closes), the `Drop` trait is triggered, automatically cascading through that specific vault's structure and overwriting plain-text passwords with zeros before the memory is freed, without affecting other open vaults.
 
+<p align="center">
+  <img src="architechture-overview.png" alt="Architechture Overview" width="1200">
+</p>
+
 ## Installation
 
 ### Prerequisites
@@ -95,7 +99,7 @@ _The compiled installer/binary will be located in `src-tauri/target/release/bund
     ├── src/
     │   ├── main.rs           # Backend entry
     │   ├── lib.rs            # Tauri setup & command registration
-    │   ├── commands.rs       # Tauri IPC bridge (Multi-vault state handling)
+    │   ├── commands.rs       # Tauri IPC bridge
     │   ├── models.rs         # Core data structures, Safe View Models, & Filter DTOs
     │   ├── vault_manager.rs  # Multi-vault state, business logic, & aggregation engine
     │   ├── user_manager.rs   # Unencrypted user profile persistence
