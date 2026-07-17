@@ -33,6 +33,8 @@ pub fn run() {
             let app_state = ManagerState {
                 vault_manager,
                 user_manager,
+                master_password: None,
+                secret_key: None,
             };
 
             app.manage(Mutex::new(app_state));
@@ -42,11 +44,13 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             // User
+            commands::register_user,
+            commands::login_user,
             commands::get_user,
             commands::update_profile,
+            commands::logout,
+            commands::delete_user,
             // Vaults
-            commands::is_vault_unlocked,
-            commands::is_any_unlocked,
             commands::list_vault_ids,
             commands::get_unlocked_vaults,
             commands::create_vault,

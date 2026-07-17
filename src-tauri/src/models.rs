@@ -15,8 +15,11 @@ pub struct User {
     pub color: String,
     pub icon: String,
 
-    /// Which vault did the user have open last?
-    pub active_vault_id: Option<VaultId>,
+    /// Secret Key encrypted using the user's Master Password
+    pub encrypted_secret_key: String,
+
+    /// IDs of all vaults this user owns
+    pub vault_ids: Vec<VaultId>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

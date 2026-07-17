@@ -2,27 +2,16 @@ import { ref } from 'vue';
 import { Account, AccountFilter, Vault } from '../types';
 import { invoke } from '@tauri-apps/api/core';
 
-const currentVault = ref<Vault | null>(null);
 const isLoading = ref(false);
 const error = ref<string | null>(null);
 
-export function useVault() {
-  async function isVaultUnlocked(vaultId: string): Promise<boolean> {
-    try {
-      return await invoke<boolean>('is_vault_unlocked', { vaultId });
-    } catch (e) {
-      error.value = String(e);
-      return false;
-    }
-  }
+// Holds the list of vaults currently unlocked in memory
+const unlockedVaults = ref<Vault[]>([]);
 
-  async function isAnyUnlocked(): Promise<boolean> {
-    try {
-      return await invoke<boolean>('is_any_unlocked');
-    } catch (e) {
-      error.value = String(e);
-      return false;
-    }
+export function useVault() {
+  // Helper to set vault state from outside (e.g., after login/register)
+  function setUnlockedVaults(vaults: Vault[]) {
+    unlockedVaults.value = vaults;
   }
 
   async function listVaultIds(): Promise<string[]> {
@@ -43,49 +32,22 @@ export function useVault() {
     }
   }
 
-  async function createVault(name: string, masterPassword: string): Promise<Vault | null> {
+  async function createVault(name: string): Promise<Vault | null> {
     isLoading.value = true;
     error.value = null;
 
     try {
-      const vault = await invoke<Vault>('create_vault', { name, masterPassword });
-
-      currentVault.value = vault;
+      const vault = await invoke<Vault>('create_vault', { name });
+      // Automatically add the new vault to local state so the UI updates instantly
+      if (vault && !unlockedVaults.value.find((v) => v.id === vault.id)) {
+        unlockedVaults.value.push(vault);
+      }
       return vault;
     } catch (e) {
       error.value = String(e);
       return null;
     } finally {
       isLoading.value = false;
-    }
-  }
-
-  async function unlockVault(vaultId: string, masterPassword: string): Promise<Vault | null> {
-    isLoading.value = true;
-    error.value = null;
-
-    try {
-      const vault = await invoke<Vault>('unlock_vault', {
-        vaultId,
-        masterPassword
-      });
-
-      currentVault.value = vault;
-      return vault;
-    } catch (e) {
-      error.value = String(e);
-      return null;
-    } finally {
-      isLoading.value = false;
-    }
-  }
-
-  async function lockVault() {
-    try {
-      await invoke('lock_vault');
-      currentVault.value = null; // Clear frontend state
-    } catch (e) {
-      error.value = String(e);
     }
   }
 
@@ -109,10 +71,30 @@ export function useVault() {
   async function deleteVault(vaultId: string): Promise<boolean> {
     try {
       await invoke('delete_vault', { vaultId });
+      // Remove from local state
+      unlockedVaults.value = unlockedVaults.value.filter((v) => v.id !== vaultId);
       return true;
     } catch (e) {
       error.value = String(e);
       return false;
+    }
+  }
+
+  async function getAccount(vaultId: string, accountId: string): Promise<Account | null> {
+    try {
+      return await invoke<Account>('get_account', { vaultId, accountId });
+    } catch (e) {
+      error.value = String(e);
+      return null;
+    }
+  }
+
+  async function getAllAccounts(filter?: AccountFilter): Promise<Account[]> {
+    try {
+      return await invoke<Account[]>('get_all_accounts', { filter: filter || {} });
+    } catch (e) {
+      error.value = String(e);
+      return [];
     }
   }
 
@@ -134,25 +116,6 @@ export function useVault() {
     } catch (e) {
       error.value = String(e);
       return null;
-    }
-  }
-
-  async function getAccount(vaultId: string, accountId: string): Promise<Account | null> {
-    try {
-      return await invoke<Account>('get_account', { vaultId, accountId });
-    } catch (e) {
-      error.value = String(e);
-      return null;
-    }
-  }
-
-  async function getAllAccounts(filter?: AccountFilter): Promise<Account[]> {
-    try {
-      // If no filter is provided, pass an empty object so Rust uses defaults
-      return await invoke<Account[]>('get_all_accounts', { filter: filter || {} });
-    } catch (e) {
-      error.value = String(e);
-      return [];
     }
   }
 
@@ -199,9 +162,9 @@ export function useVault() {
     }
   }
 
-  async function getSecret(serviceId: string, accountId: string): Promise<string | null> {
+  async function getSecret(vaultId: string, accountId: string): Promise<string | null> {
     try {
-      return await invoke<string>('get_secret', { serviceId, accountId });
+      return await invoke<string>('get_secret', { vaultId, accountId });
     } catch (e) {
       error.value = String(e);
       return null;
@@ -211,17 +174,15 @@ export function useVault() {
   return {
     isLoading,
     error,
+    unlockedVaults,
+    setUnlockedVaults,
 
     // Vault Meta
-    isVaultUnlocked,
-    isAnyUnlocked,
     listVaultIds,
     getUnlockedVaults,
 
     // Vault Mutations
     createVault,
-    unlockVault,
-    lockVault,
     updateVault,
     deleteVault,
 
