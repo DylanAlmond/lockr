@@ -1,24 +1,64 @@
 import { ref } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
-import type { User } from '../types';
+import type { User, Vault } from '../types';
 
 const user = ref<User | null>(null);
 const isLoading = ref(false);
 const error = ref<string | null>(null);
 
 export function useUser() {
-  async function fetchUser(): Promise<User | null> {
+  async function register(name: string, masterPassword: string): Promise<Vault[] | null> {
     isLoading.value = true;
     error.value = null;
 
+    try {
+      const vaults = await invoke<Vault[]>('register_user', { name, masterPassword });
+      // Backend handles the login, but we still need to grab the user profile data (name, color)
+      await fetchUser();
+      
+      return vaults;
+    } catch (e) {
+      error.value = String(e);
+      return null;
+    } finally {
+      isLoading.value = false;
+    }
+  }
+
+  async function login(masterPassword: string): Promise<Vault[] | null> {
+    isLoading.value = true;
+    error.value = null;
+
+    try {
+      const vaults = await invoke<Vault[]>('login_user', { masterPassword });
+      await fetchUser();
+      return vaults;
+    } catch (e) {
+      error.value = String(e);
+      return null;
+    } finally {
+      isLoading.value = false;
+    }
+  }
+
+  async function logout(): Promise<boolean> {
+    try {
+      await invoke('logout');
+      user.value = null;
+      return true;
+    } catch (e) {
+      error.value = String(e);
+      return false;
+    }
+  }
+
+  async function fetchUser(): Promise<User | null> {
     try {
       user.value = await invoke<User>('get_user');
       return user.value;
     } catch (e) {
       error.value = String(e);
       return null;
-    } finally {
-      isLoading.value = false;
     }
   }
 
@@ -53,11 +93,26 @@ export function useUser() {
     }
   }
 
+  async function deleteUser(): Promise<Boolean> {
+    try {
+      await invoke<User>('delete_user');
+      user.value = null;
+      return true;
+    } catch (e) {
+      error.value = String(e);
+      return false;
+    }
+  }
+
   return {
     user,
     isLoading,
     error,
+    register,
+    login,
+    logout,
     fetchUser,
-    updateProfile
+    updateProfile,
+    deleteUser
   };
 }
