@@ -117,9 +117,9 @@ withDefaults(defineProps<Props>(), {
   --button-icon-size: 1.25rem;
 
   /* Increase to 24px for labels */
-  &.button--label {
+  /* &.button--label {
     --button-icon-size: 1.5rem;
-  }
+  } */
 
   width: var(--button-height);
   padding: 0;

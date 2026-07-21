@@ -9,11 +9,6 @@ const error = ref<string | null>(null);
 const unlockedVaults = ref<Vault[]>([]);
 
 export function useVault() {
-  // Helper to set vault state from outside (e.g., after login/register)
-  function setUnlockedVaults(vaults: Vault[]) {
-    unlockedVaults.value = vaults;
-  }
-
   async function listVaultIds(): Promise<string[]> {
     try {
       return await invoke<string[]>('list_vault_ids');
@@ -25,7 +20,8 @@ export function useVault() {
 
   async function getUnlockedVaults(): Promise<Vault[]> {
     try {
-      return await invoke<Vault[]>('get_unlocked_vaults');
+      unlockedVaults.value = await invoke<Vault[]>('get_unlocked_vaults');
+      return unlockedVaults.value;
     } catch (e) {
       error.value = String(e);
       return [];
@@ -175,7 +171,6 @@ export function useVault() {
     isLoading,
     error,
     unlockedVaults,
-    setUnlockedVaults,
 
     // Vault Meta
     listVaultIds,

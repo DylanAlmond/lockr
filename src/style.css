@@ -30,6 +30,7 @@
 
 * {
   font-family: var(--font-ui);
+  flex-shrink: 0;
   margin: 0;
   padding: 0;
 }

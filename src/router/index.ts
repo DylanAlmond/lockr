@@ -8,7 +8,7 @@ import FavouritesView from '../components/views/FavouritesView.vue';
 import RecentlyAccessedView from '../components/views/RecentlyAccessedView.vue';
 import VaultsView from '../components/views/VaultsView.vue';
 import VaultOverview from '../components/panel/VaultOverview.vue';
-import VaultPasswordsVue from '../components/views/VaultPasswordsVue.vue';
+import VaultPasswordsView from '../components/views/VaultPasswordsView.vue';
 import VaultForm from '../components/panel/VaultForm.vue';
 import { useUser } from '../composables/useUser';
 import AuthView from '../components/views/AuthView.vue';
@@ -97,7 +97,7 @@ const routes: RouteRecordRaw[] = [
           {
             path: ':vaultId',
             components: {
-              list: VaultPasswordsVue,
+              list: VaultPasswordsView,
               panel: EmptyPanel
             },
             children: [

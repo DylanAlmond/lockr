@@ -57,6 +57,7 @@ onUnmounted(() => {
   padding: 0.75rem 0.5rem 0.75rem 1rem;
 
   border-bottom: 1px solid var(--color-border);
+  overflow: hidden;
 }
 
 .window-button-container {

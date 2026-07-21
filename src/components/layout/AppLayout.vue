@@ -36,7 +36,13 @@ const { canGoBack, canGoForward, goBack, goForward } = useRouterHistory(router);
           />
         </div>
 
-        <Input name="nav-search" type="search" :icon-component="Search" placeholder="Search..." />
+        <Input
+          class="nav-search"
+          name="nav-search"
+          type="search"
+          :icon-component="Search"
+          placeholder="Search..."
+        />
         <Button name="Create" variant="accent" :icon-component="Plus">Create</Button>
       </Titlebar>
 
@@ -73,5 +79,9 @@ const { canGoBack, canGoForward, goBack, goForward } = useRouterHistory(router);
 
 .nav-button-container {
   flex-shrink: 0;
+}
+
+.nav-search {
+  flex-shrink: 1;
 }
 </style>
