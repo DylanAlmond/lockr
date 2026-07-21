@@ -81,10 +81,6 @@ const routes: RouteRecordRaw[] = [
       {
         path: 'vaults',
         meta: { requiresAuth: true },
-        components: {
-          list: VaultsView,
-          panel: VaultOverview
-        },
         children: [
           {
             path: 'new',
