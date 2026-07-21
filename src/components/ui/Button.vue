@@ -11,7 +11,7 @@ interface Props {
   iconComponent?: Component;
   type?: 'button' | 'submit' | 'reset';
   disabled?: boolean;
-  iconSize?: number;
+  fill?: boolean;
 }
 
 withDefaults(defineProps<Props>(), {
@@ -33,7 +33,8 @@ withDefaults(defineProps<Props>(), {
       `button--${size}`,
       {
         'button--icon': iconOnly
-      }
+      },
+      { 'button--fill': fill }
     ]"
   >
     <component v-if="iconComponent" :is="iconComponent" class="button__icon" aria-hidden="true" />
@@ -104,6 +105,10 @@ withDefaults(defineProps<Props>(), {
 .button--small {
   --button-height: 2.25rem;
   --button-icon-size: 1rem;
+}
+
+.button--fill {
+  width: 100%;
 }
 
 /* ---------- Icon Only ---------- */

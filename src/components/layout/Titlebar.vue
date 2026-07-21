@@ -46,6 +46,7 @@ onUnmounted(() => {
 <style scoped>
 .title-bar {
   display: flex;
+  justify-content: end;
   column-span: all;
   box-sizing: border-box;
 

@@ -10,15 +10,19 @@ import VaultsView from '../components/views/VaultsView.vue';
 import VaultOverview from '../components/panel/VaultOverview.vue';
 import VaultPasswordsVue from '../components/views/VaultPasswordsVue.vue';
 import VaultForm from '../components/panel/VaultForm.vue';
+import { useUser } from '../composables/useUser';
+import AuthView from '../components/views/AuthView.vue';
 
 const routes: RouteRecordRaw[] = [
   {
     path: '/',
     component: AppLayout,
+    meta: { requiresAuth: true },
     redirect: '/all-items',
     children: [
       {
         path: 'all-items',
+        meta: { requiresAuth: true },
         components: {
           list: AllItemsView,
           panel: EmptyPanel
@@ -40,6 +44,7 @@ const routes: RouteRecordRaw[] = [
       },
       {
         path: 'favourites',
+        meta: { requiresAuth: true },
         components: {
           list: FavouritesView,
           panel: EmptyPanel
@@ -57,6 +62,7 @@ const routes: RouteRecordRaw[] = [
       },
       {
         path: 'recently-accessed',
+        meta: { requiresAuth: true },
         components: {
           list: RecentlyAccessedView,
           panel: EmptyPanel
@@ -74,6 +80,7 @@ const routes: RouteRecordRaw[] = [
       },
       {
         path: 'vaults',
+        meta: { requiresAuth: true },
         components: {
           list: VaultsView,
           panel: VaultOverview
@@ -112,17 +119,29 @@ const routes: RouteRecordRaw[] = [
       }
     ]
   },
+  {
+    path: '/auth',
+    component: AuthView
+  },
 
   /* 404 fallback */
   {
     path: '/:pathMatch(.*)*',
-    redirect: '/all-items'
+    redirect: '/auth'
   }
 ];
 
 const router = createRouter({
   history: createWebHistory(),
   routes
+});
+
+router.beforeEach((to, _from) => {
+  const { user } = useUser();
+
+  if (to.meta?.requiresAuth && !user.value) {
+    return '/auth';
+  }
 });
 
 export default router;
