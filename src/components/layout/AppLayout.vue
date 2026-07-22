@@ -64,17 +64,27 @@ const { canGoBack, canGoForward, goBack, goForward } = useRouterHistory(router);
   display: flex;
   width: 100%;
   height: 100%;
+  overflow: hidden;
 }
 
 .main-wrapper {
   display: flex;
   flex-direction: column;
   flex: 1;
+
+  background: var(--color-bg);
 }
 
 .content {
   display: grid;
   grid-template-columns: 440px 1fr;
+  grid-template-rows: 1fr;
+  flex: 1;
+  min-height: 0;
+
+  > main {
+    min-height: 0;
+  }
 }
 
 .nav-button-container {

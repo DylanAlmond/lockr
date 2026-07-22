@@ -82,58 +82,66 @@ async function handleRegister() {
 </script>
 
 <template>
-  <Titlebar />
+  <div class="wrapper">
+    <Titlebar />
 
-  <div class="login-container">
-    <Logo class="logo" />
+    <div class="login-container">
+      <Logo class="logo" />
 
-    <form v-if="hasUser" @submit.prevent="handleLogin" class="login-form">
-      <Input
-        v-model="masterPassword"
-        type="password"
-        placeholder="Enter your master password..."
-        name="master_password"
-      />
+      <form v-if="hasUser" @submit.prevent="handleLogin" class="login-form">
+        <Input
+          v-model="masterPassword"
+          type="password"
+          placeholder="Enter your master password..."
+          name="master_password"
+        />
 
-      <Button
-        type="submit"
-        variant="accent"
-        :icon-component="LockOpen"
-        :disabled="isLoading || !masterPassword"
-        fill
-      >
-        <span v-if="isLoading">Loading...</span>
-        <span v-else>Unlock</span>
-      </Button>
-    </form>
+        <Button
+          type="submit"
+          variant="accent"
+          :icon-component="LockOpen"
+          :disabled="isLoading || !masterPassword"
+          fill
+        >
+          <span v-if="isLoading">Loading...</span>
+          <span v-else>Unlock</span>
+        </Button>
+      </form>
 
-    <form v-else @submit.prevent="handleRegister" class="login-form">
-      <Input v-model="name" type="text" placeholder="Enter a new user name..." name="name" />
+      <form v-else @submit.prevent="handleRegister" class="login-form">
+        <Input v-model="name" type="text" placeholder="Enter a new user name..." name="name" />
 
-      <Input
-        v-model="masterPassword"
-        type="password"
-        placeholder="Enter a new master password..."
-        name="master_password"
-      />
+        <Input
+          v-model="masterPassword"
+          type="password"
+          placeholder="Enter a new master password..."
+          name="master_password"
+        />
 
-      <Button
-        type="submit"
-        variant="accent"
-        :icon-component="LockOpen"
-        :disabled="isLoading || !masterPassword"
-        fill
-      >
-        <span v-if="isLoading">Loading...</span>
-        <span v-else>Unlock</span>
-      </Button>
-    </form>
+        <Button
+          type="submit"
+          variant="accent"
+          :icon-component="LockOpen"
+          :disabled="isLoading || !masterPassword"
+          fill
+        >
+          <span v-if="isLoading">Loading...</span>
+          <span v-else>Unlock</span>
+        </Button>
+      </form>
 
-    <p v-if="error" class="error-text">{{ error }}</p>
+      <p v-if="error" class="error-text">{{ error }}</p>
+    </div>
   </div>
 </template>
 
 <style scoped>
+.wrapper {
+  background: var(--color-bg);
+  height: 100%;
+  width: 100%;
+}
+
 .login-container {
   display: flex;
   flex-direction: column;
