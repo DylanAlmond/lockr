@@ -73,7 +73,6 @@ const navItems = [
   height: 100%;
 
   background: var(--color-bg-nav);
-  backdrop-filter: blur(12px);
 
   border-right: 1px solid var(--color-border);
 }

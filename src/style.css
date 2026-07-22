@@ -4,7 +4,7 @@
 
 :root {
   --color-bg: hsl(0 0 100%);
-  --color-bg-nav: hsl(0 0 98% / 0.9);
+  --color-bg-nav: hsl(0 0 98% / 0.95);
   --color-border: hsl(0 0 90%);
   --color-hover: hsl(0 0 94%);
 
@@ -35,10 +35,13 @@
   padding: 0;
 }
 
+html,
 body {
   width: 100%;
   height: 100dvh;
   overflow: hidden;
+
+  background-color: transparent;
 
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;

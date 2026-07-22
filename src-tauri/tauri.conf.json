@@ -15,9 +15,11 @@
         "title": "lockr",
         "width": 1440,
         "height": 980,
-        "decorations": false
+        "decorations": false,
+        "transparent": true
       }
     ],
+    "macOSPrivateApi": true,
     "security": {
       "csp": null
     }
