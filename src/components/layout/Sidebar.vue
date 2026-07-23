@@ -49,11 +49,7 @@ const navItems = [
 
         <ul class="link-list">
           <li v-for="vault in unlockedVaults">
-            <RouterLink
-              :to="{ path: `/vaults/${vault.id}` }"
-              class="nav-link"
-              active-class="active"
-            >
+            <RouterLink :to="{ path: `/vault/${vault.id}` }" class="nav-link" active-class="active">
               <Lock :size="20" aria-hidden="true" :color="vault.color" />
               <span>{{ vault.name }}</span>
             </RouterLink>

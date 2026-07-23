@@ -6,9 +6,11 @@ import Button from '../ui/Button.vue';
 import { useRouterHistory } from '../../composables/useRouterHistory.ts';
 import { useRouter } from 'vue-router';
 import Titlebar from './Titlebar.vue';
+import { useSearch } from '../../composables/useSearch.ts';
 
 const router = useRouter();
 const { canGoBack, canGoForward, goBack, goForward } = useRouterHistory(router);
+const { searchQuery } = useSearch();
 </script>
 
 <template>
@@ -40,6 +42,7 @@ const { canGoBack, canGoForward, goBack, goForward } = useRouterHistory(router);
           class="nav-search"
           name="nav-search"
           type="search"
+          v-model="searchQuery"
           :icon-component="Search"
           placeholder="Search..."
         />

@@ -1,5 +1,7 @@
-<script setup lang="ts"></script>
+<script setup lang="ts">
+import PasswordsList from '../panel/PasswordsList.vue';
+</script>
 
 <template>
-  <h1>Recently Accessed</h1>
+  <PasswordsList />
 </template>

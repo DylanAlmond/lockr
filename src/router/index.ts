@@ -1,15 +1,12 @@
 import { createRouter, createWebHistory, RouteRecordRaw } from 'vue-router';
 import AppLayout from '../components/layout/AppLayout.vue';
-import AllItemsView from '../components/views/AllItemsView.vue';
-import EmptyPanel from '../components/panel/EmptyPanel.vue';
-import PasswordForm from '../components/panel/PasswordForm.vue';
 import PasswordDetail from '../components/panel/PasswordDetail.vue';
-import FavouritesView from '../components/views/FavouritesView.vue';
-import RecentlyAccessedView from '../components/views/RecentlyAccessedView.vue';
-import VaultPasswordsView from '../components/views/VaultPasswordsView.vue';
-import VaultForm from '../components/panel/VaultForm.vue';
 import AuthView from '../components/views/AuthView.vue';
 import { useUser } from '../composables/useUser';
+import AllItemsView from '../components/views/AllItemsView.vue';
+import FavouritesView from '../components/views/FavouritesView.vue';
+import RecentlyAccessedView from '../components/views/RecentlyAccessedView.vue';
+import VaultView from '../components/views/VaultView.vue';
 
 const routes: RouteRecordRaw[] = [
   {
@@ -23,93 +20,32 @@ const routes: RouteRecordRaw[] = [
         meta: { requiresAuth: true },
         components: {
           list: AllItemsView,
-          panel: EmptyPanel
-        },
-        children: [
-          {
-            path: 'new',
-            components: { panel: PasswordForm }
-          },
-          {
-            path: ':id',
-            components: { panel: PasswordDetail }
-          },
-          {
-            path: ':id/edit',
-            components: { panel: PasswordForm }
-          }
-        ]
+          panel: PasswordDetail
+        }
       },
       {
         path: 'favourites',
-        meta: { requiresAuth: true },
+        meta: { requiresAuth: true, favourites: true },
         components: {
           list: FavouritesView,
-          panel: EmptyPanel
-        },
-        children: [
-          {
-            path: ':id',
-            components: { panel: PasswordDetail }
-          },
-          {
-            path: ':id/edit',
-            components: { panel: PasswordForm }
-          }
-        ]
+          panel: PasswordDetail
+        }
       },
       {
         path: 'recently-accessed',
-        meta: { requiresAuth: true },
+        meta: { requiresAuth: true, recentlyAccessed: true },
         components: {
           list: RecentlyAccessedView,
-          panel: EmptyPanel
-        },
-        children: [
-          {
-            path: ':id',
-            components: { panel: PasswordDetail }
-          },
-          {
-            path: ':id/edit',
-            components: { panel: PasswordForm }
-          }
-        ]
+          panel: PasswordDetail
+        }
       },
       {
-        path: 'vaults',
+        path: 'vault/:vaultId',
         meta: { requiresAuth: true },
-        children: [
-          {
-            path: 'new',
-            components: { panel: VaultForm }
-          },
-          {
-            path: 'edit/:id',
-            components: { panel: VaultForm }
-          },
-          {
-            path: ':vaultId',
-            components: {
-              list: VaultPasswordsView,
-              panel: EmptyPanel
-            },
-            children: [
-              {
-                path: 'new',
-                components: { panel: PasswordForm }
-              },
-              {
-                path: ':id',
-                components: { panel: PasswordDetail }
-              },
-              {
-                path: ':id/edit',
-                components: { panel: PasswordForm }
-              }
-            ]
-          }
-        ]
+        components: {
+          list: VaultView,
+          panel: PasswordDetail
+        }
       }
     ]
   },
@@ -121,7 +57,7 @@ const routes: RouteRecordRaw[] = [
   /* 404 fallback */
   {
     path: '/:pathMatch(.*)*',
-    redirect: '/auth'
+    redirect: '/all-items'
   }
 ];
 
@@ -133,8 +69,12 @@ const router = createRouter({
 router.beforeEach((to, _from) => {
   const { user } = useUser();
 
-  if (to.meta?.requiresAuth && !user.value) {
-    return '/auth';
+  if (to.meta.requiresAuth && !user.value) {
+    return { path: '/auth', replace: true };
+  }
+
+  if (to.path === '/auth' && user.value) {
+    return { path: '/all-items', replace: true };
   }
 });
 

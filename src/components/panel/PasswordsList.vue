@@ -1,15 +1,31 @@
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue';
-import { Account } from '../../types';
-import { useRoute, useRouter } from 'vue-router';
+import { Account, AccountFilter } from '../../types';
+import { useRoute } from 'vue-router';
 import { useVault } from '../../composables/useVault';
+import { useSearch } from '../../composables/useSearch';
+import Button from '../ui/Button.vue';
+import { ArrowDownAZ, ArrowDownWideNarrow, ArrowUpWideNarrow, ArrowDownZA } from '@lucide/vue';
 
+type Props = AccountFilter;
+
+type SortCategory = 'date' | 'alphabetical';
+
+const props = withDefaults(defineProps<Props>(), {
+  vault_id: null,
+  favourite_only: false,
+  tags: null,
+  search_query: null
+});
+
+const { searchQuery } = useSearch();
 const { getAllAccounts } = useVault();
 const route = useRoute();
-const router = useRouter();
 
 const accounts = ref<Account[]>([]);
 const selectedTag = ref<string>('All');
+
+const sortCategory = ref<SortCategory>('date');
 const sortAsc = ref<boolean>(false); // false = newest first (descending)
 
 const monthNames = [
@@ -27,16 +43,6 @@ const monthNames = [
   'December'
 ];
 
-async function loadAccounts(id: string) {
-  accounts.value = await getAllAccounts({ vault_id: id });
-
-  // Navigate to first result
-  router.push({
-    path: `/vaults/${route.params.vaultId as string}/${accounts.value[0].id}`,
-    replace: true
-  });
-}
-
 // Build tag options from loaded accounts
 const tagOptions = computed(() => {
   const tagSet = new Set<string>();
@@ -52,56 +58,108 @@ const filteredAccounts = computed(() => {
       : accounts.value.filter((a) => a.tags.includes(selectedTag.value));
 
   list.sort((a, b) => {
-    const dateA = new Date(a.updated_at).getTime();
-    const dateB = new Date(b.updated_at).getTime();
-    return sortAsc.value ? dateA - dateB : dateB - dateA;
+    let comparison = 0;
+
+    if (sortCategory.value === 'date') {
+      comparison = new Date(a.updated_at).getTime() - new Date(b.updated_at).getTime();
+    }
+
+    if (sortCategory.value === 'alphabetical') {
+      comparison = (a.display_name || a.username).localeCompare(b.display_name || b.username);
+    }
+
+    return sortAsc.value ? comparison : -comparison;
   });
 
   return list;
 });
 
-// Group by month
-interface MonthGroup {
+interface AccountGroup {
   label: string;
   items: Account[];
 }
 
-const groupedAccounts = computed<MonthGroup[]>(() => {
-  const map = new Map<string, Account[]>();
+const groupedAccounts = computed<AccountGroup[]>(() => {
+  const groups = new Map<string, Account[]>();
 
   for (const account of filteredAccounts.value) {
-    const d = new Date(account.updated_at);
-    const label = `${monthNames[d.getMonth()]} ${d.getFullYear()}`;
-    if (!map.has(label)) map.set(label, []);
-    map.get(label)!.push(account);
+    let label: string;
+
+    if (sortCategory.value === 'date') {
+      const d = new Date(account.updated_at);
+      label = `${monthNames[d.getMonth()]} ${d.getFullYear()}`;
+    } else {
+      label = (account.display_name || account.username)[0].toUpperCase();
+    }
+
+    if (!groups.has(label)) {
+      groups.set(label, []);
+    }
+
+    groups.get(label)!.push(account);
   }
 
-  return Array.from(map.entries()).map(([label, items]) => ({ label, items }));
+  return Array.from(groups.entries()).map(([label, items]) => ({
+    label,
+    items
+  }));
 });
 
 function selectTag(tag: string) {
   selectedTag.value = tag;
 }
 
+function setSortCategory(category: SortCategory) {
+  sortCategory.value = category;
+}
+
 function toggleSort() {
   sortAsc.value = !sortAsc.value;
 }
 
-watch(() => route.params.vaultId as string, loadAccounts, { immediate: true });
+watch(
+  () => [props.vault_id, props.favourite_only, props.tags, searchQuery.value],
+  async () =>
+    (accounts.value = await getAllAccounts({ ...props, search_query: searchQuery.value })),
+  { immediate: true }
+);
 </script>
 
 <template>
   <div class="container">
     <div class="filter-wrapper">
-      <select :value="selectedTag" @change="selectTag(($event.target as HTMLSelectElement).value)">
-        <option v-for="tag in tagOptions" :key="tag" :value="tag">
-          {{ tag }}
-        </option>
+      <select
+        :value="sortCategory"
+        @change="setSortCategory(($event.target as HTMLSelectElement).value as SortCategory)"
+      >
+        <option value="date">Date Updated</option>
+        <option value="alphabetical">Alphabetical</option>
       </select>
 
-      <button @click="toggleSort">
-        {{ sortAsc ? 'Oldest First' : 'Newest First' }}
-      </button>
+      <Button
+        @click="toggleSort"
+        icon-only
+        variant="outline"
+        :icon-component="
+          sortCategory === 'date'
+            ? sortAsc
+              ? ArrowDownWideNarrow
+              : ArrowUpWideNarrow
+            : sortAsc
+              ? ArrowDownAZ
+              : ArrowDownZA
+        "
+        :aria-label="
+          sortCategory === 'date'
+            ? sortAsc
+              ? 'Oldest First'
+              : 'Newest First'
+            : sortAsc
+              ? 'A-Z'
+              : 'Z-A'
+        "
+      >
+      </Button>
     </div>
 
     <div class="results-wrapper no-scrollbar">
@@ -155,7 +213,6 @@ watch(() => route.params.vaultId as string, loadAccounts, { immediate: true });
 
 .results-wrapper {
   flex: 1;
-  padding-top: 3rem;
   overflow-y: auto;
 }
 
@@ -163,6 +220,7 @@ watch(() => route.params.vaultId as string, loadAccounts, { immediate: true });
   display: flex;
   flex-direction: column;
   gap: 1rem;
+  padding-top: 3rem;
 
   > h2 {
     font-size: 1rem;
@@ -243,6 +301,7 @@ watch(() => route.params.vaultId as string, loadAccounts, { immediate: true });
   > h3 {
     font-size: 1rem;
     font-family: var(--font-geo);
+    font-weight: 550;
     margin-bottom: 0.25rem;
   }
 
