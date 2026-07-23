@@ -2,7 +2,6 @@
   <img src="banner.png" alt="Project Banner" width="1200">
 </p>
 
-![License](https://img.shields.io/badge/License-MIT-blue)
 ![Status](https://img.shields.io/badge/Status-WiP-yellow)
 
 ## Introduction
