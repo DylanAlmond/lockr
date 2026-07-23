@@ -27,7 +27,7 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <nav class="title-bar" data-tauri-drag-region @dblclick="appWindow.toggleMaximize()">
+  <nav class="title-bar" data-tauri-drag-region>
     <slot />
 
     <div class="window-button-container">

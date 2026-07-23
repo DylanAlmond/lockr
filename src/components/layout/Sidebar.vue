@@ -1,13 +1,11 @@
 <script setup lang="ts">
 import { RouterLink } from 'vue-router';
 import Logo from '../../assets/logo-text.svg';
-import { getCurrentWindow } from '@tauri-apps/api/window';
 import { ChevronUp, Clock, KeyRound, Lock, Plus, Star } from '@lucide/vue';
 import { useUser } from '../../composables/useUser';
 import Button from '../ui/Button.vue';
 import { useVault } from '../../composables/useVault';
 
-const appWindow = getCurrentWindow();
 const { user } = useUser();
 const { unlockedVaults } = useVault();
 
@@ -21,7 +19,7 @@ const navItems = [
 
 <template>
   <header class="sidebar">
-    <div class="logo-container" data-tauri-drag-region @dblclick="appWindow.toggleMaximize()">
+    <div class="logo-container" data-tauri-drag-region>
       <Logo />
     </div>
 
