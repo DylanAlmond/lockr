@@ -1,56 +1,54 @@
-import { ref, computed, type ComputedRef } from 'vue';
-import type { Router, RouteLocationNormalized } from 'vue-router';
-
-const stack = ref<string[]>([]);
-const pointer = ref(-1);
-let initialized = false;
-
-let canGoBack: ComputedRef<boolean>;
-let canGoForward: ComputedRef<boolean>;
+import { computed, ref } from 'vue';
+import type { Router } from 'vue-router';
 
 export function useRouterHistory(router: Router) {
-  if (!initialized) {
-    initialized = true;
+  // Trigger recomputation whenever navigation occurs
+  const version = ref(0);
 
-    const initialPath = router.currentRoute.value.fullPath;
-    stack.value = [initialPath];
-    pointer.value = 0;
+  router.afterEach(() => {
+    version.value++;
+  });
 
-    router.afterEach((to: RouteLocationNormalized) => {
-      const path = to.fullPath;
+  const state = computed(() => {
+    // Depend on version so this recomputes after each navigation
+    version.value;
+    console.log(window.history);
 
-      // If we're at the current pointer already, do nothing
-      if (stack.value[pointer.value] === path) return;
+    return window.history.state ?? {};
+  });
 
-      // Detect if this navigation matches the entry right BEFORE pointer (Going Back)
-      if (pointer.value > 0 && stack.value[pointer.value - 1] === path) {
-        pointer.value -= 1;
-        return;
-      }
+  const previous = computed(() => state.value.back ?? null);
+  const current = computed(() => state.value.current ?? router.currentRoute.value.fullPath);
+  const next = computed(() => state.value.forward ?? null);
+  const position = computed(() => state.value.position ?? 0);
+  const replaced = computed(() => state.value.replaced ?? false);
 
-      // Detect if this navigation matches the entry right AFTER pointer (Going Forward)
-      if (pointer.value < stack.value.length - 1 && stack.value[pointer.value + 1] === path) {
-        pointer.value += 1;
-        return;
-      }
-
-      // Otherwise it's a "new" navigation — truncate any forward history
-      stack.value = stack.value.slice(0, pointer.value + 1);
-      stack.value.push(path);
-      pointer.value = stack.value.length - 1;
-    });
-
-    canGoBack = computed(() => pointer.value > 0);
-    canGoForward = computed(() => pointer.value < stack.value.length - 1);
-  }
+  const canGoBack = computed(
+    () => state.value.position !== 0 && previous.value !== null && previous.value !== '/auth'
+  );
+  const canGoForward = computed(() => next.value !== null);
 
   function goBack() {
-    if (canGoBack.value) router.go(-1);
+    if (canGoBack.value) {
+      router.back();
+    }
   }
 
   function goForward() {
-    if (canGoForward.value) router.go(1);
+    if (canGoForward.value) {
+      router.forward();
+    }
   }
 
-  return { canGoBack, canGoForward, goBack, goForward };
+  return {
+    previous,
+    current,
+    next,
+    position,
+    replaced,
+    canGoBack,
+    canGoForward,
+    goBack,
+    goForward
+  };
 }
