@@ -81,12 +81,19 @@ const { searchQuery } = useSearch();
 .content {
   display: grid;
   grid-template-columns: 440px 1fr;
-  grid-template-rows: 1fr;
+  grid-template-rows: minmax(0, 1fr);
   flex: 1;
   min-height: 0;
 
   > main {
-    min-height: 0;
+    display: flex;
+    flex-direction: column;
+  }
+
+  > aside {
+    display: flex;
+    flex-direction: column;
+    border-left: 1px solid var(--color-border);
   }
 }
 

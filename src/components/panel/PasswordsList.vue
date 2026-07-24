@@ -238,6 +238,7 @@ watch(
 .results-wrapper {
   flex: 1;
   overflow-y: auto;
+  padding-bottom: 1rem;
 }
 
 .account-group {
