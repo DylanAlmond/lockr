@@ -5,9 +5,6 @@ import { invoke } from '@tauri-apps/api/core';
 const isLoading = ref(false);
 const error = ref<string | null>(null);
 
-// Holds the list of vaults currently unlocked in memory
-const unlockedVaults = ref<Vault[]>([]);
-
 export function useVault() {
   async function listVaultIds(): Promise<string[]> {
     try {
@@ -20,11 +17,19 @@ export function useVault() {
 
   async function getUnlockedVaults(): Promise<Vault[]> {
     try {
-      unlockedVaults.value = await invoke<Vault[]>('get_unlocked_vaults');
-      return unlockedVaults.value;
+      return await invoke<Vault[]>('get_unlocked_vaults');
     } catch (e) {
       error.value = String(e);
       return [];
+    }
+  }
+
+  async function getVaultById(vaultId: string): Promise<Vault | null> {
+    try {
+      return await invoke<Vault>('get_vault_by_id', { vaultId });
+    } catch (e) {
+      error.value = String(e);
+      return null;
     }
   }
 
@@ -34,10 +39,6 @@ export function useVault() {
 
     try {
       const vault = await invoke<Vault>('create_vault', { name });
-      // Automatically add the new vault to local state so the UI updates instantly
-      if (vault && !unlockedVaults.value.find((v) => v.id === vault.id)) {
-        unlockedVaults.value.push(vault);
-      }
       return vault;
     } catch (e) {
       error.value = String(e);
@@ -67,8 +68,6 @@ export function useVault() {
   async function deleteVault(vaultId: string): Promise<boolean> {
     try {
       await invoke('delete_vault', { vaultId });
-      // Remove from local state
-      unlockedVaults.value = unlockedVaults.value.filter((v) => v.id !== vaultId);
       return true;
     } catch (e) {
       error.value = String(e);
@@ -170,11 +169,11 @@ export function useVault() {
   return {
     isLoading,
     error,
-    unlockedVaults,
 
     // Vault Meta
     listVaultIds,
     getUnlockedVaults,
+    getVaultById,
 
     // Vault Mutations
     createVault,

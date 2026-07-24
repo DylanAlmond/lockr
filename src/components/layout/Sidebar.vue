@@ -5,9 +5,13 @@ import { ChevronUp, Clock, KeyRound, Lock, Plus, Star } from '@lucide/vue';
 import { useUser } from '../../composables/useUser';
 import Button from '../ui/Button.vue';
 import { useVault } from '../../composables/useVault';
+import { onMounted, ref } from 'vue';
+import { Vault } from '../../types/index.ts';
 
 const { user } = useUser();
-const { unlockedVaults } = useVault();
+const { getUnlockedVaults } = useVault();
+
+const vaults = ref<Vault[]>([]);
 
 const navItems = [
   { icon: KeyRound, title: 'All Items', route: '/all-items' },
@@ -15,6 +19,11 @@ const navItems = [
   { icon: Clock, title: 'Recently Accessed', route: '/recently-accessed' }
   // { icon: Lock, title: 'Vaults', route: '/vaults' }
 ];
+
+onMounted(async () => {
+  vaults.value = await getUnlockedVaults();
+  console.log(vaults.value);
+});
 </script>
 
 <template>
@@ -46,7 +55,7 @@ const navItems = [
         </summary>
 
         <ul class="link-list">
-          <li v-for="vault in unlockedVaults">
+          <li v-for="vault in vaults">
             <RouterLink :to="{ path: `/vault/${vault.id}` }" class="nav-link" active-class="active">
               <Lock :size="20" aria-hidden="true" :color="vault.color" />
               <span>{{ vault.name }}</span>

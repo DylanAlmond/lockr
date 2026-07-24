@@ -93,7 +93,7 @@ pub struct SafeVault {
     pub name: String,
     pub color: String,
 
-    pub accounts: Vec<SafeAccount>,
+    // pub accounts: Vec<SafeAccount>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -128,7 +128,7 @@ impl IntoSafe for Vault {
             id: self.id,
             name: self.name.clone(),
             color: self.color.clone(),
-            accounts: self.accounts.iter().map(|a| a.into_safe()).collect(),
+            // accounts: self.accounts.iter().map(|a| a.into_safe()).collect(),
         }
     }
 }

@@ -1,9 +1,6 @@
 import { ref } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import type { User, Vault } from '../types';
-import { useVault } from './useVault';
-
-const { getUnlockedVaults } = useVault();
 
 const user = ref<User | null>(null);
 const isLoading = ref(false);
@@ -18,7 +15,6 @@ export function useUser() {
       const vaults = await invoke<Vault[]>('register_user', { name, masterPassword });
       // Backend handles the login, but we still need to grab the user profile data (name, color)
       await fetchUser();
-      await getUnlockedVaults();
 
       return vaults;
     } catch (e) {
@@ -37,7 +33,6 @@ export function useUser() {
       const vaults = await invoke<Vault[]>('login_user', { masterPassword });
 
       await fetchUser();
-      await getUnlockedVaults();
 
       return vaults;
     } catch (e) {

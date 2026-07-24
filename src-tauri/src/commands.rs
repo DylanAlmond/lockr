@@ -183,6 +183,19 @@ pub fn create_vault(state: AppState, name: String) -> Result<SafeVault, String> 
 }
 
 #[tauri::command]
+pub fn get_vault_by_id(state: AppState, vault_id: String) -> Result<SafeVault, String> {
+    let state = state.lock().map_err(|e| e.to_string())?;
+    let id = Uuid::parse_str(&vault_id).map_err(|e| e.to_string())?;
+
+    let vault = state
+        .vault_manager
+        .get_vault(id)
+        .map_err(|e| e.to_string())?;
+
+    Ok(vault.into_safe())
+}
+
+#[tauri::command]
 pub fn unlock_vault(state: AppState, vault_id: String) -> Result<SafeVault, String> {
     let mut state = state.lock().map_err(|e| e.to_string())?;
 

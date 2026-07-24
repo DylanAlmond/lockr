@@ -53,6 +53,7 @@ pub fn run() {
             // Vaults
             commands::list_vault_ids,
             commands::get_unlocked_vaults,
+            commands::get_vault_by_id,
             commands::create_vault,
             commands::unlock_vault,
             commands::lock_vault,

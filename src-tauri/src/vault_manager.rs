@@ -43,7 +43,7 @@ impl VaultManager {
     }
 
     /// Get an immutable reference to a specific unlocked vault
-    fn get_vault(&self, vault_id: VaultId) -> Result<&Vault, VaultError> {
+    pub fn get_vault(&self, vault_id: VaultId) -> Result<&Vault, VaultError> {
         self.unlocked_vaults
             .get(&vault_id)
             .ok_or(VaultError::VaultLocked)
