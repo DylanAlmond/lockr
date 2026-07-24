@@ -287,18 +287,13 @@ pub fn add_account(
 }
 
 #[tauri::command]
-pub fn get_account(
-    state: AppState,
-    vault_id: String,
-    account_id: String,
-) -> Result<SafeAccount, String> {
+pub fn get_account_by_id(state: AppState, account_id: String) -> Result<SafeAccount, String> {
     let state = state.lock().map_err(|e| e.to_string())?;
-    let vid = Uuid::parse_str(&vault_id).map_err(|e| e.to_string())?;
-    let aid = Uuid::parse_str(&account_id).map_err(|e| e.to_string())?;
+    let id = Uuid::parse_str(&account_id).map_err(|e| e.to_string())?;
 
     state
         .vault_manager
-        .get_account(vid, aid)
+        .get_account_by_id(id)
         .map_err(|e| e.to_string())
 }
 

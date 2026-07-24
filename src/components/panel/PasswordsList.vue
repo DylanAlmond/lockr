@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue';
 import { Account, AccountFilter } from '../../types';
-import { useRoute } from 'vue-router';
+import { useRoute, useRouter } from 'vue-router';
 import { useVault } from '../../composables/useVault';
 import { useSearch } from '../../composables/useSearch';
 import Button from '../ui/Button.vue';
@@ -18,9 +18,11 @@ const props = withDefaults(defineProps<Props>(), {
   search_query: null
 });
 
+const route = useRoute();
+const router = useRouter();
+
 const { searchQuery } = useSearch();
 const { getAllAccounts } = useVault();
-const route = useRoute();
 
 const accounts = ref<Account[]>([]);
 const selectedTag = ref<string>('All');
@@ -117,10 +119,36 @@ function toggleSort() {
   sortAsc.value = !sortAsc.value;
 }
 
+function accountRoute(accountId: string) {
+  return {
+    name: route.name,
+    params: {
+      ...route.params,
+      passwordId: accountId
+    }
+  };
+}
+
 watch(
   () => [props.vault_id, props.favourite_only, props.tags, searchQuery.value],
   async () =>
     (accounts.value = await getAllAccounts({ ...props, search_query: searchQuery.value })),
+  { immediate: true }
+);
+
+// Default to first account in list
+watch(
+  filteredAccounts,
+  (accounts) => {
+    if (!route.params.passwordId && accounts.length) {
+      router.replace({
+        params: {
+          ...route.params,
+          passwordId: accounts[0].id
+        }
+      });
+    }
+  },
   { immediate: true }
 );
 </script>
@@ -172,11 +200,7 @@ watch(
 
         <ul class="account-list">
           <li v-for="account in group.items" :key="account.id">
-            <RouterLink
-              class="account"
-              :to="{ path: `/vaults/${route.params.vaultId as string}/${account.id}` }"
-              active-class="active"
-            >
+            <RouterLink class="account" :to="accountRoute(account.id)" active-class="active">
               <div class="account-icon">
                 {{ (account.display_name || account.username)[0].toUpperCase() }}
               </div>

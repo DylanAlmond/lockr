@@ -60,7 +60,7 @@ pub fn run() {
             commands::delete_vault,
             // Accounts
             commands::add_account,
-            commands::get_account,
+            commands::get_account_by_id,
             commands::get_all_accounts,
             commands::update_account,
             commands::delete_account,

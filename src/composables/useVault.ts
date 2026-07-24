@@ -76,9 +76,9 @@ export function useVault() {
     }
   }
 
-  async function getAccount(vaultId: string, accountId: string): Promise<Account | null> {
+  async function getAccountbyId(accountId: string): Promise<Account | null> {
     try {
-      return await invoke<Account>('get_account', { vaultId, accountId });
+      return await invoke<Account>('get_account_by_id', { accountId });
     } catch (e) {
       error.value = String(e);
       return null;
@@ -182,7 +182,7 @@ export function useVault() {
     deleteVault,
 
     // Accounts
-    getAccount,
+    getAccountbyId,
     getAllAccounts,
     addAccount,
     updateAccount,

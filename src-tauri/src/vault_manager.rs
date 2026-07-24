@@ -339,19 +339,13 @@ impl VaultManager {
         Ok(account.secret.password.clone())
     }
 
-    // Retreive a specific account from a given vault.
-    pub fn get_account(
-        &self,
-        vault_id: VaultId,
-        account_id: AccountId,
-    ) -> Result<SafeAccount, VaultError> {
-        let vault = self.get_vault(vault_id)?;
-
-        let account = vault
-            .accounts
-            .iter()
-            .find(|a| a.id == account_id)
-            .ok_or(VaultError::AccountNotFound(account_id.to_string()))?;
+    // Retreive a specific account by id.
+    pub fn get_account_by_id(&self, account_id: AccountId) -> Result<SafeAccount, VaultError> {
+        let account = self
+            .unlocked_vaults
+            .values()
+            .find_map(|vault| vault.accounts.iter().find(|a| a.id == account_id))
+            .ok_or_else(|| VaultError::AccountNotFound(account_id.to_string()))?;
 
         Ok(account.into_safe())
     }

@@ -16,7 +16,8 @@ const routes: RouteRecordRaw[] = [
     redirect: '/all-items',
     children: [
       {
-        path: 'all-items',
+        path: 'all-items/:passwordId?',
+        name: 'all-items',
         meta: { requiresAuth: true },
         components: {
           list: AllItemsView,
@@ -24,7 +25,8 @@ const routes: RouteRecordRaw[] = [
         }
       },
       {
-        path: 'favourites',
+        path: 'favourites/:passwordId?',
+        name: 'favourites',
         meta: { requiresAuth: true, favourites: true },
         components: {
           list: FavouritesView,
@@ -32,7 +34,8 @@ const routes: RouteRecordRaw[] = [
         }
       },
       {
-        path: 'recently-accessed',
+        path: 'recently-accessed/:passwordId?',
+        name: 'recently-accessed',
         meta: { requiresAuth: true, recentlyAccessed: true },
         components: {
           list: RecentlyAccessedView,
@@ -40,7 +43,8 @@ const routes: RouteRecordRaw[] = [
         }
       },
       {
-        path: 'vault/:vaultId',
+        name: 'vault',
+        path: 'vault/:vaultId/:passwordId?',
         meta: { requiresAuth: true },
         components: {
           list: VaultView,
