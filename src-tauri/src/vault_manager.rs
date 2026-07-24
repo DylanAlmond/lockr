@@ -2,6 +2,7 @@ use std::{collections::HashMap, fs::read_dir, path::PathBuf};
 
 use chrono::Utc;
 use uuid::Uuid;
+use zxcvbn::{zxcvbn, Entropy};
 
 use crate::{
     crypto::{decrypt_with_secret, encrypt_with_secret},
@@ -326,7 +327,7 @@ impl VaultManager {
     pub fn get_secret(
         &self,
         vault_id: VaultId,
-        account_id: uuid::Uuid,
+        account_id: AccountId,
     ) -> Result<String, VaultError> {
         let vault = self.get_vault(vault_id)?;
 
@@ -337,6 +338,23 @@ impl VaultManager {
             .ok_or(VaultError::AccountNotFound(account_id.to_string()))?;
 
         Ok(account.secret.password.clone())
+    }
+
+    // Get the strength of a given accounts password
+    pub fn get_account_password_strength(
+        &self,
+        vault_id: VaultId,
+        account_id: AccountId,
+    ) -> Result<Entropy, VaultError> {
+        let vault = self.get_vault(vault_id)?;
+
+        let account = vault
+            .accounts
+            .iter()
+            .find(|a| a.id == account_id)
+            .ok_or(VaultError::AccountNotFound(account_id.to_string()))?;
+
+        Ok(zxcvbn(&account.secret.password, &[]))
     }
 
     // Retreive a specific account by id.

@@ -3,6 +3,7 @@ use std::sync::Mutex;
 use tauri::State;
 use uuid::Uuid;
 use zeroize::Zeroize;
+use zxcvbn::{zxcvbn, Entropy, Score};
 
 use crate::user_manager::UserManager;
 use crate::vault_manager::VaultManager;
@@ -401,4 +402,25 @@ pub fn get_secret(state: AppState, vault_id: String, account_id: String) -> Resu
         .vault_manager
         .get_secret(vid, aid)
         .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn get_account_password_strength(
+    state: AppState,
+    vault_id: String,
+    account_id: String,
+) -> Result<Entropy, String> {
+    let state = state.lock().map_err(|e| e.to_string())?;
+    let vid = Uuid::parse_str(&vault_id).map_err(|e| e.to_string())?;
+    let aid = Uuid::parse_str(&account_id).map_err(|e| e.to_string())?;
+
+    state
+        .vault_manager
+        .get_account_password_strength(vid, aid)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn get_password_strength(password: String) -> Result<Entropy, String> {
+    Ok(zxcvbn(&password, &[]).into())
 }

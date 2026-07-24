@@ -92,7 +92,6 @@ pub struct SafeVault {
     pub id: VaultId,
     pub name: String,
     pub color: String,
-
     // pub accounts: Vec<SafeAccount>,
 }
 

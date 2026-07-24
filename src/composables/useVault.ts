@@ -1,5 +1,5 @@
 import { ref } from 'vue';
-import { Account, AccountFilter, Vault } from '../types';
+import { Account, AccountFilter, Entropy, Vault } from '../types';
 import { invoke } from '@tauri-apps/api/core';
 
 const isLoading = ref(false);
@@ -166,6 +166,27 @@ export function useVault() {
     }
   }
 
+  async function getAccountPasswordStrength(
+    vaultId: string,
+    accountId: string
+  ): Promise<Entropy | null> {
+    try {
+      return await invoke<Entropy>('get_account_password_strength', { vaultId, accountId });
+    } catch (e) {
+      error.value = String(e);
+      return null;
+    }
+  }
+
+  async function getPasswordStrength(password: string): Promise<Entropy | null> {
+    try {
+      return await invoke<Entropy>('get_password_strength', { password });
+    } catch (e) {
+      error.value = String(e);
+      return null;
+    }
+  }
+
   return {
     isLoading,
     error,
@@ -186,6 +207,10 @@ export function useVault() {
     addAccount,
     updateAccount,
     deleteAccount,
-    getSecret
+    getSecret,
+    getAccountPasswordStrength,
+
+    // Util
+    getPasswordStrength
   };
 }

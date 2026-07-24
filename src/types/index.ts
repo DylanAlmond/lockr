@@ -40,3 +40,44 @@ export interface AccountFilter {
   tags?: string[] | null;
   search_query?: string | null;
 }
+
+export interface Entropy {
+  /** Estimated guesses needed to crack the password */
+  guesses: number;
+
+  /** Order of magnitude of guesses */
+  guesses_log10: number;
+
+  /** Crack time estimations */
+  crack_times: CrackTimes;
+
+  /** Overall strength score */
+  score: number;
+
+  /** Feedback for improving weak passwords */
+  feedback: Feedback | null;
+
+  /** Patterns used during password analysis */
+  sequence: Match[];
+
+  /** Calculation duration */
+  calc_time: Duration;
+}
+
+export interface CrackTimes {
+  guesses: number;
+}
+
+export interface Feedback {
+  warning: string | null;
+  suggestions: string[];
+}
+
+export interface Duration {
+  secs: number;
+  nanos: number;
+}
+
+export interface Match {
+  pattern: string;
+}
