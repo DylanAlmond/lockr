@@ -187,6 +187,45 @@ export function useVault() {
     }
   }
 
+  async function flushVault(vaultId: string): Promise<boolean> {
+    try {
+      await invoke<boolean>('flush_vault', { vaultId });
+      return true;
+    } catch (e) {
+      error.value = String(e);
+      return false;
+    }
+  }
+
+  async function flushAll(): Promise<boolean> {
+    try {
+      await invoke<boolean>('flush_all');
+      return true;
+    } catch (e) {
+      error.value = String(e);
+      return false;
+    }
+  }
+
+  async function setAutosave(enabled: boolean): Promise<boolean> {
+    try {
+      await invoke<boolean>('set_autosave', { enabled });
+      return true;
+    } catch (e) {
+      error.value = String(e);
+      return false;
+    }
+  }
+
+  async function isVaultDirty(vaultId: string): Promise<boolean> {
+    try {
+      return await invoke<boolean>('is_vault_dirty', { vaultId });
+    } catch (e) {
+      error.value = String(e);
+      return false;
+    }
+  }
+
   return {
     isLoading,
     error,
@@ -211,6 +250,10 @@ export function useVault() {
     getAccountPasswordStrength,
 
     // Util
-    getPasswordStrength
+    getPasswordStrength,
+    flushVault,
+    flushAll,
+    setAutosave,
+    isVaultDirty
   };
 }

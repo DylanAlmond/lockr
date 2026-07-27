@@ -3,7 +3,16 @@ import { useRoute } from 'vue-router';
 import { useVault } from '../../composables/useVault';
 import { Account, Entropy, Vault } from '../../types';
 import { ref, watch } from 'vue';
-import { ChevronRight, EllipsisVertical, Eye, EyeOff, Lock, Pencil, Star } from '@lucide/vue';
+import {
+  ChevronRight,
+  EllipsisVertical,
+  Eye,
+  EyeOff,
+  Lock,
+  Pencil,
+  Star,
+  StarOff
+} from '@lucide/vue';
 import Button from '../ui/Button.vue';
 import TagList from '../ui/TagList.vue';
 import { formatTimestamp } from '../../util/timestamp.ts';
@@ -12,7 +21,8 @@ import AccountField from '../ui/AccountField.vue';
 const PASSWORDSTRENGTHS = ['Very Weak', 'Weak', 'Fair', 'Good', 'Excellent'];
 
 const route = useRoute();
-const { getAccountbyId, getVaultById, getSecret, getAccountPasswordStrength } = useVault();
+const { getAccountbyId, getVaultById, getSecret, getAccountPasswordStrength, updateAccount } =
+  useVault();
 
 const vault = ref<Vault | null>(null);
 const account = ref<Account | null>(null);
@@ -43,6 +53,14 @@ async function fetchPassword() {
   return password.value;
 }
 
+async function toggleFavourite() {
+  if (!vault.value || !account.value) return;
+
+  account.value = await updateAccount(vault.value!.id, account.value!.id, {
+    favourite: !account.value?.favourite
+  });
+}
+
 watch(
   () => route.params.passwordId,
   async (id) => {
@@ -69,7 +87,7 @@ watch(
           getAccountPasswordStrength(nextAccount.vault_id, nextAccount.id)
         ]);
       }
-      
+
       password.value = null;
       showPassword.value = false;
 
@@ -101,6 +119,11 @@ watch(
           variant="outline"
           size="small"
           :icon-component="Star"
+          :icon-props="{
+            fill: account.favourite ? 'var(--color-accent)' : 'none',
+            color: account.favourite ? 'var(--color-accent)' : undefined
+          }"
+          @click="toggleFavourite"
         />
 
         <Button variant="outline" size="small" :icon-component="Pencil">Edit</Button>
@@ -120,6 +143,12 @@ watch(
       <section class="descriptor-section">
         <div class="account-icon">
           {{ (account.display_name || account.username)[0].toUpperCase() }}
+
+          <Star
+            v-if="account.favourite"
+            :size="32"
+            :fill="account.favourite ? 'var(--color-accent)' : undefined"
+          />
         </div>
         <h1 class="display-name">{{ account.display_name }}</h1>
       </section>
@@ -235,6 +264,7 @@ main {
 }
 
 .account-icon {
+  position: relative;
   display: flex;
   justify-content: center;
   align-items: center;
@@ -250,6 +280,12 @@ main {
 
   border-radius: 0.75rem;
   box-shadow: var(--shadow-sm);
+
+  > svg {
+    position: absolute;
+    right: -1rem;
+    bottom: -0.5rem;
+  }
 }
 
 .display-name {

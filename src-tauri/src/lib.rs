@@ -68,7 +68,11 @@ pub fn run() {
             commands::get_secret,
             commands::get_account_password_strength,
             // Util
-            commands::get_password_strength
+            commands::get_password_strength,
+            commands::flush_vault,
+            commands::flush_all,
+            commands::set_autosave,
+            commands::is_vault_dirty
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

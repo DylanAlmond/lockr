@@ -5,17 +5,34 @@ use uuid::Uuid;
 use zxcvbn::{zxcvbn, Entropy};
 
 use crate::{
-    crypto::{decrypt_with_secret, encrypt_with_secret},
-    Account, AccountFilter, AccountId, AccountSecret, IntoSafe, SafeAccount, SafeVault, Vault,
+    crypto::{
+        decrypt_with_key, derive_master_key, encrypt_with_key, generate_salt, MasterKey, SALT_LEN,
+    },
+    Account, AccountFilter, AccountId, IntoSafe, SafeAccount, SafeVault, Vault,
     VaultError, VaultId,
 };
+
+/// An unlocked vault held in RAM, along with its cached encryption key,
+/// salt, and dirty flag.
+///
+/// When this struct is dropped, `MasterKey` is automatically zeroized.
+struct UnlockedVault {
+    vault: Vault,
+    master_key: MasterKey,
+    salt: [u8; SALT_LEN],
+    dirty: bool,
+}
 
 pub struct VaultManager {
     /// Where to store vault files
     vaults_dir: PathBuf,
 
-    /// A map of decrypted unlocked vaults
-    unlocked_vaults: HashMap<VaultId, Vault>,
+    /// A map of decrypted unlocked vaults (with cached keys)
+    unlocked_vaults: HashMap<VaultId, UnlockedVault>,
+
+    /// When true (default), mutations save immediately.
+    /// When false, mutations only mark dirty — caller must flush.
+    autosave: bool,
 }
 
 impl VaultManager {
@@ -30,7 +47,14 @@ impl VaultManager {
         Ok(Self {
             vaults_dir,
             unlocked_vaults: HashMap::new(),
+            autosave: true,
         })
+    }
+
+    /// Toggle autosave. When disabled, mutations only mark vaults dirty.
+    /// Call `flush_all()` (or `flush_vault`) to persist changes.
+    pub fn set_autosave(&mut self, enabled: bool) {
+        self.autosave = enabled;
     }
 
     /// Get path to a vault file
@@ -43,18 +67,23 @@ impl VaultManager {
         self.unlocked_vaults.contains_key(&vault_id)
     }
 
-    /// Get an immutable reference to a specific unlocked vault
+    /// Get an immutable reference to a specific unlocked vault's data
     pub fn get_vault(&self, vault_id: VaultId) -> Result<&Vault, VaultError> {
         self.unlocked_vaults
             .get(&vault_id)
+            .map(|uv| &uv.vault)
             .ok_or(VaultError::VaultLocked)
     }
 
-    /// Get a mutable reference to a specific unlocked vault
+    /// Get a mutable reference to a specific unlocked vault's data.
+    /// Also marks the vault as dirty.
     fn get_vault_mut(&mut self, vault_id: VaultId) -> Result<&mut Vault, VaultError> {
-        self.unlocked_vaults
+        let uv = self
+            .unlocked_vaults
             .get_mut(&vault_id)
-            .ok_or(VaultError::VaultLocked)
+            .ok_or(VaultError::VaultLocked)?;
+        uv.dirty = true;
+        Ok(&mut uv.vault)
     }
 
     /// Returns a list of existing vault IDs (filenames) without unlocking them
@@ -87,11 +116,12 @@ impl VaultManager {
     pub fn get_unlocked_vaults(&self) -> Vec<SafeVault> {
         self.unlocked_vaults
             .values()
-            .map(|uv| uv.into_safe())
+            .map(|uv| uv.vault.into_safe())
             .collect()
     }
 
-    /// Create a new vault and save to disk
+    /// Create a new vault, derive master key (Argon2id — expensive),
+    /// cache it, and save to disk.
     pub fn create_vault(
         &mut self,
         name: String,
@@ -106,30 +136,39 @@ impl VaultManager {
             accounts: Vec::new(),
         };
 
-        let json_bytes = serde_json::to_vec(&vault)?;
-        let encrypted_string = encrypt_with_secret(&master_password, &secret_key, &json_bytes)?;
+        let salt = generate_salt();
+        let master_key = derive_master_key(master_password, secret_key, &salt)?;
 
-        let path = self.vault_path(vault.id);
-        std::fs::write(&path, encrypted_string)?;
+        self.unlocked_vaults.insert(
+            vault.id,
+            UnlockedVault {
+                vault: vault.clone(),
+                master_key,
+                salt,
+                dirty: false,
+            },
+        );
 
-        self.unlocked_vaults.insert(vault.id, vault.clone());
+        // Initial save (uses cached key — no re-derivation)
+        self.save_vault(vault.id)?;
 
         Ok(vault)
     }
 
-    /// Lock a specific vault (removes from RAM and zeroes password)
+    /// Lock a specific vault (drops from RAM, zeroizes the master key).
     /// If vault_id is None, lock ALL vaults.
     pub fn lock_vault(&mut self, vault_id: Option<VaultId>) {
         if let Some(id) = vault_id {
-            // Removing from HashMap triggers the `Drop` trait on UnlockedVault,
-            // which automatically zeroizes the master password!
+            // Removing from HashMap drops UnlockedVault, which drops
+            // MasterKey, which zeroizes the key bytes.
             self.unlocked_vaults.remove(&id);
         } else {
             self.unlocked_vaults.clear();
         }
     }
 
-    /// Load vault file from a given id
+    /// Load vault file from disk, derive master key (Argon2id — expensive),
+    /// cache it, and decrypt the vault contents.
     pub fn unlock_vault(
         &mut self,
         vault_id: VaultId,
@@ -143,61 +182,124 @@ impl VaultManager {
         }
 
         let encrypted_string = std::fs::read_to_string(&path)?;
-        let json_bytes = decrypt_with_secret(&master_password, &secret_key, &encrypted_string)?;
+
+        // Extract salt from the file so we can derive the key
+        let salt = crate::crypto::extract_salt(&encrypted_string)?;
+
+        // Derive master key (expensive — this is the only Argon2id call
+        // for this vault until it's locked again)
+        let master_key = derive_master_key(master_password, secret_key, &salt)?;
+
+        // Decrypt using the freshly derived key
+        let (json_bytes, salt_from_payload) = decrypt_with_key(&master_key, &encrypted_string)?;
+        debug_assert_eq!(salt, salt_from_payload);
 
         let vault: Vault = serde_json::from_slice(&json_bytes)?;
 
-        self.unlocked_vaults.insert(vault.id, vault.clone());
+        self.unlocked_vaults.insert(
+            vault.id,
+            UnlockedVault {
+                vault: vault.clone(),
+                master_key,
+                salt,
+                dirty: false,
+            },
+        );
 
         Ok(vault)
     }
 
-    /// Save a specific vault to disk
-    fn save_vault(
-        &self,
-        vault_id: VaultId,
-        master_password: &str,
-        secret_key: &[u8],
-    ) -> Result<(), VaultError> {
-        let vault = self
-            .unlocked_vaults
-            .get(&vault_id)
-            .ok_or(VaultError::VaultLocked)?;
+    /// Save a specific vault to disk using its cached master key.
+    /// This is FAST. no Argon2id, just AES-GCM + disk write.
+    fn save_vault(&mut self, vault_id: VaultId) -> Result<(), VaultError> {
+        // Borrow immutably to read data needed for encryption
+        let (_, encrypted) = {
+            let uv = self
+                .unlocked_vaults
+                .get(&vault_id)
+                .ok_or(VaultError::VaultLocked)?;
 
-        let json_bytes = serde_json::to_vec_pretty(&vault)?;
+            // Compact serialization (faster + smaller than to_vec_pretty)
+            let json_bytes = serde_json::to_vec(&uv.vault)?;
 
-        // Use the secret key stored in memory to re-encrypt
-        let encrypted_string = encrypt_with_secret(master_password, secret_key, &json_bytes)?;
+            let encrypted = encrypt_with_key(&uv.master_key, &uv.salt, &json_bytes)?;
+            (json_bytes, encrypted)
+        };
+        // Immutable borrow ends here — NLL allows mutable borrow below
 
         let path = self.vault_path(vault_id);
-        std::fs::write(path, encrypted_string)?;
+        std::fs::write(path, encrypted)?;
+
+        // Clear dirty flag
+        if let Some(uv) = self.unlocked_vaults.get_mut(&vault_id) {
+            uv.dirty = false;
+        }
 
         Ok(())
     }
 
-    // Update a specific vault
+    /// Explicitly flush a specific vault to disk if it's dirty.
+    /// Returns Ok(()) even if the vault wasn't dirty.
+    pub fn flush_vault(&mut self, vault_id: VaultId) -> Result<(), VaultError> {
+        let is_dirty = self
+            .unlocked_vaults
+            .get(&vault_id)
+            .map(|uv| uv.dirty)
+            .unwrap_or(false);
+
+        if is_dirty {
+            self.save_vault(vault_id)?;
+        }
+        Ok(())
+    }
+
+    /// Flush ALL dirty vaults to disk. Useful before closing / backgrounding.
+    pub fn flush_all(&mut self) -> Result<(), VaultError> {
+        let dirty_ids: Vec<VaultId> = self
+            .unlocked_vaults
+            .iter()
+            .filter(|(_, uv)| uv.dirty)
+            .map(|(id, _)| *id)
+            .collect();
+
+        for id in dirty_ids {
+            self.save_vault(id)?;
+        }
+
+        Ok(())
+    }
+
+    /// Check if a vault has unsaved changes
+    pub fn is_dirty(&self, vault_id: VaultId) -> bool {
+        self.unlocked_vaults
+            .get(&vault_id)
+            .map(|uv| uv.dirty)
+            .unwrap_or(false)
+    }
+
+    /// Update a specific vault's metadata. Saves immediately if autosave
+    /// is enabled; otherwise marks dirty.
     pub fn update_vault(
         &mut self,
         vault_id: VaultId,
         name: Option<String>,
         color: Option<String>,
-        mp: &str,
-        sk: &[u8],
     ) -> Result<(), VaultError> {
-        let vault = self.get_vault_mut(vault_id)?;
-
-        if let Some(n) = name {
-            vault.name = n;
+        {
+            let vault = self.get_vault_mut(vault_id)?;
+            if let Some(n) = name {
+                vault.name = n;
+            }
+            if let Some(c) = color {
+                vault.color = c;
+            }
         }
 
-        if let Some(c) = color {
-            vault.color = c;
-        }
-
-        self.save_vault(vault_id, mp, sk)
+        self.maybe_save(vault_id)?;
+        Ok(())
     }
 
-    // Delete a given vault
+    /// Delete a given vault file and remove from RAM.
     pub fn delete_vault(&mut self, vault_id: VaultId) -> Result<(), VaultError> {
         if self.is_vault_unlocked(vault_id) {
             self.lock_vault(Some(vault_id));
@@ -218,15 +320,11 @@ impl VaultManager {
         username: String,
         email: Option<String>,
         password: String,
-        mp: &str,
-        sk: &[u8],
     ) -> Result<Account, VaultError> {
-        let vault = self.get_vault_mut(vault_id)?;
-
         let now = Utc::now();
         let account = Account {
             id: Uuid::new_v4(),
-            vault_id: vault_id,
+            vault_id,
             display_name: display_name.filter(|s| !s.is_empty()),
             username,
             email: email.filter(|s| !s.is_empty()),
@@ -234,7 +332,7 @@ impl VaultManager {
             tags: Vec::new(),
             icon: None,
             color: String::new(),
-            secret: AccountSecret {
+            secret: crate::AccountSecret {
                 id: Uuid::new_v4(),
                 password,
             },
@@ -242,9 +340,12 @@ impl VaultManager {
             updated_at: now,
         };
 
-        vault.accounts.push(account.clone());
-        self.save_vault(vault_id, mp, sk)?;
+        {
+            let vault = self.get_vault_mut(vault_id)?;
+            vault.accounts.push(account.clone());
+        }
 
+        self.maybe_save(vault_id)?;
         Ok(account)
     }
 
@@ -261,65 +362,64 @@ impl VaultManager {
         icon: Option<String>,
         color: Option<String>,
         password: Option<String>,
-        mp: &str,
-        sk: &[u8],
     ) -> Result<Account, VaultError> {
-        let vault = self.get_vault_mut(vault_id)?;
+        let updated = {
+            let vault = self.get_vault_mut(vault_id)?;
+            let account = vault
+                .accounts
+                .iter_mut()
+                .find(|a| a.id == account_id)
+                .ok_or(VaultError::AccountNotFound(account_id.to_string()))?;
 
-        let account = vault
-            .accounts
-            .iter_mut()
-            .find(|a| a.id == account_id)
-            .ok_or(VaultError::AccountNotFound(account_id.to_string()))?;
+            if let Some(un) = username {
+                account.username = un;
+            }
+            if let Some(pw) = password {
+                account.secret.password = pw;
+            }
+            if let Some(fav) = favourite {
+                account.favourite = fav;
+            }
+            if let Some(t) = tags {
+                account.tags = t;
+            }
+            if let Some(c) = color {
+                account.color = c;
+            }
+            if let Some(name) = display_name {
+                account.display_name = if name.is_empty() { None } else { Some(name) };
+            }
+            if let Some(email) = email {
+                account.email = if email.is_empty() { None } else { Some(email) };
+            }
+            if let Some(icon) = icon {
+                account.icon = if icon.is_empty() { None } else { Some(icon) };
+            }
 
-        if let Some(un) = username {
-            account.username = un;
-        }
-        if let Some(pw) = password {
-            account.secret.password = pw;
-        }
-        if let Some(fav) = favourite {
-            account.favourite = fav;
-        }
-        if let Some(t) = tags {
-            account.tags = t;
-        }
-        if let Some(c) = color {
-            account.color = c;
-        }
+            account.updated_at = Utc::now();
+            account.clone()
+        };
 
-        account.display_name = display_name.filter(|s| !s.is_empty());
-        account.email = email.filter(|s| !s.is_empty());
-        account.icon = icon.filter(|s| !s.is_empty());
-
-        account.updated_at = Utc::now();
-
-        let updated = account.clone();
-
-        self.save_vault(vault_id, mp, sk)?;
-
+        self.maybe_save(vault_id)?;
         Ok(updated)
     }
 
-    // Delete a service account
+    /// Delete a service account
     pub fn delete_account(
         &mut self,
         vault_id: VaultId,
         account_id: AccountId,
-        mp: &str,
-        sk: &[u8],
     ) -> Result<(), VaultError> {
-        let vault = self.get_vault_mut(vault_id)?;
-
-        let exists = vault.accounts.iter().any(|a| a.id == account_id);
-        if !exists {
-            return Err(VaultError::AccountNotFound(account_id.to_string()));
+        {
+            let vault = self.get_vault_mut(vault_id)?;
+            let exists = vault.accounts.iter().any(|a| a.id == account_id);
+            if !exists {
+                return Err(VaultError::AccountNotFound(account_id.to_string()));
+            }
+            vault.accounts.retain(|a| a.id != account_id);
         }
 
-        vault.accounts.retain(|a| a.id != account_id);
-
-        self.save_vault(vault_id, mp, sk)?;
-
+        self.maybe_save(vault_id)?;
         Ok(())
     }
 
@@ -340,7 +440,7 @@ impl VaultManager {
         Ok(account.secret.password.clone())
     }
 
-    // Get the strength of a given accounts password
+    /// Get the strength of a given accounts password
     pub fn get_account_password_strength(
         &self,
         vault_id: VaultId,
@@ -357,12 +457,12 @@ impl VaultManager {
         Ok(zxcvbn(&account.secret.password, &[]))
     }
 
-    // Retreive a specific account by id.
+    /// Retrieve a specific account by id (searches all unlocked vaults)
     pub fn get_account_by_id(&self, account_id: AccountId) -> Result<SafeAccount, VaultError> {
         let account = self
             .unlocked_vaults
             .values()
-            .find_map(|vault| vault.accounts.iter().find(|a| a.id == account_id))
+            .find_map(|uv| uv.vault.accounts.iter().find(|a| a.id == account_id))
             .ok_or_else(|| VaultError::AccountNotFound(account_id.to_string()))?;
 
         Ok(account.into_safe())
@@ -378,7 +478,7 @@ impl VaultManager {
             vec![self.get_vault(id)?]
         } else {
             // Scan all unlocked vaults
-            self.unlocked_vaults.values().collect()
+            self.unlocked_vaults.values().map(|uv| &uv.vault).collect()
         };
 
         // Prepare optional lowercase search query once for performance
@@ -430,6 +530,15 @@ impl VaultManager {
 
         Ok(results)
     }
+
+    /// Save immediately if autosave is on. Otherwise just leave the dirty
+    /// flag set (caller is responsible for flushing).
+    fn maybe_save(&mut self, vault_id: VaultId) -> Result<(), VaultError> {
+        if self.autosave {
+            self.save_vault(vault_id)?;
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -437,14 +546,10 @@ mod tests {
     use super::*;
 
     fn setup() -> PathBuf {
-        // Generate a unique ID for this specific test run
         let unique_id = Uuid::new_v4();
         let temp_dir = std::env::temp_dir().join(format!("vault_manager_test_{}", unique_id));
-
-        // Clean up if it somehow exists, then create it fresh
         let _ = std::fs::remove_dir_all(&temp_dir);
         std::fs::create_dir_all(&temp_dir).unwrap();
-
         temp_dir
     }
 
@@ -454,21 +559,17 @@ mod tests {
     #[test]
     fn test_create_and_unlock() {
         let temp_dir = setup();
-
         let mut manager = VaultManager::new(temp_dir.clone()).unwrap();
 
-        // Create
         let created = manager
             .create_vault("My Vault".to_string(), MASTER_PW, &KEY)
             .unwrap();
         assert_eq!(created.name, "My Vault");
         assert_eq!(created.color, "#6240BF");
 
-        // Lock
         manager.lock_vault(Some(created.id));
         assert!(!manager.is_vault_unlocked(created.id));
 
-        // Unlock
         let unlocked = manager.unlock_vault(created.id, MASTER_PW, &KEY).unwrap();
         assert_eq!(unlocked.id, created.id);
         assert!(manager.is_vault_unlocked(created.id));
@@ -477,12 +578,12 @@ mod tests {
     #[test]
     fn test_add_account() {
         let temp_dir = setup();
-
         let mut manager = VaultManager::new(temp_dir.clone()).unwrap();
         let vault = manager
             .create_vault("Test".to_string(), MASTER_PW, &KEY)
             .unwrap();
 
+        // Note: no more mp/sk arguments needed!
         let account = manager
             .add_account(
                 vault.id,
@@ -490,8 +591,6 @@ mod tests {
                 "octocat".to_string(),
                 None,
                 "secret123".to_string(),
-                &MASTER_PW,
-                &KEY,
             )
             .unwrap();
 
@@ -502,7 +601,6 @@ mod tests {
         assert_eq!(account.favourite, false);
         assert_eq!(account.tags.len(), 0);
 
-        // Verify it persisted
         let vault = manager.get_vault(vault.id).unwrap();
         assert_eq!(vault.accounts.len(), 1);
     }
@@ -510,7 +608,6 @@ mod tests {
     #[test]
     fn test_update_account() {
         let temp_dir = setup();
-
         let mut manager = VaultManager::new(temp_dir.clone()).unwrap();
         let vault = manager
             .create_vault("Test".to_string(), MASTER_PW, &KEY)
@@ -523,11 +620,10 @@ mod tests {
                 "octocat".to_string(),
                 None,
                 "secret123".to_string(),
-                &MASTER_PW,
-                &KEY,
             )
             .unwrap();
 
+        // No more mp/sk arguments!
         let updated = manager
             .update_account(
                 vault.id,
@@ -540,14 +636,12 @@ mod tests {
                 None,
                 None,
                 Some("new_pass".to_string()),
-                &MASTER_PW,
-                &KEY,
             )
             .unwrap();
 
-        assert_eq!(updated.username, "octocat"); // unchanged
+        assert_eq!(updated.username, "octocat");
         assert_eq!(updated.email, Some("hello@example.com".to_string()));
-        assert_eq!(updated.secret.password, "new_pass"); // changed
+        assert_eq!(updated.secret.password, "new_pass");
         assert_eq!(updated.favourite, true);
         assert_eq!(updated.tags, vec!["social".to_string(), "work".to_string()]);
     }
@@ -555,7 +649,6 @@ mod tests {
     #[test]
     fn test_delete_account() {
         let temp_dir = setup();
-
         let mut manager = VaultManager::new(temp_dir.clone()).unwrap();
         let vault = manager
             .create_vault("Test".to_string(), MASTER_PW, &KEY)
@@ -568,16 +661,147 @@ mod tests {
                 "octocat".to_string(),
                 None,
                 "pass".to_string(),
-                &MASTER_PW,
-                &KEY,
             )
             .unwrap();
 
-        manager
-            .delete_account(vault.id, account.id, &MASTER_PW, &KEY)
-            .unwrap();
+        // No more mp/sk arguments!
+        manager.delete_account(vault.id, account.id).unwrap();
 
         let vault = manager.get_vault(vault.id).unwrap();
         assert_eq!(vault.accounts.len(), 0);
+    }
+
+    #[test]
+    fn test_batch_mode_dirty_tracking() {
+        let temp_dir = setup();
+        let mut manager = VaultManager::new(temp_dir.clone()).unwrap();
+        let vault = manager
+            .create_vault("Test".to_string(), MASTER_PW, &KEY)
+            .unwrap();
+
+        // Disable autosave for batch operations
+        manager.set_autosave(false);
+
+        // Add 3 accounts — none should be persisted yet
+        for i in 0..3 {
+            manager
+                .add_account(
+                    vault.id,
+                    None,
+                    format!("user{}", i),
+                    None,
+                    format!("pass{}", i),
+                )
+                .unwrap();
+        }
+
+        assert!(manager.is_dirty(vault.id));
+
+        // Lock and re-unlock — data should NOT be there (wasn't flushed)
+        manager.lock_vault(Some(vault.id));
+        let re_unlocked = manager.unlock_vault(vault.id, MASTER_PW, &KEY).unwrap();
+        assert_eq!(
+            re_unlocked.accounts.len(),
+            0,
+            "Batch changes were not flushed"
+        );
+
+        // Re-add in batch mode
+        manager.set_autosave(false);
+        for i in 0..3 {
+            manager
+                .add_account(
+                    vault.id,
+                    None,
+                    format!("user{}", i),
+                    None,
+                    format!("pass{}", i),
+                )
+                .unwrap();
+        }
+        assert!(manager.is_dirty(vault.id));
+
+        // Flush explicitly
+        manager.flush_vault(vault.id).unwrap();
+        assert!(!manager.is_dirty(vault.id));
+
+        // Re-enable autosave
+        manager.set_autosave(true);
+
+        // Lock and re-unlock — data SHOULD be there now
+        manager.lock_vault(Some(vault.id));
+        let re_unlocked = manager.unlock_vault(vault.id, MASTER_PW, &KEY).unwrap();
+        assert_eq!(
+            re_unlocked.accounts.len(),
+            3,
+            "Flushed changes were not persisted"
+        );
+    }
+
+    #[test]
+    fn test_flush_all() {
+        let temp_dir = setup();
+        let mut manager = VaultManager::new(temp_dir.clone()).unwrap();
+
+        let vault1 = manager
+            .create_vault("V1".to_string(), MASTER_PW, &KEY)
+            .unwrap();
+        let vault2 = manager
+            .create_vault("V2".to_string(), MASTER_PW, &KEY)
+            .unwrap();
+
+        manager.set_autosave(false);
+
+        manager
+            .add_account(vault1.id, None, "u1".to_string(), None, "p1".to_string())
+            .unwrap();
+        manager
+            .add_account(vault2.id, None, "u2".to_string(), None, "p2".to_string())
+            .unwrap();
+
+        assert!(manager.is_dirty(vault1.id));
+        assert!(manager.is_dirty(vault2.id));
+
+        manager.flush_all().unwrap();
+
+        assert!(!manager.is_dirty(vault1.id));
+        assert!(!manager.is_dirty(vault2.id));
+
+        // Verify persistence
+        manager.lock_vault(None);
+        let v1 = manager.unlock_vault(vault1.id, MASTER_PW, &KEY).unwrap();
+        let v2 = manager.unlock_vault(vault2.id, MASTER_PW, &KEY).unwrap();
+        assert_eq!(v1.accounts.len(), 1);
+        assert_eq!(v2.accounts.len(), 1);
+    }
+
+    #[test]
+    fn test_persistence_after_autosave() {
+        let temp_dir = setup();
+        let mut manager = VaultManager::new(temp_dir.clone()).unwrap();
+        let vault = manager
+            .create_vault("Test".to_string(), MASTER_PW, &KEY)
+            .unwrap();
+
+        // Autosave is on by default — add account and verify it persists
+        manager
+            .add_account(
+                vault.id,
+                None,
+                "octocat".to_string(),
+                None,
+                "pass".to_string(),
+            )
+            .unwrap();
+
+        assert!(
+            !manager.is_dirty(vault.id),
+            "Autosave should have cleared dirty flag"
+        );
+
+        // Lock and re-unlock to verify persistence
+        manager.lock_vault(Some(vault.id));
+        let re_unlocked = manager.unlock_vault(vault.id, MASTER_PW, &KEY).unwrap();
+        assert_eq!(re_unlocked.accounts.len(), 1);
     }
 }
