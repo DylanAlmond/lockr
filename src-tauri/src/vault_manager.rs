@@ -287,10 +287,15 @@ impl VaultManager {
         if let Some(c) = color {
             account.color = c;
         }
-
-        account.display_name = display_name.filter(|s| !s.is_empty());
-        account.email = email.filter(|s| !s.is_empty());
-        account.icon = icon.filter(|s| !s.is_empty());
+        if let Some(name) = display_name {
+            account.display_name = if name.is_empty() { None } else { Some(name) };
+        }
+        if let Some(email) = email {
+            account.email = if email.is_empty() { None } else { Some(email) };
+        }
+        if let Some(icon) = icon {
+            account.icon = if icon.is_empty() { None } else { Some(icon) };
+        }
 
         account.updated_at = Utc::now();
 
