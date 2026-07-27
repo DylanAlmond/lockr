@@ -7,13 +7,16 @@ import { useSearch } from '../../composables/useSearch';
 import Button from '../ui/Button.vue';
 import { ArrowDownAZ, ArrowDownWideNarrow, ArrowUpWideNarrow, ArrowDownZA } from '@lucide/vue';
 
-type Props = AccountFilter;
+type Props = AccountFilter & {
+  recently_accessed: boolean;
+};
 
 type SortCategory = 'date' | 'alphabetical';
 
 const props = withDefaults(defineProps<Props>(), {
   vault_id: null,
   favourite_only: false,
+  recently_accessed: false,
   tags: null,
   search_query: null
 });
@@ -27,8 +30,8 @@ const { getAllAccounts } = useVault();
 const accounts = ref<Account[]>([]);
 const selectedTag = ref<string>('All');
 
-const sortCategory = ref<SortCategory>('date');
-const sortAsc = ref<boolean>(false); // false = newest first (descending)
+const sortCategory = ref<SortCategory>('alphabetical');
+const sortAsc = ref(sortCategory.value === 'alphabetical'); // false = newest first (descending)
 
 const monthNames = [
   'January',
@@ -46,11 +49,11 @@ const monthNames = [
 ];
 
 // Build tag options from loaded accounts
-const tagOptions = computed(() => {
-  const tagSet = new Set<string>();
-  accounts.value.forEach((a) => a.tags.forEach((t) => tagSet.add(t)));
-  return ['All', ...Array.from(tagSet).sort()];
-});
+// const tagOptions = computed(() => {
+//   const tagSet = new Set<string>();
+//   accounts.value.forEach((a) => a.tags.forEach((t) => tagSet.add(t)));
+//   return ['All', ...Array.from(tagSet).sort()];
+// });
 
 // Filtered + sorted accounts
 const filteredAccounts = computed(() => {
@@ -107,12 +110,13 @@ const groupedAccounts = computed<AccountGroup[]>(() => {
   }));
 });
 
-function selectTag(tag: string) {
-  selectedTag.value = tag;
-}
+// function selectTag(tag: string) {
+//   selectedTag.value = tag;
+// }
 
 function setSortCategory(category: SortCategory) {
   sortCategory.value = category;
+  sortAsc.value = category === 'alphabetical';
 }
 
 function toggleSort() {
@@ -129,19 +133,51 @@ function accountRoute(accountId: string) {
   };
 }
 
+// Reload accounts whenever the filter or search changes
 watch(
-  () => [props.vault_id, props.favourite_only, props.tags, searchQuery.value],
-  async () =>
-    (accounts.value = await getAllAccounts({ ...props, search_query: searchQuery.value })),
+  () => [
+    props.vault_id,
+    props.favourite_only,
+    props.tags,
+    props.recently_accessed,
+    searchQuery.value
+  ],
+  async () => {
+    const nextAccounts = await getAllAccounts({
+      ...props,
+      search_query: searchQuery.value
+    });
+
+    accounts.value = nextAccounts;
+  },
+  { immediate: true }
+);
+
+// Only reset the default sort when the view changes
+watch(
+  () => [props.vault_id, props.favourite_only, props.recently_accessed],
+  () => {
+    sortCategory.value = props.recently_accessed ? 'date' : 'alphabetical';
+    sortAsc.value = sortCategory.value === 'alphabetical';
+  },
   { immediate: true }
 );
 
 // Default to first account in list
 watch(
-  filteredAccounts,
-  (accounts) => {
-    if (!route.params.passwordId && accounts.length) {
+  [filteredAccounts, () => route.params.passwordId],
+  ([accounts, currentId]) => {
+    const id = currentId as string | undefined;
+
+    if (!accounts.length) return;
+
+    // Check if the currently routed ID exists in our filtered list
+    const selectedExists = id ? accounts.some((account) => account.id === id) : false;
+
+    // If no ID is present (or an invalid one is), default to the first account
+    if (!selectedExists) {
       router.replace({
+        name: route.name as string,
         params: {
           ...route.params,
           passwordId: accounts[0].id

@@ -3,10 +3,7 @@ import AppLayout from '../components/layout/AppLayout.vue';
 import PasswordDetail from '../components/panel/PasswordDetail.vue';
 import AuthView from '../components/views/AuthView.vue';
 import { useUser } from '../composables/useUser';
-import AllItemsView from '../components/views/AllItemsView.vue';
-import FavouritesView from '../components/views/FavouritesView.vue';
-import RecentlyAccessedView from '../components/views/RecentlyAccessedView.vue';
-import VaultView from '../components/views/VaultView.vue';
+import PasswordsList from '../components/panel/PasswordsList.vue';
 
 const routes: RouteRecordRaw[] = [
   {
@@ -20,26 +17,47 @@ const routes: RouteRecordRaw[] = [
         name: 'all-items',
         meta: { requiresAuth: true },
         components: {
-          list: AllItemsView,
+          list: PasswordsList,
           panel: PasswordDetail
+        },
+        props: {
+          list: {
+            favourite_only: false,
+            recently_accessed: false,
+            vault_id: null
+          }
         }
       },
       {
         path: 'favourites/:passwordId?',
         name: 'favourites',
-        meta: { requiresAuth: true, favourites: true },
+        meta: { requiresAuth: true },
         components: {
-          list: FavouritesView,
+          list: PasswordsList,
           panel: PasswordDetail
+        },
+        props: {
+          list: {
+            favourite_only: true,
+            recently_accessed: false,
+            vault_id: null
+          }
         }
       },
       {
         path: 'recently-accessed/:passwordId?',
         name: 'recently-accessed',
-        meta: { requiresAuth: true, recentlyAccessed: true },
+        meta: { requiresAuth: true },
         components: {
-          list: RecentlyAccessedView,
+          list: PasswordsList,
           panel: PasswordDetail
+        },
+        props: {
+          list: {
+            favourite_only: false,
+            recently_accessed: true,
+            vault_id: null
+          }
         }
       },
       {
@@ -47,8 +65,15 @@ const routes: RouteRecordRaw[] = [
         path: 'vault/:vaultId/:passwordId?',
         meta: { requiresAuth: true },
         components: {
-          list: VaultView,
+          list: PasswordsList,
           panel: PasswordDetail
+        },
+        props: {
+          list: (route) => ({
+            favourite_only: false,
+            recently_accessed: false,
+            vault_id: route.params.vaultId
+          })
         }
       }
     ]
