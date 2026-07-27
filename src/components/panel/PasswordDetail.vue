@@ -3,10 +3,11 @@ import { useRoute } from 'vue-router';
 import { useVault } from '../../composables/useVault';
 import { Account, Entropy, Vault } from '../../types';
 import { ref, watch } from 'vue';
-import { ChevronRight, Copy, EllipsisVertical, Eye, EyeOff, Lock, Pencil, Star } from '@lucide/vue';
+import { ChevronRight, EllipsisVertical, Eye, EyeOff, Lock, Pencil, Star } from '@lucide/vue';
 import Button from '../ui/Button.vue';
 import TagList from '../ui/TagList.vue';
 import { formatTimestamp } from '../../util/timestamp.ts';
+import AccountField from '../ui/AccountField.vue';
 
 const PASSWORDSTRENGTHS = ['Very Weak', 'Weak', 'Fair', 'Good', 'Excellent'];
 
@@ -22,18 +23,24 @@ const passwordEntropy = ref<Entropy | null>();
 const password = ref<string | null>(null);
 const showPassword = ref(false);
 
-async function getPassword() {
-  if (!password.value && showPassword) {
-    password.value = await getSecret(account.value!.vault_id, account.value!.id);
+async function togglePassword() {
+  console.log(showPassword.value);
+
+  if (!password.value && showPassword.value) {
+    await fetchPassword();
   }
 
   showPassword.value = !showPassword.value;
 }
 
-async function copyToClipboard(value: string | null) {
-  if (!value) return;
+async function fetchPassword() {
+  if (!account.value) return null;
 
-  await navigator.clipboard.writeText(value);
+  if (!password.value) {
+    password.value = await getSecret(account.value.vault_id, account.value.id);
+  }
+
+  return password.value;
 }
 
 watch(
@@ -104,55 +111,29 @@ watch(
 
       <section class="account-fields-section">
         <!-- Username -->
-        <div class="account-field">
-          <div class="field-meta">
-            <h2>username</h2>
-            <span>{{ account.username }}</span>
-          </div>
-
-          <div class="field-actions">
-            <Button
-              aria-label="Copy Username"
-              icon-only
-              variant="outline"
-              size="small"
-              :icon-component="Copy"
-              @click="copyToClipboard(account.username)"
-            />
-          </div>
-        </div>
+        <AccountField
+          label="username"
+          :display-value="account.username"
+          :copy-value="account.username"
+        />
 
         <!-- Email -->
-        <div class="account-field">
-          <div class="field-meta">
-            <h2>email</h2>
-            <span>{{ account.email || 'No Email' }}</span>
-          </div>
-
-          <div class="field-actions">
-            <Button
-              aria-label="Copy Email"
-              icon-only
-              variant="outline"
-              size="small"
-              :disabled="account.email === null"
-              :icon-component="Copy"
-              @click="copyToClipboard(account.email)"
-            />
-          </div>
-        </div>
+        <AccountField
+          label="email"
+          :display-value="account.email || 'No Email'"
+          :copy-value="account.email"
+        />
 
         <!-- Password -->
-        <div class="account-field">
-          <div class="field-meta">
-            <h2>password</h2>
-            <span class="field-password"> {{ showPassword ? password : '••••••••••••••••' }} </span>
-          </div>
-
-          <div class="field-actions">
-            <span class="password-strength">{{
-              passwordEntropy?.score && PASSWORDSTRENGTHS[passwordEntropy.score]
-            }}</span>
+        <AccountField
+          label="password"
+          :display-value="showPassword ? password || '••••••••••••••••' : '••••••••••••••••'"
+          :copy-value="fetchPassword"
+        >
+          <template #actions>
+            <span v-if="passwordEntropy?.score" class="password-strength">
+              {{ PASSWORDSTRENGTHS[passwordEntropy.score] }}
+            </span>
 
             <Button
               aria-label="View Password"
@@ -160,19 +141,10 @@ watch(
               variant="outline"
               size="small"
               :icon-component="showPassword ? EyeOff : Eye"
-              @click="getPassword"
+              @click="togglePassword"
             />
-
-            <Button
-              aria-label="Copy Password"
-              icon-only
-              variant="outline"
-              size="small"
-              :icon-component="Copy"
-              @click="copyToClipboard(password)"
-            />
-          </div>
-        </div>
+          </template>
+        </AccountField>
       </section>
 
       <section class="tags-section">
@@ -283,37 +255,11 @@ main {
   }
 }
 
-.account-field {
-  display: flex;
-  align-items: center;
-  gap: 1rem;
-
-  padding: 1rem 1.5rem;
-  overflow: hidden;
-
-  .field-meta {
-    flex: 1;
-
-    > h2 {
-      font-weight: 400;
-      font-size: 0.875rem;
-      color: var(--color-accent-muted);
-      margin-bottom: 0.25rem;
-    }
-  }
-
-  .field-actions {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-
-    .password-strength {
-      margin-right: 0.5rem;
-      font-size: 0.875rem;
-      font-weight: 500;
-      color: var(--color-green);
-    }
-  }
+.password-strength {
+  margin-right: 0.5rem;
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: var(--color-green);
 }
 
 .tags-section {
