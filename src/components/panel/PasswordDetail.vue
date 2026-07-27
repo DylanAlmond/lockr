@@ -26,7 +26,7 @@ const showPassword = ref(false);
 async function togglePassword() {
   console.log(showPassword.value);
 
-  if (!password.value && showPassword.value) {
+  if (!password.value && showPassword) {
     await fetchPassword();
   }
 
@@ -48,19 +48,34 @@ watch(
   async (id) => {
     if (!id) {
       account.value = null;
+      vault.value = null;
+      passwordEntropy.value = null;
+      password.value = null;
+      showPassword.value = false;
       return;
     }
 
     loading.value = true;
 
     try {
-      account.value = await getAccountbyId(id as string);
-      vault.value = await getVaultById(account.value!.vault_id);
+      const nextAccount = await getAccountbyId(id as string);
 
-      passwordEntropy.value = await getAccountPasswordStrength(
-        account.value!.vault_id,
-        id as string
-      );
+      let nextVault: Vault | null = null;
+      let nextEntropy: Entropy | null = null;
+
+      if (nextAccount) {
+        [nextVault, nextEntropy] = await Promise.all([
+          getVaultById(nextAccount.vault_id),
+          getAccountPasswordStrength(nextAccount.vault_id, nextAccount.id)
+        ]);
+      }
+      
+      password.value = null;
+      showPassword.value = false;
+
+      account.value = nextAccount;
+      vault.value = nextVault;
+      passwordEntropy.value = nextEntropy;
     } finally {
       loading.value = false;
     }
