@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { LucideProps } from '@lucide/vue';
 import type { Component } from 'vue';
 
 type Variant = 'accent' | 'outline' | 'label';
@@ -9,6 +10,7 @@ interface Props {
   size?: Size;
   iconOnly?: boolean;
   iconComponent?: Component;
+  iconProps?: LucideProps;
   type?: 'button' | 'submit' | 'reset';
   disabled?: boolean;
   fill?: boolean;
@@ -37,7 +39,13 @@ withDefaults(defineProps<Props>(), {
       { 'button--fill': fill }
     ]"
   >
-    <component v-if="iconComponent" :is="iconComponent" class="button__icon" aria-hidden="true" />
+    <component
+      v-if="iconComponent"
+      :is="iconComponent"
+      v-bind="iconProps"
+      class="button__icon"
+      aria-hidden="true"
+    />
 
     <span v-if="!iconOnly" class="button__label">
       <slot />
