@@ -7,10 +7,13 @@ import { useRouterHistory } from '../../composables/useRouterHistory.ts';
 import { useRouter } from 'vue-router';
 import Titlebar from './Titlebar.vue';
 import { useSearch } from '../../composables/useSearch.ts';
+import useAppStore from '../../stores/appStore.ts';
 
 const router = useRouter();
 const { canGoBack, canGoForward, goBack, goForward } = useRouterHistory(router);
 const { searchQuery } = useSearch();
+
+const { state } = useAppStore();
 </script>
 
 <template>
@@ -25,7 +28,7 @@ const { searchQuery } = useSearch();
             variant="label"
             :icon-component="ArrowLeft"
             icon-only
-            :disabled="!canGoBack"
+            :disabled="state.editMode || !canGoBack"
             @click="goBack"
           />
           <Button
@@ -33,12 +36,13 @@ const { searchQuery } = useSearch();
             variant="label"
             :icon-component="ArrowRight"
             icon-only
-            :disabled="!canGoForward"
+            :disabled="state.editMode || !canGoForward"
             @click="goForward"
           />
         </div>
 
         <Input
+          :disabled="state.editMode"
           class="nav-search"
           name="nav-search"
           type="search"
@@ -46,7 +50,9 @@ const { searchQuery } = useSearch();
           :icon-component="Search"
           placeholder="Search..."
         />
-        <Button name="Create" variant="accent" :icon-component="Plus">Create</Button>
+        <Button name="Create" variant="accent" :icon-component="Plus" :disabled="state.editMode"
+          >Create</Button
+        >
       </Titlebar>
 
       <div class="content">

@@ -3,7 +3,7 @@ import { Eye, EyeOff } from '@lucide/vue';
 import { computed, ref, type Component } from 'vue';
 
 interface Props {
-  modelValue?: string;
+  modelValue?: string | null;
   type?: 'text' | 'email' | 'password' | 'search' | 'url' | 'tel' | 'number';
   placeholder?: string;
   disabled?: boolean;
@@ -150,7 +150,7 @@ function togglePassword() {
 
   text-box-trim: trim-both;
 
-  color: var(--color-text-tertiary);
+  /* color: var(--color-text-tertiary); */
 }
 
 .input__field::-ms-reveal {

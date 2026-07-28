@@ -1,9 +1,9 @@
 import { createRouter, createWebHistory, RouteRecordRaw } from 'vue-router';
 import AppLayout from '../components/layout/AppLayout.vue';
-import PasswordDetail from '../components/panel/PasswordDetail.vue';
 import AuthView from '../components/views/AuthView.vue';
 import { useUser } from '../composables/useUser';
 import PasswordsList from '../components/panel/PasswordsList.vue';
+import AccountPanel from '../components/panel/AccountPanel.vue';
 
 const routes: RouteRecordRaw[] = [
   {
@@ -18,7 +18,7 @@ const routes: RouteRecordRaw[] = [
         meta: { requiresAuth: true },
         components: {
           list: PasswordsList,
-          panel: PasswordDetail
+          panel: AccountPanel
         },
         props: {
           list: {
@@ -34,7 +34,7 @@ const routes: RouteRecordRaw[] = [
         meta: { requiresAuth: true },
         components: {
           list: PasswordsList,
-          panel: PasswordDetail
+          panel: AccountPanel
         },
         props: {
           list: {
@@ -50,7 +50,7 @@ const routes: RouteRecordRaw[] = [
         meta: { requiresAuth: true },
         components: {
           list: PasswordsList,
-          panel: PasswordDetail
+          panel: AccountPanel
         },
         props: {
           list: {
@@ -66,7 +66,7 @@ const routes: RouteRecordRaw[] = [
         meta: { requiresAuth: true },
         components: {
           list: PasswordsList,
-          panel: PasswordDetail
+          panel: AccountPanel
         },
         props: {
           list: (route) => ({

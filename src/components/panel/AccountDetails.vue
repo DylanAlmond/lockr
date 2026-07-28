@@ -1,110 +1,35 @@
 <script setup lang="ts">
-import { useRoute } from 'vue-router';
-import { useVault } from '../../composables/useVault';
 import { Account, Entropy, Vault } from '../../types';
-import { ref, watch } from 'vue';
-import {
-  ChevronRight,
-  EllipsisVertical,
-  Eye,
-  EyeOff,
-  Lock,
-  Pencil,
-  Star,
-  StarOff
-} from '@lucide/vue';
+import { ChevronRight, EllipsisVertical, Eye, EyeOff, Lock, Pencil, Star } from '@lucide/vue';
 import Button from '../ui/Button.vue';
 import TagList from '../ui/TagList.vue';
 import { formatTimestamp } from '../../util/timestamp.ts';
 import AccountField from '../ui/AccountField.vue';
+import { PASSWORDSTRENGTHS } from '../../util/constants.ts';
 
-const PASSWORDSTRENGTHS = ['Very Weak', 'Weak', 'Fair', 'Good', 'Excellent'];
-
-const route = useRoute();
-const { getAccountbyId, getVaultById, getSecret, getAccountPasswordStrength, updateAccount } =
-  useVault();
-
-const vault = ref<Vault | null>(null);
-const account = ref<Account | null>(null);
-const loading = ref(false);
-
-const passwordEntropy = ref<Entropy | null>();
-
-const password = ref<string | null>(null);
-const showPassword = ref(false);
-
-async function togglePassword() {
-  console.log(showPassword.value);
-
-  if (!password.value && showPassword) {
-    await fetchPassword();
-  }
-
-  showPassword.value = !showPassword.value;
+interface Props {
+  account: Account | null;
+  vault: Vault | null;
+  passwordEntropy: Entropy | null;
+  password: string | null;
+  showPassword: boolean;
+  fetchPassword: () => Promise<string | null>;
 }
 
-async function fetchPassword() {
-  if (!account.value) return null;
+const props = defineProps<Props>();
 
-  if (!password.value) {
-    password.value = await getSecret(account.value.vault_id, account.value.id);
-  }
-
-  return password.value;
-}
-
-async function toggleFavourite() {
-  if (!vault.value || !account.value) return;
-
-  account.value = await updateAccount(vault.value!.id, account.value!.id, {
-    favourite: !account.value?.favourite
-  });
-}
-
-watch(
-  () => route.params.passwordId,
-  async (id) => {
-    if (!id) {
-      account.value = null;
-      vault.value = null;
-      passwordEntropy.value = null;
-      password.value = null;
-      showPassword.value = false;
-      return;
-    }
-
-    loading.value = true;
-
-    try {
-      const nextAccount = await getAccountbyId(id as string);
-
-      let nextVault: Vault | null = null;
-      let nextEntropy: Entropy | null = null;
-
-      if (nextAccount) {
-        [nextVault, nextEntropy] = await Promise.all([
-          getVaultById(nextAccount.vault_id),
-          getAccountPasswordStrength(nextAccount.vault_id, nextAccount.id)
-        ]);
-      }
-
-      password.value = null;
-      showPassword.value = false;
-
-      account.value = nextAccount;
-      vault.value = nextVault;
-      passwordEntropy.value = nextEntropy;
-    } finally {
-      loading.value = false;
-    }
-  },
-  { immediate: true }
-);
+const emit = defineEmits<{
+  (e: 'togglePassword'): void;
+  (e: 'toggleFavourite'): void;
+  (e: 'edit'): void;
+}>();
 </script>
 
 <template>
+  <!-- Empty -->
   <div v-if="!account" class="wrapper">No account found.</div>
 
+  <!-- View Mode -->
   <div v-else class="wrapper">
     <header>
       <div class="vault-label">
@@ -123,10 +48,12 @@ watch(
             fill: account.favourite ? 'var(--color-accent)' : 'none',
             color: account.favourite ? 'var(--color-accent)' : undefined
           }"
-          @click="toggleFavourite"
+          @click="emit('toggleFavourite')"
         />
 
-        <Button variant="outline" size="small" :icon-component="Pencil">Edit</Button>
+        <Button variant="outline" size="small" :icon-component="Pencil" @click="emit('edit')"
+          >Edit</Button
+        >
 
         <Button
           class="menu-button"
@@ -159,6 +86,7 @@ watch(
           label="username"
           :display-value="account.username"
           :copy-value="account.username"
+          can-copy
         />
 
         <!-- Email -->
@@ -166,6 +94,7 @@ watch(
           label="email"
           :display-value="account.email || 'No Email'"
           :copy-value="account.email"
+          can-copy
         />
 
         <!-- Password -->
@@ -173,6 +102,7 @@ watch(
           label="password"
           :display-value="showPassword ? password || '••••••••••••••••' : '••••••••••••••••'"
           :copy-value="fetchPassword"
+          can-copy
         >
           <template #actions>
             <span v-if="passwordEntropy?.score" class="password-strength">
@@ -185,7 +115,7 @@ watch(
               variant="outline"
               size="small"
               :icon-component="showPassword ? EyeOff : Eye"
-              @click="togglePassword"
+              @click="emit('togglePassword')"
             />
           </template>
         </AccountField>
@@ -194,7 +124,7 @@ watch(
       <section class="tags-section">
         <h2>tags</h2>
 
-        <TagList :tags="account.tags" />
+        <TagList :modelValue="account.tags" />
       </section>
 
       <section class="timestamp-section">
@@ -298,11 +228,16 @@ main {
   flex-direction: column;
   width: 100%;
 
-  border: 1px solid var(--color-border);
-  border-radius: 0.75rem;
+  & > *:first-child {
+    border-radius: 0.75rem 0.75rem 0 0;
+  }
+
+  & > *:last-child {
+    border-radius: 0 0 0.75rem 0.75rem;
+  }
 
   & > *:not(:last-child) {
-    border-bottom: 1px solid var(--color-border);
+    border-bottom: none;
   }
 }
 

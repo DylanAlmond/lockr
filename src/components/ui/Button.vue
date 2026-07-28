@@ -2,7 +2,7 @@
 import { LucideProps } from '@lucide/vue';
 import type { Component } from 'vue';
 
-type Variant = 'accent' | 'outline' | 'label';
+type Variant = 'accent' | 'outline' | 'label' | 'solid';
 type Size = 'default' | 'small';
 
 interface Props {
@@ -159,6 +159,13 @@ withDefaults(defineProps<Props>(), {
 
 .button--label {
   background: transparent;
+  color: var(--color-text);
+}
+
+/* ---------- Solid ---------- */
+
+.button--solid {
+  background: var(--color-bg);
   color: var(--color-text);
 }
 
