@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue';
-import { Account, AccountFilter } from '../../types';
+import { Account, AccountFilter } from '../../types/index.ts';
 import { useRoute, useRouter } from 'vue-router';
-import { useVault } from '../../composables/useVault';
-import { useSearch } from '../../composables/useSearch';
+import { useVault } from '../../composables/useVault.ts';
+import { useSearch } from '../../composables/useSearch.ts';
 import Button from '../ui/Button.vue';
 import { ArrowDownAZ, ArrowDownWideNarrow, ArrowUpWideNarrow, ArrowDownZA } from '@lucide/vue';
 import useAppStore from '../../stores/appStore.ts';

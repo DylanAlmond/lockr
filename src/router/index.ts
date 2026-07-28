@@ -2,7 +2,7 @@ import { createRouter, createWebHistory, RouteRecordRaw } from 'vue-router';
 import AppLayout from '../components/layout/AppLayout.vue';
 import AuthView from '../components/views/AuthView.vue';
 import { useUser } from '../composables/useUser';
-import PasswordsList from '../components/panel/PasswordsList.vue';
+import AccountList from '../components/panel/AccountList.vue';
 import AccountPanel from '../components/panel/AccountPanel.vue';
 
 const routes: RouteRecordRaw[] = [
@@ -17,7 +17,7 @@ const routes: RouteRecordRaw[] = [
         name: 'all-items',
         meta: { requiresAuth: true },
         components: {
-          list: PasswordsList,
+          list: AccountList,
           panel: AccountPanel
         },
         props: {
@@ -33,7 +33,7 @@ const routes: RouteRecordRaw[] = [
         name: 'favourites',
         meta: { requiresAuth: true },
         components: {
-          list: PasswordsList,
+          list: AccountList,
           panel: AccountPanel
         },
         props: {
@@ -49,7 +49,7 @@ const routes: RouteRecordRaw[] = [
         name: 'recently-accessed',
         meta: { requiresAuth: true },
         components: {
-          list: PasswordsList,
+          list: AccountList,
           panel: AccountPanel
         },
         props: {
@@ -65,7 +65,7 @@ const routes: RouteRecordRaw[] = [
         path: 'vault/:vaultId/:passwordId?',
         meta: { requiresAuth: true },
         components: {
-          list: PasswordsList,
+          list: AccountList,
           panel: AccountPanel
         },
         props: {
