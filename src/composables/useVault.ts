@@ -48,10 +48,7 @@ export function useVault() {
     }
   }
 
-  async function updateVault(
-    vaultId: string,
-    data: { name?: string | null; color?: string | null }
-  ): Promise<boolean> {
+  async function updateVault(vaultId: string, data: Partial<Omit<Vault, 'id'>>): Promise<boolean> {
     try {
       await invoke('update_vault', {
         vaultId,
@@ -117,25 +114,15 @@ export function useVault() {
   async function updateAccount(
     vaultId: string,
     accountId: string,
-    data: {
-      displayName?: string | null;
-      username?: string | null;
-      email?: string | null;
-      password?: string | null;
-      favourite?: boolean | null;
-      tags?: string[] | null;
-      icon?: string | null;
-      color?: string | null;
-    }
+    data: Partial<Omit<Account, 'id'>>
   ): Promise<Account | null> {
     try {
       return await invoke<Account>('update_account', {
         vaultId,
         accountId,
-        displayName: data.displayName ?? undefined,
+        displayName: data.display_name ?? undefined,
         username: data.username ?? undefined,
         email: data.email ?? undefined,
-        password: data.password ?? undefined,
         favourite: data.favourite ?? undefined,
         tags: data.tags ?? undefined,
         icon: data.icon ?? undefined,
