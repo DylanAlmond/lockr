@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ArrowLeft, ArrowRight, Plus, Search } from '@lucide/vue';
+import { ArrowLeft, ArrowRight, KeyRound, Plus, Search, Vault } from '@lucide/vue';
 import Input from '../ui/Input.vue';
 import Sidebar from './Sidebar.vue';
 import Button from '../ui/Button.vue';
@@ -8,12 +8,32 @@ import { useRouter } from 'vue-router';
 import Titlebar from './Titlebar.vue';
 import { useSearch } from '../../composables/useSearch.ts';
 import useAppStore from '../../stores/appStore.ts';
+import Dropdown, { DropdownItem } from '../ui/Dropdown.vue';
+import { ref } from 'vue';
 
 const router = useRouter();
 const { canGoBack, canGoForward, goBack, goForward } = useRouterHistory(router);
 const { searchQuery } = useSearch();
-
 const { state } = useAppStore();
+
+const createMenuItems = ref<DropdownItem[]>([
+  {
+    label: 'Vault',
+    icon: Vault,
+    disabled: true,
+    onSelect: () => {
+      console.log('Create vault!');
+    }
+  },
+  {
+    label: 'New Account',
+    icon: KeyRound,
+    disabled: true,
+    onSelect: () => {
+      console.log('Create account!');
+    }
+  }
+]);
 </script>
 
 <template>
@@ -50,9 +70,18 @@ const { state } = useAppStore();
           :icon-component="Search"
           placeholder="Search..."
         />
-        <Button name="Create" variant="accent" :icon-component="Plus" :disabled="state.editMode"
-          >Create</Button
-        >
+
+        <Dropdown :list="createMenuItems" #trigger="{ triggerProps }">
+          <Button
+            name="Create"
+            variant="accent"
+            :icon-component="Plus"
+            :disabled="state.editMode"
+            v-bind="triggerProps"
+          >
+            Create
+          </Button>
+        </Dropdown>
       </Titlebar>
 
       <div class="content">

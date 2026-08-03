@@ -6,6 +6,12 @@ import TagList from '../ui/TagList.vue';
 import { formatTimestamp } from '../../util/timestamp.ts';
 import AccountField from '../ui/AccountField.vue';
 import { PASSWORDSTRENGTHS } from '../../util/constants.ts';
+import Dropdown, { DropdownItem } from '../ui/Dropdown.vue';
+import { ref } from 'vue';
+import AlertModal from '../ui/AlertModal.vue';
+import { useModal } from '../../composables/useModal.ts';
+import { useVault } from '../../composables/useVault.ts';
+import { useRouter } from 'vue-router';
 
 interface Props {
   account: Account | null;
@@ -16,6 +22,10 @@ interface Props {
   fetchPassword: () => Promise<string | null>;
 }
 
+const { openModal } = useModal();
+const { deleteAccount } = useVault();
+const router = useRouter();
+
 const props = defineProps<Props>();
 
 const emit = defineEmits<{
@@ -23,6 +33,47 @@ const emit = defineEmits<{
   (e: 'toggleFavourite'): void;
   (e: 'edit'): void;
 }>();
+
+async function handleDelete() {
+  console.log('hello');
+
+  if (!props.account?.vault_id || !props.account.id) return;
+
+  const success = await deleteAccount(props.account.vault_id, props.account.id);
+  console.log(success);
+
+  if (success) {
+    await router.replace({
+      name: router.currentRoute.value.name as string,
+      params: {
+        ...router.currentRoute.value.params,
+        passwordId: null
+      }
+    });
+  }
+}
+
+const miscMenuItems = ref<DropdownItem[]>([
+  {
+    label: 'Change Password',
+    onSelect: () => {
+      console.log('Create vault!');
+    }
+  },
+  {
+    label: 'Delete Account',
+    onSelect: () => {
+      openModal(AlertModal, {
+        title:
+          'Delete ' + (props.account?.display_name ? `"${props.account.display_name}"` : 'Account'),
+        message: "Are you sure you want to continue? This can't be undone.",
+        actionLabel: 'Delete',
+        onClose: () => {},
+        onConfirm: () => handleDelete()
+      });
+    }
+  }
+]);
 </script>
 
 <template>
@@ -55,14 +106,17 @@ const emit = defineEmits<{
           >Edit</Button
         >
 
-        <Button
-          class="menu-button"
-          aria-label="Account Menu"
-          icon-only
-          variant="label"
-          size="small"
-          :icon-component="EllipsisVertical"
-        />
+        <Dropdown :list="miscMenuItems" #trigger="{ triggerProps }">
+          <Button
+            class="menu-button"
+            aria-label="Account Menu"
+            icon-only
+            variant="label"
+            size="small"
+            :icon-component="EllipsisVertical"
+            v-bind="triggerProps"
+          />
+        </Dropdown>
       </nav>
     </header>
 
