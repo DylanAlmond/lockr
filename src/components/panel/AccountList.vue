@@ -141,6 +141,7 @@ watch(
     props.favourite_only,
     props.tags,
     props.recently_accessed,
+    route.params.passwordId,
     searchQuery.value
   ],
   async () => {
