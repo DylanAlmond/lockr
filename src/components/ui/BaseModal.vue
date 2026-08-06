@@ -47,7 +47,7 @@ function handleOutsideClick(event: MouseEvent) {
   border-radius: 12px;
   padding: 1.5rem;
   background: transparent;
-  max-width: 400px;
+  max-width: 480px;
   width: 90%;
   box-shadow: var(--shadow-sm);
   background-color: var(--color-bg);

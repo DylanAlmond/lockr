@@ -6,7 +6,6 @@ import { useVault } from '../../composables/useVault.ts';
 import { useSearch } from '../../composables/useSearch.ts';
 import Button from '../ui/Button.vue';
 import { ArrowDownAZ, ArrowDownWideNarrow, ArrowUpWideNarrow, ArrowDownZA } from '@lucide/vue';
-import useAppStore from '../../stores/appStore.ts';
 
 type Props = AccountFilter & {
   recently_accessed: boolean;

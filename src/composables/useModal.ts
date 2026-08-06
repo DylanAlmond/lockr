@@ -1,4 +1,4 @@
-import { ref, type Component } from 'vue';
+import { ref, shallowRef, type Component } from 'vue';
 
 export interface ModalState {
   component: Component | null;
@@ -11,7 +11,7 @@ type ComponentProps<T> = T extends new (...args: any[]) => any
 
 // Global singleton state
 const isOpen = ref<boolean>(false);
-const modalState = ref<ModalState>({
+const modalState = shallowRef<ModalState>({
   component: null,
   props: {}
 });

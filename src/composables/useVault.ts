@@ -134,6 +134,23 @@ export function useVault() {
     }
   }
 
+  async function updateAccountPassword(
+    vaultId: string,
+    accountId: string,
+    password: string | null
+  ): Promise<Account | null> {
+    try {
+      return await invoke<Account>('update_account', {
+        vaultId,
+        accountId,
+        password
+      });
+    } catch (e) {
+      error.value = String(e);
+      return null;
+    }
+  }
+
   async function deleteAccount(vaultId: string, accountId: string): Promise<boolean> {
     try {
       await invoke('delete_account', { vaultId, accountId });
@@ -235,6 +252,7 @@ export function useVault() {
     deleteAccount,
     getSecret,
     getAccountPasswordStrength,
+    updateAccountPassword,
 
     // Util
     getPasswordStrength,

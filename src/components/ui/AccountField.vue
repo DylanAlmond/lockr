@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { ref, onUnmounted } from 'vue';
-import { Copy, Check } from '@lucide/vue';
+import { ref, computed, onUnmounted } from 'vue';
+import { Copy, Check, Eye, EyeOff } from '@lucide/vue';
 import Button from './Button.vue';
 
 type CopyableValue = string | null | (() => string | null | Promise<string | null>);
@@ -10,15 +10,17 @@ interface Props {
   displayValue?: string | null;
   copyValue?: CopyableValue;
   canCopy?: boolean;
-  inputType?: 'text' | 'email' | 'tel';
+  type?: 'text' | 'email' | 'tel' | 'password';
   modelValue?: string | null;
+  input?: boolean;
 }
 
 const props = withDefaults(defineProps<Props>(), {
   displayValue: null,
   canCopy: false,
   inputType: undefined,
-  modelValue: null
+  modelValue: null,
+  input: false
 });
 
 const emit = defineEmits<{
@@ -26,19 +28,24 @@ const emit = defineEmits<{
 }>();
 
 const copied = ref(false);
+const showPassword = ref(false);
 let cooldownTimer: ReturnType<typeof setTimeout> | null = null;
+
+const computedInputType = computed(() => {
+  if (props.type === 'password') {
+    return showPassword.value ? 'text' : 'password';
+  }
+  return props.type;
+});
 
 async function handleCopy() {
   let valueToCopy: string | null = null;
 
-  if (!props.displayValue && props.inputType !== undefined && props.modelValue) {
+  if (!props.displayValue && props.type !== undefined && props.modelValue) {
     valueToCopy = props.modelValue;
-  }
-  // Check if copyValue is a function (e.g., fetching a secret)
-  else if (typeof props.copyValue === 'function') {
+  } else if (typeof props.copyValue === 'function') {
     valueToCopy = await props.copyValue();
   } else {
-    // Fall back to displayValue if copyValue isn't explicitly provided
     valueToCopy = props.copyValue ?? props.displayValue;
   }
 
@@ -70,8 +77,8 @@ onUnmounted(() => {
 
       <!-- Input Mode -->
       <input
-        v-if="inputType"
-        :type="inputType"
+        v-if="input"
+        :type="computedInputType"
         class="field-input"
         :value="modelValue"
         placeholder="No Value"
@@ -81,13 +88,25 @@ onUnmounted(() => {
       <!-- Display Mode -->
       <template v-else>
         <span v-if="copied" class="copied">Copied!</span>
-        <span v-else>{{ displayValue || 'No Value' }}</span>
+        <span v-else>{{
+          type === 'password' && !showPassword ? '••••••••••••••••' : displayValue || 'No Value'
+        }}</span>
       </template>
     </div>
 
     <div class="field-actions">
-      <!-- Slot for extra buttons like Eye/EyeOff or Password Strength -->
       <slot name="actions" />
+
+      <!-- Password Visibility Toggle -->
+      <Button
+        v-if="type === 'password'"
+        aria-label="Toggle password visibility"
+        icon-only
+        variant="outline"
+        size="small"
+        :icon-component="showPassword ? EyeOff : Eye"
+        @click="showPassword = !showPassword"
+      />
 
       <Button
         v-if="canCopy"
@@ -95,7 +114,6 @@ onUnmounted(() => {
         icon-only
         variant="outline"
         size="small"
-        :disabled="!displayValue"
         :icon-component="copied ? Check : Copy"
         @click="handleCopy"
       />
@@ -121,7 +139,6 @@ onUnmounted(() => {
   box-shadow: inset 0 0 0 2px var(--color-accent);
 }
 
-/* Corner smoothing */
 @supports (corner-shape: squircle) {
   .account-field {
     corner-shape: squircle;
@@ -166,7 +183,7 @@ onUnmounted(() => {
   border: none;
   outline: none;
   padding: 0;
-  margin: 0; /* Removes default browser margins */
+  margin: 0;
 }
 
 .field-input::-ms-reveal {
@@ -182,7 +199,6 @@ onUnmounted(() => {
   cursor: not-allowed;
 }
 
-/* Handle browser autofill colors */
 .field-input:-webkit-autofill,
 .field-input:-webkit-autofill:hover,
 .field-input:-webkit-autofill:focus {

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Account, Entropy, Vault } from '../../types';
+import { ref, computed, watch } from 'vue';
 import { ChevronRight, EllipsisVertical, Eye, EyeOff, Lock, Pencil, Star } from '@lucide/vue';
 import Button from '../ui/Button.vue';
 import TagList from '../ui/TagList.vue';
@@ -7,65 +7,79 @@ import { formatTimestamp } from '../../util/timestamp.ts';
 import AccountField from '../ui/AccountField.vue';
 import { PASSWORDSTRENGTHS } from '../../util/constants.ts';
 import Dropdown, { DropdownItem } from '../ui/Dropdown.vue';
-import { ref } from 'vue';
 import AlertModal from '../ui/AlertModal.vue';
 import { useModal } from '../../composables/useModal.ts';
 import { useVault } from '../../composables/useVault.ts';
 import { useRouter } from 'vue-router';
+import { markRaw } from 'vue';
+import ChangePasswordModal from '../ui/ChangePasswordModal.vue';
+import useAppStore from '../../stores/appStore.ts';
+import { Entropy } from '../../types/index.ts';
 
-interface Props {
-  account: Account | null;
-  vault: Vault | null;
-  passwordEntropy: Entropy | null;
-  password: string | null;
-  showPassword: boolean;
-  fetchPassword: () => Promise<string | null>;
-}
-
+const { state, updateActiveAccount } = useAppStore();
+const { deleteAccount, getSecret, getAccountPasswordStrength } = useVault();
 const { openModal } = useModal();
-const { deleteAccount } = useVault();
 const router = useRouter();
 
-const props = defineProps<Props>();
+const password = ref<string | null>(null);
+const passwordEntropy = ref<Entropy | null>(null);
+const showPassword = ref(false);
 
-const emit = defineEmits<{
-  (e: 'togglePassword'): void;
-  (e: 'toggleFavourite'): void;
-  (e: 'edit'): void;
-}>();
+async function fetchPassword() {
+  if (!state.activeAccount) return null;
+  if (!password.value) {
+    password.value = await getSecret(state.activeAccount.vault_id, state.activeAccount.id);
+  }
+  return password.value;
+}
+
+async function togglePassword() {
+  if (!showPassword.value && !password.value) {
+    await fetchPassword();
+  }
+  showPassword.value = !showPassword.value;
+}
+
+async function toggleFavourite() {
+  if (!state.activeAccount) return;
+
+  const newFav = !state.activeAccount.favourite;
+  updateActiveAccount({ favourite: newFav });
+}
 
 async function handleDelete() {
-  console.log('hello');
+  if (!state.activeAccount?.vault_id || !state.activeAccount.id) return;
 
-  if (!props.account?.vault_id || !props.account.id) return;
-
-  const success = await deleteAccount(props.account.vault_id, props.account.id);
-  console.log(success);
+  const success = await deleteAccount(state.activeAccount.vault_id, state.activeAccount.id);
+  state.activeAccount = null;
 
   if (success) {
     await router.replace({
       name: router.currentRoute.value.name as string,
-      params: {
-        ...router.currentRoute.value.params,
-        passwordId: null
-      }
+      params: { ...router.currentRoute.value.params, passwordId: null }
     });
   }
 }
 
-const miscMenuItems = ref<DropdownItem[]>([
+const miscMenuItems = computed<DropdownItem[]>(() => [
   {
     label: 'Change Password',
+    disabled: state.activeAccount == null,
     onSelect: () => {
-      console.log('Create vault!');
+      if (!state.activeAccount) return;
+      openModal(markRaw(ChangePasswordModal), {
+        onClose: () => {},
+        onConfirm: () => {}
+      });
     }
   },
   {
     label: 'Delete Account',
     onSelect: () => {
-      openModal(AlertModal, {
+      openModal(markRaw(AlertModal), {
         title:
-          'Delete ' + (props.account?.display_name ? `"${props.account.display_name}"` : 'Account'),
+          'Delete ' +
+          (state.activeAccount?.display_name ? `"${state.activeAccount.display_name}"` : 'Account'),
         message: "Are you sure you want to continue? This can't be undone.",
         actionLabel: 'Delete',
         onClose: () => {},
@@ -74,18 +88,37 @@ const miscMenuItems = ref<DropdownItem[]>([
     }
   }
 ]);
+
+// clear the local password state so it fetches the correct one next time.
+watch(
+  () => [state.activeAccount?.id, state.activeAccount?.updated_at],
+  async () => {
+    password.value = null;
+    showPassword.value = false;
+
+    if (state.activeAccount) {
+      passwordEntropy.value = await getAccountPasswordStrength(
+        state.activeAccount?.vault_id,
+        state.activeAccount?.id
+      );
+    } else {
+      passwordEntropy.value = null;
+    }
+  },
+  { immediate: true }
+);
 </script>
 
 <template>
   <!-- Empty -->
-  <div v-if="!account" class="wrapper">No account found.</div>
+  <div v-if="!state.activeAccount" class="wrapper">No account found.</div>
 
   <!-- View Mode -->
   <div v-else class="wrapper">
     <header>
       <div class="vault-label">
-        <Lock :size="20" aria-hidden="true" :color="vault?.color || '#6240BF'" />
-        <span>{{ vault?.name || 'Unknown Vault' }}</span>
+        <Lock :size="20" aria-hidden="true" :color="state.activeVault?.color || '#6240BF'" />
+        <span>{{ state.activeVault?.name || 'Unknown Vault' }}</span>
       </div>
 
       <nav class="header-toolbar">
@@ -96,15 +129,20 @@ const miscMenuItems = ref<DropdownItem[]>([
           size="small"
           :icon-component="Star"
           :icon-props="{
-            fill: account.favourite ? 'var(--color-accent)' : 'none',
-            color: account.favourite ? 'var(--color-accent)' : undefined
+            fill: state.activeAccount.favourite ? 'var(--color-accent)' : 'none',
+            color: state.activeAccount.favourite ? 'var(--color-accent)' : undefined
           }"
-          @click="emit('toggleFavourite')"
+          @click="toggleFavourite"
         />
 
-        <Button variant="outline" size="small" :icon-component="Pencil" @click="emit('edit')"
-          >Edit</Button
+        <Button
+          variant="outline"
+          size="small"
+          :icon-component="Pencil"
+          @click="state.editMode = true"
         >
+          Edit
+        </Button>
 
         <Dropdown :list="miscMenuItems" #trigger="{ triggerProps }">
           <Button
@@ -123,31 +161,30 @@ const miscMenuItems = ref<DropdownItem[]>([
     <main class="thin-scrollbar">
       <section class="descriptor-section">
         <div class="account-icon">
-          {{ (account.display_name || account.username)[0].toUpperCase() }}
-
+          {{ (state.activeAccount.display_name || state.activeAccount.username)[0].toUpperCase() }}
           <Star
-            v-if="account.favourite"
+            v-if="state.activeAccount.favourite"
             :size="32"
-            :fill="account.favourite ? 'var(--color-accent)' : undefined"
+            :fill="state.activeAccount.favourite ? 'var(--color-accent)' : undefined"
           />
         </div>
-        <h1 class="display-name">{{ account.display_name }}</h1>
+        <h1 class="display-name">{{ state.activeAccount.display_name }}</h1>
       </section>
 
       <section class="account-fields-section">
         <!-- Username -->
         <AccountField
           label="username"
-          :display-value="account.username"
-          :copy-value="account.username"
+          :display-value="state.activeAccount.username"
+          :copy-value="state.activeAccount.username"
           can-copy
         />
 
         <!-- Email -->
         <AccountField
           label="email"
-          :display-value="account.email || 'No Email'"
-          :copy-value="account.email"
+          :display-value="state.activeAccount.email || 'No Email'"
+          :copy-value="state.activeAccount.email"
           can-copy
         />
 
@@ -159,7 +196,7 @@ const miscMenuItems = ref<DropdownItem[]>([
           can-copy
         >
           <template #actions>
-            <span v-if="passwordEntropy?.score" class="password-strength">
+            <span v-if="passwordEntropy !== null" class="password-strength">
               {{ PASSWORDSTRENGTHS[passwordEntropy.score] }}
             </span>
 
@@ -169,7 +206,7 @@ const miscMenuItems = ref<DropdownItem[]>([
               variant="outline"
               size="small"
               :icon-component="showPassword ? EyeOff : Eye"
-              @click="emit('togglePassword')"
+              @click="togglePassword"
             />
           </template>
         </AccountField>
@@ -177,13 +214,12 @@ const miscMenuItems = ref<DropdownItem[]>([
 
       <section class="tags-section">
         <h2>tags</h2>
-
-        <TagList :modelValue="account.tags" />
+        <TagList :modelValue="state.activeAccount.tags" />
       </section>
 
       <section class="timestamp-section">
         <ChevronRight :size="20" />
-        <span>{{ `Last edited ${formatTimestamp(account.updated_at)} ` }}</span>
+        <span>{{ `Last edited ${formatTimestamp(state.activeAccount.updated_at)} ` }}</span>
       </section>
     </main>
   </div>
@@ -196,14 +232,12 @@ const miscMenuItems = ref<DropdownItem[]>([
   height: 100%;
   overflow: hidden;
 }
-
 header {
   display: flex;
   align-items: center;
   justify-content: space-between;
   padding: 1rem;
 }
-
 main {
   display: flex;
   flex-direction: column;
@@ -211,42 +245,34 @@ main {
   gap: 1.5rem;
   padding: 1rem;
   flex: 1;
-
   overflow-y: auto;
   overflow-x: hidden;
 }
-
 .menu-button {
   --button-icon-size: 1.5rem;
 }
-
 .vault-label {
   display: flex;
   align-items: center;
   gap: 0.5rem;
-
   > span {
     font-size: 1.125rem;
     color: var(--color-text-tertiary);
     font-weight: 350;
-
     text-box-trim: trim-both;
     text-box-edge: cap alphabetic;
   }
 }
-
 .header-toolbar {
   display: flex;
   gap: 0.75rem;
 }
-
 .descriptor-section {
   display: flex;
   align-items: center;
   gap: 1rem;
   padding: 0.75rem 0rem;
 }
-
 .account-icon {
   position: relative;
   display: flex;
@@ -255,59 +281,48 @@ main {
   width: 5.25rem;
   height: 5.25rem;
   aspect-ratio: 1/1;
-
   font-size: 2rem;
   font-family: var(--font-geo);
   font-weight: 500;
   background-color: var(--color-accent-hover);
   color: var(--color-accent);
-
   border-radius: 0.75rem;
   box-shadow: var(--shadow-sm);
-
   > svg {
     position: absolute;
     right: -1rem;
     bottom: -0.5rem;
   }
 }
-
 .display-name {
   font-size: 2rem;
   font-family: var(--font-geo);
 }
-
 .account-fields-section {
   display: flex;
   flex-direction: column;
   width: 100%;
-
   & > *:first-child {
     border-radius: 0.75rem 0.75rem 0 0;
   }
-
   & > *:last-child {
     border-radius: 0 0 0.75rem 0.75rem;
   }
-
   & > *:not(:last-child) {
     border-bottom: none;
   }
 }
-
 .password-strength {
   margin-right: 0.5rem;
   font-size: 0.875rem;
   font-weight: 500;
   color: var(--color-green);
 }
-
 .tags-section {
   display: flex;
   flex-direction: column;
   gap: 0.75rem;
   padding: 0rem 1.5rem;
-
   > h2 {
     font-weight: 400;
     font-size: 0.875rem;
@@ -315,18 +330,14 @@ main {
     margin-bottom: 0.25rem;
   }
 }
-
 .timestamp-section {
   display: flex;
   align-items: center;
   gap: 0.75rem;
-
   padding: 1.5rem;
   padding-right: 0rem;
-
   text-box-trim: trim-both;
   text-box-edge: cap alphabetic;
-
   > svg {
     color: var(--color-text-muted);
   }

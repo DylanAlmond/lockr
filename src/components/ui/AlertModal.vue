@@ -1,14 +1,12 @@
 <script setup lang="ts">
 import Button from './Button.vue';
 
-// Define strict types for the props this custom modal accepts
 const props = defineProps<{
   title: string;
   message: string;
   actionLabel?: string;
 }>();
 
-// Define emits so the parent wrapper can listen for them
 const emit = defineEmits<{
   (e: 'close'): void;
   (e: 'confirm'): void;
