@@ -10,11 +10,14 @@ import { useSearch } from '../../composables/useSearch.ts';
 import useAppStore from '../../stores/appStore.ts';
 import Dropdown, { DropdownItem } from '../ui/Dropdown.vue';
 import { ref } from 'vue';
+import { useModal } from '../../composables/useModal.ts';
+import NewAccountModal from '../ui/NewAccountModal.vue';
 
 const router = useRouter();
 const { canGoBack, canGoForward, goBack, goForward } = useRouterHistory(router);
 const { searchQuery } = useSearch();
 const { state } = useAppStore();
+const { openModal } = useModal();
 
 const createMenuItems = ref<DropdownItem[]>([
   {
@@ -28,9 +31,12 @@ const createMenuItems = ref<DropdownItem[]>([
   {
     label: 'New Account',
     icon: KeyRound,
-    disabled: true,
     onSelect: () => {
-      console.log('Create account!');
+      if (!state.activeAccount) return;
+      openModal(NewAccountModal, {
+        onClose: () => {},
+        onConfirm: () => {}
+      });
     }
   }
 ]);

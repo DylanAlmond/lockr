@@ -59,7 +59,7 @@ onMounted(fetchPassword);
     <main>
       <section class="account-fields-section">
         <AccountField
-          label="New Password"
+          label="new password"
           type="password"
           input
           v-model="newPassword"

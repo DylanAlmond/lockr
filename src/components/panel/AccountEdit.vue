@@ -91,6 +91,7 @@ async function handleSave() {
   height: 100%;
   overflow: hidden;
 }
+
 header {
   display: flex;
   align-items: center;
@@ -98,6 +99,7 @@ header {
   padding: 1rem;
   background-color: #efecf9;
 }
+
 main {
   display: flex;
   flex-direction: column;
@@ -108,16 +110,19 @@ main {
   overflow-y: auto;
   overflow-x: hidden;
 }
+
 .header-toolbar {
   display: flex;
   gap: 0.75rem;
 }
+
 .descriptor-section {
   display: flex;
   align-items: center;
   gap: 1rem;
   padding: 0.75rem 0rem;
 }
+
 .account-icon {
   position: relative;
   display: flex;
@@ -134,28 +139,35 @@ main {
   border-radius: 0.75rem;
   box-shadow: var(--shadow-sm);
 }
+
 .display-name {
   flex: 1;
 }
+
 .account-fields-section {
   display: flex;
   flex-direction: column;
   width: 100%;
+  
   & > *:first-child {
     border-radius: 0.75rem 0.75rem 0 0;
   }
+
   & > *:last-child {
     border-radius: 0 0 0.75rem 0.75rem;
   }
+
   & > *:not(:last-child) {
     border-bottom: none;
   }
 }
+
 .tags-section {
   display: flex;
   flex-direction: column;
   gap: 0.75rem;
   padding: 0rem 1.5rem;
+
   > h2 {
     font-weight: 400;
     font-size: 0.875rem;
@@ -163,6 +175,7 @@ main {
     margin-bottom: 0.25rem;
   }
 }
+
 .timestamp-section {
   display: flex;
   align-items: center;
@@ -171,10 +184,12 @@ main {
   padding-right: 0rem;
   text-box-trim: trim-both;
   text-box-edge: cap alphabetic;
+
   > svg {
     color: var(--color-text-muted);
   }
 }
+
 .editmode-label {
   font-family: var(--font-ui);
   font-size: 1.25rem;

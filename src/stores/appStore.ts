@@ -29,7 +29,6 @@ function useAppStore() {
     state.activeAccount = await getAccountbyId(accountId);
   }
 
-  // Helpers to update the local store immediately after an API mutation
   async function updateActiveAccount(data: Partial<Account>): Promise<boolean> {
     if (!state.activeAccount) return false;
 

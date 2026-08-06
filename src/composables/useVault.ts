@@ -5,6 +5,14 @@ import { invoke } from '@tauri-apps/api/core';
 const isLoading = ref(false);
 const error = ref<string | null>(null);
 
+export interface CreateAccountProps {
+  vaultId: string;
+  username: string;
+  password: string;
+  displayName?: string | null;
+  email?: string | null;
+}
+
 export function useVault() {
   async function listVaultIds(): Promise<string[]> {
     try {
@@ -90,20 +98,14 @@ export function useVault() {
     }
   }
 
-  async function addAccount(
-    vaultId: string,
-    username: string,
-    password: string,
-    displayName?: string | null,
-    email?: string | null
-  ): Promise<Account | null> {
+  async function addAccount(data: CreateAccountProps): Promise<Account | null> {
     try {
       return await invoke<Account>('add_account', {
-        vaultId,
-        displayName: displayName || null,
-        username,
-        email: email || null,
-        password
+        vaultId: data.vaultId,
+        displayName: data.displayName || null,
+        username: data.username,
+        email: data.email || null,
+        password: data.password
       });
     } catch (e) {
       error.value = String(e);

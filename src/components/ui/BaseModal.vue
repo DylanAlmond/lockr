@@ -19,15 +19,15 @@ function handleNativeClose() {
   closeModal();
 }
 
-function handleOutsideClick(event: MouseEvent) {
-  if (event.target === dialogRef.value) {
-    closeModal();
-  }
-}
+// function handleOutsideClick(event: MouseEvent) {
+//   if (event.target === dialogRef.value) {
+//     closeModal();
+//   }
+// }
 </script>
 
 <template>
-  <dialog ref="dialogRef" class="modal" @click="handleOutsideClick" @close="handleNativeClose">
+  <dialog ref="dialogRef" class="modal" @close="handleNativeClose">
     <div v-if="modalState.component" class="modal-container">
       <component
         :is="modalState.component"

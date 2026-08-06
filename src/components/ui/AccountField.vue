@@ -13,6 +13,7 @@ interface Props {
   type?: 'text' | 'email' | 'tel' | 'password';
   modelValue?: string | null;
   input?: boolean;
+  required?: boolean;
 }
 
 const props = withDefaults(defineProps<Props>(), {
@@ -82,6 +83,7 @@ onUnmounted(() => {
         class="field-input"
         :value="modelValue"
         placeholder="No Value"
+        :required="required"
         @input="emit('update:modelValue', ($event.target as HTMLInputElement).value)"
       />
 
