@@ -9,9 +9,11 @@ const route = useRoute();
 const { state, setActiveAccount } = useAppStore();
 
 watch(
-  () => route.params.passwordId,
+  () => route.params.accountId,
   (id) => {
-    setActiveAccount((id as string) || null);
+    if (id) {
+      setActiveAccount((id as string) || null);
+    }
   },
   { immediate: true }
 );

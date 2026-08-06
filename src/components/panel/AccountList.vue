@@ -5,7 +5,8 @@ import { useRoute, useRouter } from 'vue-router';
 import { useVault } from '../../composables/useVault.ts';
 import { useSearch } from '../../composables/useSearch.ts';
 import Button from '../ui/Button.vue';
-import { ArrowDownAZ, ArrowDownWideNarrow, ArrowUpWideNarrow, ArrowDownZA } from '@lucide/vue';
+import { ArrowDownAZ, ArrowDownWideNarrow, ArrowUpWideNarrow, ArrowDownZA, Star } from '@lucide/vue';
+import useAppStore from '../../stores/appStore.ts';
 
 type Props = AccountFilter & {
   recently_accessed: boolean;
@@ -26,6 +27,7 @@ const router = useRouter();
 
 const { searchQuery } = useSearch();
 const { getAllAccounts } = useVault();
+const { state } = useAppStore();
 
 const accounts = ref<Account[]>([]);
 const selectedTag = ref<string>('All');
@@ -128,7 +130,7 @@ function accountRoute(accountId: string) {
     name: route.name,
     params: {
       ...route.params,
-      passwordId: accountId
+      accountId: accountId
     }
   };
 }
@@ -140,7 +142,7 @@ watch(
     props.favourite_only,
     props.tags,
     props.recently_accessed,
-    route.params.passwordId,
+    route.params.accountId,
     searchQuery.value
   ],
   async () => {
@@ -164,9 +166,23 @@ watch(
   { immediate: true }
 );
 
+// Track the active account
+watch(
+  () => state.activeAccount,
+  (updatedAccount) => {
+    if (!updatedAccount) return;
+    const index = accounts.value.findIndex((a) => a.id === updatedAccount.id);
+    if (index !== -1) {
+      // Replace the object in the array so computed properties re-sort/re-render
+      accounts.value[index] = { ...updatedAccount };
+    }
+  },
+  { deep: true }
+);
+
 // Default to first account in list
 watch(
-  [filteredAccounts, () => route.params.passwordId],
+  [filteredAccounts, () => route.params.accountId],
   ([accounts, currentId]) => {
     const id = currentId as string | undefined;
 
@@ -181,13 +197,14 @@ watch(
         name: route.name as string,
         params: {
           ...route.params,
-          passwordId: accounts[0].id
+          accountId: accounts[0].id
         }
       });
     }
   },
   { immediate: true }
 );
+
 </script>
 
 <template>

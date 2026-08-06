@@ -14,16 +14,18 @@ import { useRouter } from 'vue-router';
 import { markRaw } from 'vue';
 import ChangePasswordModal from '../ui/ChangePasswordModal.vue';
 import useAppStore from '../../stores/appStore.ts';
-import { Entropy } from '../../types/index.ts';
+import { Entropy, Vault } from '../../types/index.ts';
 
-const { state, updateActiveAccount } = useAppStore();
-const { deleteAccount, getSecret, getAccountPasswordStrength } = useVault();
+const { state, updateActiveAccount, deleteActiveAccount } = useAppStore();
+const { getSecret, getAccountPasswordStrength, getVaultById } = useVault();
 const { openModal } = useModal();
 const router = useRouter();
 
 const password = ref<string | null>(null);
 const passwordEntropy = ref<Entropy | null>(null);
 const showPassword = ref(false);
+
+const parentVault = ref<Vault | null>(null);
 
 async function fetchPassword() {
   if (!state.activeAccount) return null;
@@ -48,15 +50,14 @@ async function toggleFavourite() {
 }
 
 async function handleDelete() {
-  if (!state.activeAccount?.vault_id || !state.activeAccount.id) return;
+  if (!state.activeAccount) return;
 
-  const success = await deleteAccount(state.activeAccount.vault_id, state.activeAccount.id);
-  state.activeAccount = null;
-
+  const success = await deleteActiveAccount();
+    
   if (success) {
     await router.replace({
       name: router.currentRoute.value.name as string,
-      params: { ...router.currentRoute.value.params, passwordId: null }
+      params: { ...router.currentRoute.value.params, accountId: null }
     });
   }
 }
@@ -97,11 +98,15 @@ watch(
     showPassword.value = false;
 
     if (state.activeAccount) {
-      passwordEntropy.value = await getAccountPasswordStrength(
-        state.activeAccount?.vault_id,
-        state.activeAccount?.id
-      );
+      const [vault, entropy] = await Promise.all([
+        getVaultById(state.activeAccount.vault_id),
+        getAccountPasswordStrength(state.activeAccount?.vault_id, state.activeAccount?.id)
+      ]);
+
+      parentVault.value = vault;
+      passwordEntropy.value = entropy;
     } else {
+      parentVault.value = null;
       passwordEntropy.value = null;
     }
   },
@@ -117,8 +122,8 @@ watch(
   <div v-else class="wrapper">
     <header>
       <div class="vault-label">
-        <Lock :size="20" aria-hidden="true" :color="state.activeVault?.color || '#6240BF'" />
-        <span>{{ state.activeVault?.name || 'Unknown Vault' }}</span>
+        <Lock :size="20" aria-hidden="true" :color="parentVault?.color || '#6240BF'" />
+        <span>{{ parentVault?.name || 'Unknown Vault' }}</span>
       </div>
 
       <nav class="header-toolbar">
@@ -232,12 +237,14 @@ watch(
   height: 100%;
   overflow: hidden;
 }
+
 header {
   display: flex;
   align-items: center;
   justify-content: space-between;
   padding: 1rem;
 }
+
 main {
   display: flex;
   flex-direction: column;
@@ -248,13 +255,16 @@ main {
   overflow-y: auto;
   overflow-x: hidden;
 }
+
 .menu-button {
   --button-icon-size: 1.5rem;
 }
+
 .vault-label {
   display: flex;
   align-items: center;
   gap: 0.5rem;
+
   > span {
     font-size: 1.125rem;
     color: var(--color-text-tertiary);
@@ -263,16 +273,19 @@ main {
     text-box-edge: cap alphabetic;
   }
 }
+
 .header-toolbar {
   display: flex;
   gap: 0.75rem;
 }
+
 .descriptor-section {
   display: flex;
   align-items: center;
   gap: 1rem;
   padding: 0.75rem 0rem;
 }
+
 .account-icon {
   position: relative;
   display: flex;
@@ -288,41 +301,50 @@ main {
   color: var(--color-accent);
   border-radius: 0.75rem;
   box-shadow: var(--shadow-sm);
+
   > svg {
     position: absolute;
     right: -1rem;
     bottom: -0.5rem;
   }
 }
+
 .display-name {
   font-size: 2rem;
   font-family: var(--font-geo);
 }
+
 .account-fields-section {
   display: flex;
   flex-direction: column;
   width: 100%;
+
   & > *:first-child {
     border-radius: 0.75rem 0.75rem 0 0;
   }
+
   & > *:last-child {
     border-radius: 0 0 0.75rem 0.75rem;
   }
+
   & > *:not(:last-child) {
     border-bottom: none;
   }
 }
+
 .password-strength {
   margin-right: 0.5rem;
   font-size: 0.875rem;
   font-weight: 500;
   color: var(--color-green);
 }
+
 .tags-section {
   display: flex;
   flex-direction: column;
   gap: 0.75rem;
   padding: 0rem 1.5rem;
+
   > h2 {
     font-weight: 400;
     font-size: 0.875rem;
@@ -330,6 +352,7 @@ main {
     margin-bottom: 0.25rem;
   }
 }
+
 .timestamp-section {
   display: flex;
   align-items: center;
@@ -338,6 +361,7 @@ main {
   padding-right: 0rem;
   text-box-trim: trim-both;
   text-box-edge: cap alphabetic;
+
   > svg {
     color: var(--color-text-muted);
   }
