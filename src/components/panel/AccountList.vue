@@ -257,6 +257,12 @@ watch(
             <RouterLink class="account" :to="accountRoute(account.id)" active-class="active">
               <div class="account-icon">
                 {{ (account.display_name || account.username)[0].toUpperCase() }}
+
+                <Star
+                  v-if="account.favourite"
+                  :size="20"
+                  :fill="account.favourite ? 'var(--color-accent)' : undefined"
+                />
               </div>
 
               <div class="account-meta">
@@ -365,6 +371,7 @@ watch(
   width: 3.5rem;
   height: 3.5rem;
   aspect-ratio: 1/1;
+  position: relative;
 
   font-size: 1.25rem;
   font-family: var(--font-geo);
@@ -374,6 +381,12 @@ watch(
 
   border-radius: 0.375rem;
   box-shadow: var(--shadow-sm);
+
+  > svg {
+    position: absolute;
+    right: -0.6rem;
+    bottom: -0.2rem;
+  }
 }
 
 .account-meta {
