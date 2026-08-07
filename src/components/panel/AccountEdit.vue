@@ -64,10 +64,22 @@ async function handleSave() {
 
       <section class="account-fields-section">
         <!-- Username -->
-        <AccountField label="username" type="text" input v-model="form.username" />
+        <AccountField
+          label="username"
+          type="text"
+          input
+          v-model="form.username"
+          placeholder="No Value"
+        />
 
         <!-- Email -->
-        <AccountField label="email" type="email" input v-model="form.email" />
+        <AccountField
+          label="email"
+          type="email"
+          input
+          v-model="form.email"
+          placeholder="No Value"
+        />
       </section>
 
       <section class="tags-section">
@@ -148,7 +160,7 @@ main {
   display: flex;
   flex-direction: column;
   width: 100%;
-  
+
   & > *:first-child {
     border-radius: 0.75rem 0.75rem 0 0;
   }

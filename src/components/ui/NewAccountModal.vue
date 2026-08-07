@@ -6,6 +6,7 @@ import AccountField from './AccountField.vue';
 import { CreateAccountProps, useVault } from '../../composables/useVault.ts';
 import { PASSWORDSTRENGTHS } from '../../util/constants.ts';
 import { useRouter } from 'vue-router';
+import { Eye, EyeOff } from '@lucide/vue';
 
 const { getPasswordStrength, getUnlockedVaults, addAccount } = useVault();
 const router = useRouter();
@@ -19,6 +20,7 @@ const form = ref<CreateAccountProps>({
 });
 
 const passwordEntropy = ref<Entropy | null>(null);
+const showPassword = ref(false);
 
 const emit = defineEmits<{
   (e: 'close'): void;
@@ -52,7 +54,8 @@ watch(
       return;
     }
     passwordEntropy.value = await getPasswordStrength(val);
-  }
+  },
+  { immediate: true }
 );
 
 onMounted(async () => {
@@ -78,26 +81,55 @@ onMounted(async () => {
           </select>
 
           <!-- Display Name -->
-          <AccountField label="display name" type="text" input v-model="form.displayName" />
+          <AccountField
+            label="display name"
+            type="text"
+            input
+            v-model="form.displayName"
+            placeholder="Display Name"
+          />
 
           <!-- Username -->
-          <AccountField label="username" type="text" required input v-model="form.username" />
+          <AccountField
+            label="username"
+            type="text"
+            required
+            input
+            v-model="form.username"
+            placeholder="Username"
+          />
 
           <!-- Email -->
-          <AccountField label="email" type="email" input v-model="form.email" />
+          <AccountField
+            label="email"
+            type="email"
+            input
+            v-model="form.email"
+            placeholder="email@example.com"
+          />
 
           <!-- Password -->
           <AccountField
             label="password"
-            type="password"
+            :type="showPassword ? 'text' : 'password'"
             input
             v-model="form.password"
-            placeholder="Enter new password"
+            placeholder="Enter password"
           >
             <template #actions>
               <span v-if="passwordEntropy !== null" class="password-strength">
                 {{ PASSWORDSTRENGTHS[passwordEntropy.score] }}
               </span>
+
+              <Button
+                :disabled="!form.password.length"
+                aria-label="Toggle password visibility"
+                icon-only
+                variant="outline"
+                size="small"
+                :icon-component="showPassword ? EyeOff : Eye"
+                @click="showPassword = !showPassword"
+              />
             </template>
           </AccountField>
         </section>

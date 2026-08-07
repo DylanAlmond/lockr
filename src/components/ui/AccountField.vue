@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, onUnmounted } from 'vue';
-import { Copy, Check, Eye, EyeOff } from '@lucide/vue';
+import { Copy, Check } from '@lucide/vue';
 import Button from './Button.vue';
 
 type CopyableValue = string | null | (() => string | null | Promise<string | null>);
@@ -14,14 +14,17 @@ interface Props {
   modelValue?: string | null;
   input?: boolean;
   required?: boolean;
+  placeholder?: string;
 }
 
 const props = withDefaults(defineProps<Props>(), {
   displayValue: null,
   canCopy: false,
-  inputType: undefined,
+  type: 'text',
   modelValue: null,
-  input: false
+  input: false,
+  required: false,
+  placeholder: ''
 });
 
 const emit = defineEmits<{
@@ -29,28 +32,29 @@ const emit = defineEmits<{
 }>();
 
 const copied = ref(false);
-const showPassword = ref(false);
 let cooldownTimer: ReturnType<typeof setTimeout> | null = null;
 
-const computedInputType = computed(() => {
-  if (props.type === 'password') {
-    return showPassword.value ? 'text' : 'password';
-  }
-  return props.type;
+const hasCopyValue = computed(() => {
+  if (props.input) return !!props.modelValue;
+  if (typeof props.copyValue === 'function') return true;
+  if (props.copyValue !== undefined && props.copyValue !== null) return !!props.copyValue;
+  return !!props.displayValue && props.displayValue !== '••••••••••••••••';
 });
 
 async function handleCopy() {
   let valueToCopy: string | null = null;
 
-  if (!props.displayValue && props.type !== undefined && props.modelValue) {
+  if (props.input && props.modelValue) {
     valueToCopy = props.modelValue;
   } else if (typeof props.copyValue === 'function') {
     valueToCopy = await props.copyValue();
+  } else if (props.copyValue !== undefined && props.copyValue !== null) {
+    valueToCopy = props.copyValue;
   } else {
-    valueToCopy = props.copyValue ?? props.displayValue;
+    valueToCopy = props.displayValue;
   }
 
-  if (!valueToCopy) return;
+  if (!valueToCopy || valueToCopy === '••••••••••••••••') return;
 
   try {
     await navigator.clipboard.writeText(valueToCopy);
@@ -79,10 +83,10 @@ onUnmounted(() => {
       <!-- Input Mode -->
       <input
         v-if="input"
-        :type="computedInputType"
+        :type="type"
         class="field-input"
-        :value="modelValue"
-        placeholder="No Value"
+        :value="modelValue || ''"
+        :placeholder="placeholder"
         :required="required"
         @input="emit('update:modelValue', ($event.target as HTMLInputElement).value)"
       />
@@ -90,25 +94,13 @@ onUnmounted(() => {
       <!-- Display Mode -->
       <template v-else>
         <span v-if="copied" class="copied">Copied!</span>
-        <span v-else>{{
-          type === 'password' && !showPassword ? '••••••••••••••••' : displayValue || 'No Value'
-        }}</span>
+        <span v-else>{{ displayValue || 'No Value' }}</span>
       </template>
     </div>
 
     <div class="field-actions">
+      <!-- Slot for custom actions like Eye/EyeOff or Password Strength -->
       <slot name="actions" />
-
-      <!-- Password Visibility Toggle -->
-      <Button
-        v-if="type === 'password'"
-        aria-label="Toggle password visibility"
-        icon-only
-        variant="outline"
-        size="small"
-        :icon-component="showPassword ? EyeOff : Eye"
-        @click="showPassword = !showPassword"
-      />
 
       <Button
         v-if="canCopy"
@@ -116,6 +108,7 @@ onUnmounted(() => {
         icon-only
         variant="outline"
         size="small"
+        :disabled="!hasCopyValue"
         :icon-component="copied ? Check : Copy"
         @click="handleCopy"
       />
@@ -131,7 +124,6 @@ onUnmounted(() => {
   padding: 1rem 1.5rem;
   overflow: hidden;
   border: 1px solid var(--color-border);
-
   transition:
     box-shadow 0.2s ease,
     border-color 0.2s ease;

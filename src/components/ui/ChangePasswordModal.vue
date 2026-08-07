@@ -6,12 +6,14 @@ import AccountField from './AccountField.vue';
 import { useVault } from '../../composables/useVault.ts';
 import { PASSWORDSTRENGTHS } from '../../util/constants.ts';
 import useAppStore from '../../stores/appStore.ts';
+import { Eye, EyeOff } from '@lucide/vue';
 
 const { state, updateActiveAccountPassword } = useAppStore();
 const { getPasswordStrength, getSecret } = useVault();
 
 const newPassword = ref<string | null>(null);
 const passwordEntropy = ref<Entropy | null>(null);
+const showPassword = ref(false);
 
 const emit = defineEmits<{
   (e: 'close'): void;
@@ -38,14 +40,18 @@ async function handleConfirm() {
 }
 
 // Calculate password strength in real-time as the user types
-watch(newPassword, async (val) => {
-  if (!val) {
-    passwordEntropy.value = null;
-    return;
-  }
-  passwordEntropy.value = await getPasswordStrength(val);
-  console.log(passwordEntropy.value);
-});
+watch(
+  newPassword,
+  async (val) => {
+    if (!val) {
+      passwordEntropy.value = null;
+      return;
+    }
+    passwordEntropy.value = await getPasswordStrength(val);
+    console.log(passwordEntropy.value);
+  },
+  { immediate: true }
+);
 
 onMounted(fetchPassword);
 </script>
@@ -60,15 +66,25 @@ onMounted(fetchPassword);
       <section class="account-fields-section">
         <AccountField
           label="new password"
-          type="password"
+          :type="showPassword ? 'text' : 'password'"
           input
           v-model="newPassword"
           placeholder="Enter new password"
         >
           <template #actions>
-            <span v-if="passwordEntropy !== null" class="password-strength">
+            <span v-if="passwordEntropy" class="password-strength">
               {{ PASSWORDSTRENGTHS[passwordEntropy.score] }}
             </span>
+
+            <Button
+              :disabled="!newPassword?.length"
+              aria-label="Toggle password visibility"
+              icon-only
+              variant="outline"
+              size="small"
+              :icon-component="showPassword ? EyeOff : Eye"
+              @click="showPassword = !showPassword"
+            />
           </template>
         </AccountField>
       </section>

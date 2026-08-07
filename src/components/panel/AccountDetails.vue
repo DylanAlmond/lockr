@@ -53,7 +53,7 @@ async function handleDelete() {
   if (!state.activeAccount) return;
 
   const success = await deleteActiveAccount();
-    
+
   if (success) {
     await router.replace({
       name: router.currentRoute.value.name as string,
@@ -182,7 +182,7 @@ watch(
           label="username"
           :display-value="state.activeAccount.username"
           :copy-value="state.activeAccount.username"
-          can-copy
+          :can-copy="!!state.activeAccount.username"
         />
 
         <!-- Email -->
@@ -190,22 +190,26 @@ watch(
           label="email"
           :display-value="state.activeAccount.email || 'No Email'"
           :copy-value="state.activeAccount.email"
-          can-copy
+          :can-copy="!!state.activeAccount.email"
         />
 
         <!-- Password -->
         <AccountField
           label="password"
-          :display-value="showPassword ? password || '••••••••••••••••' : '••••••••••••••••'"
+          :display-value="
+            !passwordEntropy?.guesses ? 'No Value' : showPassword ? password : '••••••••••••••••'
+          "
           :copy-value="fetchPassword"
-          can-copy
+          :can-copy="!!passwordEntropy?.guesses"
         >
           <template #actions>
-            <span v-if="passwordEntropy !== null" class="password-strength">
+            <span v-if="passwordEntropy?.guesses" class="password-strength">
               {{ PASSWORDSTRENGTHS[passwordEntropy.score] }}
             </span>
 
+            <!-- Only show the Eye toggle if a password actually exists -->
             <Button
+              v-if="passwordEntropy?.guesses"
               aria-label="View Password"
               icon-only
               variant="outline"
