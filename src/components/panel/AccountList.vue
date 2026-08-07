@@ -189,10 +189,10 @@ watch(
     if (!accounts.length) return;
 
     // Check if the currently routed ID exists in our filtered list
-    const selectedExists = id ? accounts.some((account) => account.id === id) : false;
+    // const selectedExists = id ? accounts.some((account) => account.id === id) : false;
 
     // If no ID is present (or an invalid one is), default to the first account
-    if (!selectedExists) {
+    if (!id) {
       router.replace({
         name: route.name as string,
         params: {
