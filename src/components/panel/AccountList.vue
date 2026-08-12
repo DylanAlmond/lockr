@@ -195,7 +195,15 @@ watch(
             <!-- active-class works natively here because router-link matches the accountId param -->
             <RouterLink class="account" :to="accountRoute(account.id)" active-class="active">
               <div class="account-icon">
-                {{ (account.display_name || account.username)[0].toUpperCase() }}
+                <img
+                  v-if="account.icon"
+                  :src="account.icon"
+                  alt="Account icon"
+                  class="icon-image"
+                />
+                <span v-else class="icon-text">
+                  {{ (account.display_name || account.username)[0].toUpperCase() }}
+                </span>
                 <Star
                   v-if="account.favourite"
                   :size="20"
@@ -318,6 +326,17 @@ watch(
 
   border-radius: 0.375rem;
   box-shadow: var(--shadow-sm);
+
+  .icon-image {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    border-radius: 0.375rem;
+  }
+
+  .icon-text {
+    pointer-events: none;
+  }
 
   > svg {
     position: absolute;

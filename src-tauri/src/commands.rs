@@ -278,6 +278,7 @@ pub fn add_account(
     display_name: Option<String>,
     username: String,
     email: Option<String>,
+    icon: Option<String>,
     password: String,
 ) -> Result<SafeAccount, String> {
     let mut state = state.lock().map_err(|e| e.to_string())?;
@@ -285,7 +286,7 @@ pub fn add_account(
 
     state
         .vault_manager
-        .add_account(id, display_name, username, email, password)
+        .add_account(id, display_name, username, email, icon, password)
         .map(|a| a.into_safe())
         .map_err(|e| e.to_string())
 }

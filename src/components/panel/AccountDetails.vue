@@ -179,7 +179,15 @@ watch(
     <main class="thin-scrollbar">
       <section class="descriptor-section">
         <div class="account-icon">
-          {{ (state.activeAccount.display_name || state.activeAccount.username)[0].toUpperCase() }}
+          <img
+            v-if="state.activeAccount.icon"
+            :src="state.activeAccount.icon"
+            alt="Account icon"
+            class="icon-image"
+          />
+          <span v-else class="icon-text">
+            {{ (state.activeAccount.display_name || state.activeAccount.username)[0].toUpperCase() }}
+          </span>
           <Star
             v-if="state.activeAccount.favourite"
             :size="32"
@@ -318,6 +326,17 @@ main {
   color: var(--color-accent);
   border-radius: 0.75rem;
   box-shadow: var(--shadow-sm);
+
+  .icon-image {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    border-radius: 0.75rem;
+  }
+
+  .icon-text {
+    pointer-events: none;
+  }
 
   > svg {
     position: absolute;

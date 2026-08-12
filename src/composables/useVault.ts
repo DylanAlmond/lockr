@@ -11,6 +11,7 @@ export interface CreateAccountProps {
   password: string;
   displayName?: string | null;
   email?: string | null;
+  icon?: string | null;
 }
 
 export function useVault() {
@@ -105,7 +106,8 @@ export function useVault() {
         displayName: data.displayName || null,
         username: data.username,
         email: data.email || null,
-        password: data.password
+        password: data.password,
+        icon: data.icon || null
       });
     } catch (e) {
       error.value = String(e);

@@ -8,8 +8,8 @@ use crate::{
     crypto::{
         decrypt_with_key, derive_master_key, encrypt_with_key, generate_salt, MasterKey, SALT_LEN,
     },
-    Account, AccountFilter, AccountId, IntoSafe, SafeAccount, SafeVault, Vault,
-    VaultError, VaultId,
+    Account, AccountFilter, AccountId, IntoSafe, SafeAccount, SafeVault, Vault, VaultError,
+    VaultId,
 };
 
 /// An unlocked vault held in RAM, along with its cached encryption key,
@@ -319,6 +319,7 @@ impl VaultManager {
         display_name: Option<String>,
         username: String,
         email: Option<String>,
+        icon: Option<String>,
         password: String,
     ) -> Result<Account, VaultError> {
         let now = Utc::now();
@@ -330,7 +331,7 @@ impl VaultManager {
             email: email.filter(|s| !s.is_empty()),
             favourite: false,
             tags: Vec::new(),
-            icon: None,
+            icon: icon,
             color: String::new(),
             secret: crate::AccountSecret {
                 id: Uuid::new_v4(),
@@ -590,6 +591,7 @@ mod tests {
                 Some("octocat pass".to_string()),
                 "octocat".to_string(),
                 None,
+                None,
                 "secret123".to_string(),
             )
             .unwrap();
@@ -618,6 +620,7 @@ mod tests {
                 vault.id,
                 None,
                 "octocat".to_string(),
+                None,
                 None,
                 "secret123".to_string(),
             )
@@ -660,6 +663,7 @@ mod tests {
                 None,
                 "octocat".to_string(),
                 None,
+                None,
                 "pass".to_string(),
             )
             .unwrap();
@@ -690,6 +694,7 @@ mod tests {
                     None,
                     format!("user{}", i),
                     None,
+                    None,
                     format!("pass{}", i),
                 )
                 .unwrap();
@@ -714,6 +719,7 @@ mod tests {
                     vault.id,
                     None,
                     format!("user{}", i),
+                    None,
                     None,
                     format!("pass{}", i),
                 )
@@ -753,10 +759,24 @@ mod tests {
         manager.set_autosave(false);
 
         manager
-            .add_account(vault1.id, None, "u1".to_string(), None, "p1".to_string())
+            .add_account(
+                vault1.id,
+                None,
+                "u1".to_string(),
+                None,
+                None,
+                "p1".to_string(),
+            )
             .unwrap();
         manager
-            .add_account(vault2.id, None, "u2".to_string(), None, "p2".to_string())
+            .add_account(
+                vault2.id,
+                None,
+                "u2".to_string(),
+                None,
+                None,
+                "p2".to_string(),
+            )
             .unwrap();
 
         assert!(manager.is_dirty(vault1.id));
@@ -789,6 +809,7 @@ mod tests {
                 vault.id,
                 None,
                 "octocat".to_string(),
+                None,
                 None,
                 "pass".to_string(),
             )

@@ -105,6 +105,7 @@ onMounted(fetchPassword);
   gap: 1.5rem;
   width: 100%;
 }
+
 header {
   display: flex;
   justify-content: space-between;
@@ -112,21 +113,27 @@ header {
   margin-top: 0.5rem;
   width: 100%;
 }
+
 header > h2 {
   font-size: 1.5rem;
   font-family: var(--font-geo);
+  text-align: center;
+  width: 100%;
 }
+
 main {
   color: var(--color-text-secondary);
   line-height: 1.5rem;
   width: 100%;
 }
+
 footer {
   display: flex;
   justify-content: flex-end;
   gap: 0.75rem;
   width: 100%;
 }
+
 .password-strength {
   margin-right: 0.5rem;
   font-size: 0.875rem;
@@ -134,10 +141,12 @@ footer {
   color: var(--color-green);
   white-space: nowrap;
 }
+
 .account-fields-section {
   display: flex;
   flex-direction: column;
   width: 100%;
+
   > .account-field {
     border-radius: 0.75rem;
   }
