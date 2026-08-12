@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { ref, watch } from 'vue';
+import { useRoute, useRouter } from 'vue-router';
 import { Account } from '../../types';
 import { ChevronRight } from '@lucide/vue';
 import Button from '../ui/Button.vue';
@@ -6,10 +8,11 @@ import TagList from '../ui/TagList.vue';
 import { formatTimestamp } from '../../util/timestamp.ts';
 import AccountField from '../ui/AccountField.vue';
 import Input from '../ui/Input.vue';
-import { ref, watch } from 'vue';
 import useAppStore from '../../stores/appStore.ts';
 
-const { state, setEditMode, updateActiveAccount } = useAppStore();
+const route = useRoute();
+const router = useRouter();
+const { state, updateActiveAccount } = useAppStore();
 
 const form = ref<Partial<Account>>({});
 
@@ -22,13 +25,25 @@ watch(
   { immediate: true }
 );
 
+function handleCancel() {
+  router.push({
+    name: route.name as string,
+    params: { ...route.params, mode: undefined },
+    query: route.query
+  });
+}
+
 async function handleSave() {
   if (!state.activeAccount) return;
 
   const updated = await updateActiveAccount(form.value);
 
   if (updated) {
-    setEditMode(false);
+    router.push({
+      name: route.name as string,
+      params: { ...route.params, mode: undefined },
+      query: route.query
+    });
   }
 }
 </script>
@@ -43,7 +58,7 @@ async function handleSave() {
       <span class="editmode-label">Editing</span>
 
       <nav class="header-toolbar">
-        <Button variant="solid" size="small" @click="setEditMode(false)">Cancel</Button>
+        <Button variant="solid" size="small" @click="handleCancel">Cancel</Button>
         <Button size="small" @click="handleSave">Save</Button>
       </nav>
     </header>

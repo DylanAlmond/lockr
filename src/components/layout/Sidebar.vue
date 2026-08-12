@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { RouterLink } from 'vue-router';
+import { RouterLink, useRoute } from 'vue-router';
 import Logo from '../../assets/logo-text.svg';
 import { ChevronUp, Clock, KeyRound, Lock, Plus, Star } from '@lucide/vue';
 import { useUser } from '../../composables/useUser';
@@ -8,21 +8,25 @@ import { useVault } from '../../composables/useVault';
 import { onMounted, ref } from 'vue';
 import { Vault } from '../../types/index.ts';
 
+const route = useRoute();
 const { user } = useUser();
 const { getUnlockedVaults } = useVault();
 
 const vaults = ref<Vault[]>([]);
 
 const navItems = [
-  { icon: KeyRound, title: 'All Items', route: '/all-items' },
-  { icon: Star, title: 'Favourites', route: '/favourites' },
-  { icon: Clock, title: 'Recently Accessed', route: '/recently-accessed' }
-  // { icon: Lock, title: 'Vaults', route: '/vaults' }
+  { icon: KeyRound, title: 'All Items', filter: undefined },
+  { icon: Star, title: 'Favourites', filter: 'favourites' },
+  { icon: Clock, title: 'Recently Accessed', filter: 'recently-accessed' }
 ];
+
+// Helper to determine if a nav item is strictly active based on the query parameter
+function isNavActive(filter: string | undefined) {
+  return route.name === 'all-items' && (route.query.filter as string | undefined) === filter;
+}
 
 onMounted(async () => {
   vaults.value = await getUnlockedVaults();
-  console.log(vaults.value);
 });
 </script>
 
@@ -39,8 +43,12 @@ onMounted(async () => {
 
     <nav class="sidebar-nav">
       <ul class="link-list">
-        <li v-for="item in navItems">
-          <RouterLink :to="{ path: item.route }" class="nav-link" active-class="active">
+        <li v-for="item in navItems" :key="item.title">
+          <RouterLink
+            :to="{ name: 'all-items', query: item.filter ? { filter: item.filter } : {} }"
+            class="nav-link"
+            :class="{ active: isNavActive(item.filter) }"
+          >
             <component :is="item.icon" :size="20" aria-hidden="true" />
             <span>{{ item.title }}</span>
           </RouterLink>
@@ -55,8 +63,12 @@ onMounted(async () => {
         </summary>
 
         <ul class="link-list">
-          <li v-for="vault in vaults">
-            <RouterLink :to="{ path: `/vault/${vault.id}` }" class="nav-link" active-class="active">
+          <li v-for="vault in vaults" :key="vault.id">
+            <RouterLink
+              :to="{ name: 'vault', params: { vaultId: vault.id } }"
+              class="nav-link"
+              active-class="active"
+            >
               <Lock :size="20" aria-hidden="true" :color="vault.color" />
               <span>{{ vault.name }}</span>
             </RouterLink>

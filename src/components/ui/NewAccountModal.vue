@@ -7,8 +7,10 @@ import { CreateAccountProps, useVault } from '../../composables/useVault.ts';
 import { PASSWORDSTRENGTHS } from '../../util/constants.ts';
 import { useRouter } from 'vue-router';
 import { Eye, EyeOff } from '@lucide/vue';
+import useAppStore from '../../stores/appStore.ts';
 
-const { getPasswordStrength, getUnlockedVaults, addAccount } = useVault();
+const { getPasswordStrength, getUnlockedVaults } = useVault();
+const { createNewAccount } = useAppStore();
 const router = useRouter();
 
 const vaults = ref<Vault[]>([]);
@@ -30,7 +32,7 @@ const emit = defineEmits<{
 async function handleConfirm() {
   if (!form.value) return;
 
-  const account = await addAccount(form.value);
+  const account = await createNewAccount(form.value);
 
   if (account) {
     router.push({

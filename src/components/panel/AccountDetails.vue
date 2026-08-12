@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue';
+import { useRoute, useRouter } from 'vue-router';
 import { ChevronRight, EllipsisVertical, Eye, EyeOff, Lock, Pencil, Star } from '@lucide/vue';
 import Button from '../ui/Button.vue';
 import TagList from '../ui/TagList.vue';
@@ -10,16 +11,16 @@ import Dropdown, { DropdownItem } from '../ui/Dropdown.vue';
 import AlertModal from '../ui/AlertModal.vue';
 import { useModal } from '../../composables/useModal.ts';
 import { useVault } from '../../composables/useVault.ts';
-import { useRouter } from 'vue-router';
 import { markRaw } from 'vue';
 import ChangePasswordModal from '../ui/ChangePasswordModal.vue';
 import useAppStore from '../../stores/appStore.ts';
 import { Entropy, Vault } from '../../types/index.ts';
 
+const route = useRoute();
+const router = useRouter();
 const { state, updateActiveAccount, deleteActiveAccount } = useAppStore();
 const { getSecret, getAccountPasswordStrength, getVaultById } = useVault();
 const { openModal } = useModal();
-const router = useRouter();
 
 const password = ref<string | null>(null);
 const passwordEntropy = ref<Entropy | null>(null);
@@ -44,9 +45,21 @@ async function togglePassword() {
 
 async function toggleFavourite() {
   if (!state.activeAccount) return;
-
   const newFav = !state.activeAccount.favourite;
   updateActiveAccount({ favourite: newFav });
+}
+
+function goToEdit() {
+  if (!state.activeAccount) return;
+  router.push({
+    name: route.name as string,
+    params: {
+      ...route.params,
+      accountId: state.activeAccount.id,
+      mode: 'edit'
+    },
+    query: route.query
+  });
 }
 
 async function handleDelete() {
@@ -56,8 +69,13 @@ async function handleDelete() {
 
   if (success) {
     await router.replace({
-      name: router.currentRoute.value.name as string,
-      params: { ...router.currentRoute.value.params, accountId: null }
+      name: route.name as string,
+      params: {
+        ...route.params,
+        accountId: undefined, // Clear selection
+        mode: undefined // Clear any modes
+      },
+      query: route.query
     });
   }
 }
@@ -140,12 +158,7 @@ watch(
           @click="toggleFavourite"
         />
 
-        <Button
-          variant="outline"
-          size="small"
-          :icon-component="Pencil"
-          @click="state.editMode = true"
-        >
+        <Button variant="outline" size="small" :icon-component="Pencil" @click="goToEdit">
           Edit
         </Button>
 
