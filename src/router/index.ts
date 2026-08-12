@@ -13,7 +13,9 @@ const routes: RouteRecordRaw[] = [
     redirect: '/all-items',
     children: [
       {
-        path: 'all-items/:accountId?',
+        // :accountId? handles viewing an account
+        // :mode? handles 'edit' or 'create'
+        path: 'all-items/:accountId?/:mode?',
         name: 'all-items',
         meta: { requiresAuth: true },
         components: {
@@ -21,48 +23,18 @@ const routes: RouteRecordRaw[] = [
           panel: AccountPanel
         },
         props: {
-          list: {
-            favourite_only: false,
-            recently_accessed: false,
-            vault_id: null
-          }
+          // Pass dynamic filters based on the URL query params
+          list: (route) => ({
+            favourite_only: route.query.filter === 'favourites',
+            recently_accessed: route.query.filter === 'recently-accessed',
+            vault_id: null,
+            tags: route.query.tags || null
+          })
         }
       },
       {
-        path: 'favourites/:accountId?',
-        name: 'favourites',
-        meta: { requiresAuth: true },
-        components: {
-          list: AccountList,
-          panel: AccountPanel
-        },
-        props: {
-          list: {
-            favourite_only: true,
-            recently_accessed: false,
-            vault_id: null
-          }
-        }
-      },
-      {
-        path: 'recently-accessed/:accountId?',
-        name: 'recently-accessed',
-        meta: { requiresAuth: true },
-        components: {
-          list: AccountList,
-          panel: AccountPanel
-        },
-        props: {
-          list: {
-            favourite_only: false,
-            recently_accessed: true,
-            vault_id: null
-          }
-        }
-      },
-      {
+        path: 'vault/:vaultId/:accountId?/:mode?',
         name: 'vault',
-        path: 'vault/:vaultId/:accountId?',
         meta: { requiresAuth: true },
         components: {
           list: AccountList,
@@ -72,7 +44,8 @@ const routes: RouteRecordRaw[] = [
           list: (route) => ({
             favourite_only: false,
             recently_accessed: false,
-            vault_id: route.params.vaultId
+            vault_id: route.params.vaultId,
+            tags: route.query.tags || null
           })
         }
       }
@@ -82,7 +55,6 @@ const routes: RouteRecordRaw[] = [
     path: '/auth',
     component: AuthView
   },
-
   /* 404 fallback */
   {
     path: '/:pathMatch(.*)*',

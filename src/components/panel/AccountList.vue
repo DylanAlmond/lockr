@@ -29,18 +29,14 @@ const props = withDefaults(defineProps<Props>(), {
 });
 
 const route = useRoute();
-const router = useRouter();
 
 const { searchQuery } = useSearch();
-const { getAllAccounts } = useVault();
 const { state } = useAppStore();
+const { getAllAccounts } = useVault();
 
 const accounts = ref<Account[]>([]);
-const previousAccountIds = ref<Set<string>>(new Set());
-const selectedTag = ref<string>('All');
-
 const sortCategory = ref<SortCategory>('alphabetical');
-const sortAsc = ref(sortCategory.value === 'alphabetical'); // false = newest first (descending)
+const sortAsc = ref(sortCategory.value === 'alphabetical');
 
 const monthNames = [
   'January',
@@ -57,31 +53,17 @@ const monthNames = [
   'December'
 ];
 
-// Build tag options from loaded accounts
-// const tagOptions = computed(() => {
-//   const tagSet = new Set<string>();
-//   accounts.value.forEach((a) => a.tags.forEach((t) => tagSet.add(t)));
-//   return ['All', ...Array.from(tagSet).sort()];
-// });
-
-// Filtered + sorted accounts
 const filteredAccounts = computed(() => {
-  let list =
-    selectedTag.value === 'All'
-      ? [...accounts.value]
-      : accounts.value.filter((a) => a.tags.includes(selectedTag.value));
+  let list = [...accounts.value];
 
   list.sort((a, b) => {
     let comparison = 0;
-
     if (sortCategory.value === 'date') {
       comparison = new Date(a.updated_at).getTime() - new Date(b.updated_at).getTime();
     }
-
     if (sortCategory.value === 'alphabetical') {
       comparison = (a.display_name || a.username).localeCompare(b.display_name || b.username);
     }
-
     return sortAsc.value ? comparison : -comparison;
   });
 
@@ -98,7 +80,6 @@ const groupedAccounts = computed<AccountGroup[]>(() => {
 
   for (const account of filteredAccounts.value) {
     let label: string;
-
     if (sortCategory.value === 'date') {
       const d = new Date(account.updated_at);
       label = `${monthNames[d.getMonth()]} ${d.getFullYear()}`;
@@ -106,22 +87,12 @@ const groupedAccounts = computed<AccountGroup[]>(() => {
       label = (account.display_name || account.username)[0].toUpperCase();
     }
 
-    if (!groups.has(label)) {
-      groups.set(label, []);
-    }
-
+    if (!groups.has(label)) groups.set(label, []);
     groups.get(label)!.push(account);
   }
 
-  return Array.from(groups.entries()).map(([label, items]) => ({
-    label,
-    items
-  }));
+  return Array.from(groups.entries()).map(([label, items]) => ({ label, items }));
 });
-
-// function selectTag(tag: string) {
-//   selectedTag.value = tag;
-// }
 
 function setSortCategory(category: SortCategory) {
   sortCategory.value = category;
@@ -132,91 +103,45 @@ function toggleSort() {
   sortAsc.value = !sortAsc.value;
 }
 
+// Update links to preserve current view context and clear 'edit'/'create' modes
 function accountRoute(accountId: string) {
   return {
-    name: route.name,
+    name: route.name as string,
     params: {
       ...route.params,
-      accountId: accountId
-    }
+      accountId: accountId,
+      mode: undefined // Clear edit/create mode when switching accounts
+    },
+    query: route.query // Preserve filter queries
   };
 }
 
-// Reload accounts whenever the filter or search changes (NOT when selected account changes)
+// Reload accounts whenever the filter or search changes
 watch(
   () => [
     props.vault_id,
     props.favourite_only,
     props.tags,
     props.recently_accessed,
-    searchQuery.value
+    searchQuery.value,
+    state.mutationCount
   ],
   async () => {
     const nextAccounts = await getAllAccounts({
       ...props,
       search_query: searchQuery.value
     });
-
     accounts.value = nextAccounts;
   },
   { immediate: true }
 );
 
-// Only reset the default sort when the view changes
+// Reset sort defaults when view changes
 watch(
   () => [props.vault_id, props.favourite_only, props.recently_accessed],
   () => {
     sortCategory.value = props.recently_accessed ? 'date' : 'alphabetical';
     sortAsc.value = sortCategory.value === 'alphabetical';
-  },
-  { immediate: true }
-);
-
-// Track the active account
-watch(
-  () => state.activeAccount,
-  (updatedAccount) => {
-    if (!updatedAccount) return;
-    const index = accounts.value.findIndex((a) => a.id === updatedAccount.id);
-    if (index !== -1) {
-      // Replace the object in the array so computed properties re-sort/re-render
-      accounts.value[index] = { ...updatedAccount };
-    }
-  },
-  { deep: true }
-);
-
-// Default to first account in list only if selection is actually invalid
-watch(
-  [filteredAccounts, () => route.params.accountId],
-  ([accounts, currentId]) => {
-    const id = currentId as string | undefined;
-
-    if (!accounts.length) return;
-
-    // Check if the currently routed ID exists in our filtered list
-    const selectedExists = id ? accounts.some((account) => account.id === id) : false;
-
-    // Track account IDs for next comparison
-    const currentAccountIds = new Set(accounts.map((a) => a.id));
-
-    // Only redirect in these cases:
-    // 1. No accountId provided AND we have accounts → select first
-    // 2. AccountId was in previous list but not in current list → it was filtered out
-    const wasFiltered = id && previousAccountIds.value.has(id) && !selectedExists;
-
-    if (!id || wasFiltered) {
-      router.replace({
-        name: route.name as string,
-        params: {
-          ...route.params,
-          accountId: accounts[0].id
-        }
-      });
-    }
-
-    // Update previous account IDs for next call
-    previousAccountIds.value = currentAccountIds;
   },
   { immediate: true }
 );
@@ -255,8 +180,7 @@ watch(
               ? 'A-Z'
               : 'Z-A'
         "
-      >
-      </Button>
+      />
     </div>
 
     <div class="results-wrapper no-scrollbar">
@@ -266,20 +190,18 @@ watch(
 
       <div v-for="group in groupedAccounts" class="account-group" :key="group.label">
         <h2>{{ group.label }}</h2>
-
         <ul class="account-list">
           <li v-for="account in group.items" :key="account.id">
+            <!-- active-class works natively here because router-link matches the accountId param -->
             <RouterLink class="account" :to="accountRoute(account.id)" active-class="active">
               <div class="account-icon">
                 {{ (account.display_name || account.username)[0].toUpperCase() }}
-
                 <Star
                   v-if="account.favourite"
                   :size="20"
                   :fill="account.favourite ? 'var(--color-accent)' : undefined"
                 />
               </div>
-
               <div class="account-meta">
                 <h3>{{ account.display_name || account.username }}</h3>
                 <span>{{ account.email || account.username }}</span>

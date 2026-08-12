@@ -4,20 +4,22 @@ import Input from '../ui/Input.vue';
 import Sidebar from './Sidebar.vue';
 import Button from '../ui/Button.vue';
 import { useRouterHistory } from '../../composables/useRouterHistory.ts';
-import { useRouter } from 'vue-router';
+import { useRoute, useRouter } from 'vue-router';
 import Titlebar from './Titlebar.vue';
 import { useSearch } from '../../composables/useSearch.ts';
-import useAppStore from '../../stores/appStore.ts';
 import Dropdown, { DropdownItem } from '../ui/Dropdown.vue';
-import { ref } from 'vue';
+import { ref, computed } from 'vue';
 import { useModal } from '../../composables/useModal.ts';
 import NewAccountModal from '../ui/NewAccountModal.vue';
 
+const route = useRoute();
 const router = useRouter();
 const { canGoBack, canGoForward, goBack, goForward } = useRouterHistory(router);
 const { searchQuery } = useSearch();
-const { state } = useAppStore();
 const { openModal } = useModal();
+
+// Derive edit state directly from the URL
+const isEditing = computed(() => route.params.mode === 'edit');
 
 const createMenuItems = ref<DropdownItem[]>([
   {
@@ -32,7 +34,6 @@ const createMenuItems = ref<DropdownItem[]>([
     label: 'New Account',
     icon: KeyRound,
     onSelect: () => {
-      if (!state.activeAccount) return;
       openModal(NewAccountModal, {
         onClose: () => {},
         onConfirm: () => {}
@@ -54,7 +55,7 @@ const createMenuItems = ref<DropdownItem[]>([
             variant="label"
             :icon-component="ArrowLeft"
             icon-only
-            :disabled="state.editMode || !canGoBack"
+            :disabled="!canGoBack"
             @click="goBack"
           />
           <Button
@@ -62,13 +63,13 @@ const createMenuItems = ref<DropdownItem[]>([
             variant="label"
             :icon-component="ArrowRight"
             icon-only
-            :disabled="state.editMode || !canGoForward"
+            :disabled="!canGoForward"
             @click="goForward"
           />
         </div>
 
         <Input
-          :disabled="state.editMode"
+          :disabled="isEditing"
           class="nav-search"
           name="nav-search"
           type="search"
@@ -82,7 +83,7 @@ const createMenuItems = ref<DropdownItem[]>([
             name="Create"
             variant="accent"
             :icon-component="Plus"
-            :disabled="state.editMode"
+            :disabled="isEditing"
             v-bind="triggerProps"
           >
             Create
@@ -115,7 +116,6 @@ const createMenuItems = ref<DropdownItem[]>([
   display: flex;
   flex-direction: column;
   flex: 1;
-
   background: var(--color-bg);
 }
 
