@@ -5,7 +5,13 @@ import { useRoute, useRouter } from 'vue-router';
 import { useVault } from '../../composables/useVault.ts';
 import { useSearch } from '../../composables/useSearch.ts';
 import Button from '../ui/Button.vue';
-import { ArrowDownAZ, ArrowDownWideNarrow, ArrowUpWideNarrow, ArrowDownZA, Star } from '@lucide/vue';
+import {
+  ArrowDownAZ,
+  ArrowDownWideNarrow,
+  ArrowUpWideNarrow,
+  ArrowDownZA,
+  Star
+} from '@lucide/vue';
 import useAppStore from '../../stores/appStore.ts';
 
 type Props = AccountFilter & {
@@ -30,6 +36,7 @@ const { getAllAccounts } = useVault();
 const { state } = useAppStore();
 
 const accounts = ref<Account[]>([]);
+const previousAccountIds = ref<Set<string>>(new Set());
 const selectedTag = ref<string>('All');
 
 const sortCategory = ref<SortCategory>('alphabetical');
@@ -135,14 +142,13 @@ function accountRoute(accountId: string) {
   };
 }
 
-// Reload accounts whenever the filter or search changes
+// Reload accounts whenever the filter or search changes (NOT when selected account changes)
 watch(
   () => [
     props.vault_id,
     props.favourite_only,
     props.tags,
     props.recently_accessed,
-    route.params.accountId,
     searchQuery.value
   ],
   async () => {
@@ -180,7 +186,7 @@ watch(
   { deep: true }
 );
 
-// Default to first account in list
+// Default to first account in list only if selection is actually invalid
 watch(
   [filteredAccounts, () => route.params.accountId],
   ([accounts, currentId]) => {
@@ -189,10 +195,17 @@ watch(
     if (!accounts.length) return;
 
     // Check if the currently routed ID exists in our filtered list
-    // const selectedExists = id ? accounts.some((account) => account.id === id) : false;
+    const selectedExists = id ? accounts.some((account) => account.id === id) : false;
 
-    // If no ID is present (or an invalid one is), default to the first account
-    if (!id) {
+    // Track account IDs for next comparison
+    const currentAccountIds = new Set(accounts.map((a) => a.id));
+
+    // Only redirect in these cases:
+    // 1. No accountId provided AND we have accounts → select first
+    // 2. AccountId was in previous list but not in current list → it was filtered out
+    const wasFiltered = id && previousAccountIds.value.has(id) && !selectedExists;
+
+    if (!id || wasFiltered) {
       router.replace({
         name: route.name as string,
         params: {
@@ -201,10 +214,12 @@ watch(
         }
       });
     }
+
+    // Update previous account IDs for next call
+    previousAccountIds.value = currentAccountIds;
   },
   { immediate: true }
 );
-
 </script>
 
 <template>
