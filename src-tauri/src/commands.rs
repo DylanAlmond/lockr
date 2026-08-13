@@ -2,158 +2,434 @@ use std::sync::Mutex;
 
 use tauri::State;
 use uuid::Uuid;
+use zeroize::Zeroize;
+use zxcvbn::{zxcvbn, Entropy};
 
+use crate::user_manager::UserManager;
 use crate::vault_manager::VaultManager;
-use crate::{IntoSafe, SafeAccount, SafeService, SafeVault};
+use crate::{AccountFilter, IntoSafe, SafeAccount, SafeVault, User};
 
-type ManagerState<'a> = State<'a, Mutex<VaultManager>>;
+pub struct ManagerState {
+    pub vault_manager: VaultManager,
+    pub user_manager: UserManager,
+
+    /// Master password — only needed for create_vault / unlock_vault.
+    /// Held in memory so the user can unlock additional vaults without
+    /// re-entering their password. Zeroized on logout.
+    pub master_password: Option<String>,
+    pub secret_key: Option<Vec<u8>>,
+}
+
+type AppState<'a> = State<'a, Mutex<ManagerState>>;
 
 #[tauri::command]
-pub fn create_vault(
-    state: ManagerState,
+pub fn register_user(
+    state: AppState,
     name: String,
     master_password: String,
-) -> Result<SafeVault, String> {
-    let mut manager = state.lock().map_err(|e| e.to_string())?;
+) -> Result<Vec<SafeVault>, String> {
+    let mut state = state.lock().map_err(|e| e.to_string())?;
 
-    let vault = manager
-        .create_vault(name, master_password)
+    let ManagerState {
+        vault_manager,
+        user_manager,
+        master_password: mp_state,
+        secret_key: sk_state,
+    } = &mut *state;
+
+    user_manager
+        .register(name, &master_password)
         .map_err(|e| e.to_string())?;
 
-    Ok(vault.into_safe())
-}
-
-#[tauri::command]
-pub fn list_vault_ids(state: ManagerState) -> Result<Vec<String>, String> {
-    let manager = state.lock().map_err(|e| e.to_string())?;
-    manager.list_vault_ids().map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub fn unlock_vault(
-    state: ManagerState,
-    vault_id: String,
-    master_password: String,
-) -> Result<SafeVault, String> {
-    let mut manager = state.lock().map_err(|e| e.to_string())?;
-
-    // Vue sends a string but Rust needs a Uuid
-    let id = Uuid::parse_str(&vault_id).map_err(|e| e.to_string())?;
-
-    let vault = manager
-        .unlock_vault(id, master_password)
+    let sk = user_manager
+        .login(&master_password)
         .map_err(|e| e.to_string())?;
 
-    Ok(vault.into_safe())
+    *mp_state = Some(master_password);
+    *sk_state = Some(sk);
+
+    let mp = mp_state.as_ref().ok_or("Not logged in")?;
+    let sk = sk_state.as_ref().ok_or("Not logged in")?;
+
+    // Create default vault
+    let new_vault = vault_manager
+        .create_vault("Personal".to_string(), "#6240BF".to_string(), mp, sk)
+        .map_err(|e| e.to_string())?;
+
+    user_manager
+        .add_vault_to_user(new_vault.id)
+        .map_err(|e| e.to_string())?;
+
+    Ok(vault_manager.get_unlocked_vaults())
 }
 
 #[tauri::command]
-pub fn update_vault_name(state: ManagerState, new_name: String) -> Result<(), String> {
-    let mut manager = state.lock().map_err(|e| e.to_string())?;
-    manager
-        .update_vault_name(new_name)
+pub fn get_user(state: AppState) -> Result<User, String> {
+    let state = state.lock().map_err(|e| e.to_string())?;
+    Ok(state.user_manager.get_user().map_err(|e| e.to_string())?)
+}
+
+#[tauri::command]
+pub fn update_profile(
+    state: AppState,
+    name: Option<String>,
+    color: Option<String>,
+    icon: Option<String>,
+) -> Result<(), String> {
+    let mut state = state.lock().map_err(|e| e.to_string())?;
+    state
+        .user_manager
+        .update_profile(name, color, icon)
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub fn lock_vault(state: ManagerState) -> Result<(), String> {
-    let mut manager = state.lock().map_err(|e| e.to_string())?;
-    manager.lock_vault();
+pub fn login_user(state: AppState, master_password: String) -> Result<Vec<SafeVault>, String> {
+    let mut state = state.lock().map_err(|e| e.to_string())?;
+
+    let ManagerState {
+        vault_manager,
+        user_manager,
+        master_password: mp_state,
+        secret_key: sk_state,
+    } = &mut *state;
+
+    let sk = user_manager
+        .login(&master_password)
+        .map_err(|e| e.to_string())?;
+
+    *mp_state = Some(master_password);
+    *sk_state = Some(sk);
+
+    let mp = mp_state.as_ref().ok_or("Not logged in")?;
+    let sk = sk_state.as_ref().ok_or("Not logged in")?;
+
+    let user = user_manager.get_user().map_err(|e| e.to_string())?;
+
+    // Unlock all vaults — each derives its master key once (Argon2id).
+    // After this, all further operations use the cached keys.
+    for vault_id in &user.vault_ids {
+        let _ = vault_manager.unlock_vault(*vault_id, mp, sk);
+    }
+
+    Ok(vault_manager.get_unlocked_vaults())
+}
+
+#[tauri::command]
+pub fn logout(state: AppState) -> Result<(), String> {
+    let mut state = state.lock().map_err(|e| e.to_string())?;
+
+    // Flush any unsaved changes before locking
+    state.vault_manager.flush_all().map_err(|e| e.to_string())?;
+
+    state.vault_manager.lock_vault(None);
+
+    if let Some(mut mp) = state.master_password.take() {
+        mp.zeroize();
+    }
+    if let Some(mut sk) = state.secret_key.take() {
+        sk.zeroize();
+    }
+
     Ok(())
 }
 
 #[tauri::command]
-pub fn add_service(state: ManagerState, name: String) -> Result<SafeService, String> {
-    let mut manager = state.lock().map_err(|e| e.to_string())?;
-    let service = manager.add_service(name).map_err(|e| e.to_string())?;
+pub fn delete_user(state: AppState) -> Result<(), String> {
+    let mut state = state.lock().map_err(|e| e.to_string())?;
 
-    Ok(service.into_safe())
+    state.vault_manager.lock_vault(None);
+
+    if let Some(mut mp) = state.master_password.take() {
+        mp.zeroize();
+    }
+    if let Some(mut sk) = state.secret_key.take() {
+        sk.zeroize();
+    }
+
+    state.user_manager.delete_user().map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub fn update_service_name(
-    state: ManagerState,
-    service_id: String,
-    new_name: String,
+pub fn list_vault_ids(state: AppState) -> Result<Vec<String>, String> {
+    let state = state.lock().map_err(|e| e.to_string())?;
+    state
+        .vault_manager
+        .list_vault_ids()
+        .map_err(|e| e.to_string())
+}
+
+/// Returns metadata for all vaults currently sitting in RAM
+#[tauri::command]
+pub fn get_unlocked_vaults(state: AppState) -> Result<Vec<SafeVault>, String> {
+    let state = state.lock().map_err(|e| e.to_string())?;
+    Ok(state.vault_manager.get_unlocked_vaults())
+}
+
+#[tauri::command]
+pub fn create_vault(state: AppState, name: String, color: String) -> Result<SafeVault, String> {
+    let mut state = state.lock().map_err(|e| e.to_string())?;
+
+    let ManagerState {
+        vault_manager,
+        master_password,
+        secret_key,
+        user_manager,
+    } = &mut *state;
+
+    let mp = master_password.as_ref().ok_or("Not logged in")?;
+    let sk = secret_key.as_ref().ok_or("Not logged in")?;
+
+    let vault = vault_manager
+        .create_vault(name, color, mp, sk)
+        .map_err(|e| e.to_string())?;
+
+    user_manager
+        .add_vault_to_user(vault.id)
+        .map_err(|e| e.to_string())?;
+
+    Ok(vault.into_safe())
+}
+
+#[tauri::command]
+pub fn get_vault_by_id(state: AppState, vault_id: String) -> Result<SafeVault, String> {
+    let state = state.lock().map_err(|e| e.to_string())?;
+    let id = Uuid::parse_str(&vault_id).map_err(|e| e.to_string())?;
+
+    let vault = state
+        .vault_manager
+        .get_vault(id)
+        .map_err(|e| e.to_string())?;
+
+    Ok(vault.into_safe())
+}
+
+#[tauri::command]
+pub fn unlock_vault(state: AppState, vault_id: String) -> Result<SafeVault, String> {
+    let mut state = state.lock().map_err(|e| e.to_string())?;
+
+    // Vue sends a string but Rust needs a Uuid
+    let id = Uuid::parse_str(&vault_id).map_err(|e| e.to_string())?;
+
+    let ManagerState {
+        vault_manager,
+        master_password,
+        secret_key,
+        ..
+    } = &mut *state;
+
+    let mp = master_password.as_ref().ok_or("Not logged in")?;
+    let sk = secret_key.as_ref().ok_or("Not logged in")?;
+
+    let vault = vault_manager
+        .unlock_vault(id, mp, sk)
+        .map_err(|e| e.to_string())?;
+
+    Ok(vault.into_safe())
+}
+
+#[tauri::command]
+pub fn lock_vault(state: AppState, vault_id: Option<String>) -> Result<(), String> {
+    let mut state = state.lock().map_err(|e| e.to_string())?;
+    let id = vault_id
+        .map(|vid| Uuid::parse_str(&vid).map_err(|e| e.to_string()))
+        .transpose()?;
+
+    state.vault_manager.lock_vault(id);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn update_vault(
+    state: AppState,
+    vault_id: String,
+    name: Option<String>,
+    color: Option<String>,
 ) -> Result<(), String> {
-    let mut manager = state.lock().map_err(|e| e.to_string())?;
-    let id = uuid::Uuid::parse_str(&service_id).map_err(|e| e.to_string())?;
-    manager
-        .update_service_name(id, new_name)
+    let mut state = state.lock().map_err(|e| e.to_string())?;
+    let id = Uuid::parse_str(&vault_id).map_err(|e| e.to_string())?;
+
+    state
+        .vault_manager
+        .update_vault(id, name, color)
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub fn delete_service(state: ManagerState, service_id: String) -> Result<(), String> {
-    let mut manager = state.lock().map_err(|e| e.to_string())?;
-    let id = Uuid::parse_str(&service_id).map_err(|e| e.to_string())?;
-    manager.delete_service(id).map_err(|e| e.to_string())
+pub fn delete_vault(state: AppState, vault_id: String) -> Result<(), String> {
+    let mut state = state.lock().map_err(|e| e.to_string())?;
+    let id = Uuid::parse_str(&vault_id).map_err(|e| e.to_string())?;
+
+    state
+        .user_manager
+        .remove_vault_from_user(id)
+        .map_err(|e| e.to_string())?;
+
+    state
+        .vault_manager
+        .delete_vault(id)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub fn add_account(
-    state: ManagerState,
-    service_id: String,
+    state: AppState,
+    vault_id: String,
     display_name: Option<String>,
     username: String,
     email: Option<String>,
+    icon: Option<String>,
     password: String,
 ) -> Result<SafeAccount, String> {
-    let mut manager = state.lock().map_err(|e| e.to_string())?;
-    let id = Uuid::parse_str(&service_id).map_err(|e| e.to_string())?;
-    let account = manager
-        .add_account(id, display_name, username, email, password)
-        .map_err(|e| e.to_string())?;
+    let mut state = state.lock().map_err(|e| e.to_string())?;
+    let id = Uuid::parse_str(&vault_id).map_err(|e| e.to_string())?;
 
-    Ok(account.into_safe())
+    state
+        .vault_manager
+        .add_account(id, display_name, username, email, icon, password)
+        .map(|a| a.into_safe())
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn get_account_by_id(state: AppState, account_id: String) -> Result<SafeAccount, String> {
+    let state = state.lock().map_err(|e| e.to_string())?;
+    let id = Uuid::parse_str(&account_id).map_err(|e| e.to_string())?;
+
+    state
+        .vault_manager
+        .get_account_by_id(id)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn get_all_accounts(
+    state: AppState,
+    filter: AccountFilter,
+) -> Result<Vec<SafeAccount>, String> {
+    let state = state.lock().map_err(|e| e.to_string())?;
+
+    state
+        .vault_manager
+        .get_all_accounts(filter)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub fn update_account(
-    state: ManagerState,
-    service_id: String,
+    state: AppState,
+    vault_id: String,
     account_id: String,
     display_name: Option<String>,
     username: Option<String>,
     email: Option<String>,
+    favourite: Option<bool>,
+    tags: Option<Vec<String>>,
+    icon: Option<String>,
+    color: Option<String>,
     password: Option<String>,
 ) -> Result<SafeAccount, String> {
-    let mut manager = state.lock().map_err(|e| e.to_string())?;
-
-    let sid = Uuid::parse_str(&service_id).map_err(|e| e.to_string())?;
+    let mut state = state.lock().map_err(|e| e.to_string())?;
+    let vid = Uuid::parse_str(&vault_id).map_err(|e| e.to_string())?;
     let aid = Uuid::parse_str(&account_id).map_err(|e| e.to_string())?;
 
-    let account = manager
-        .update_account(sid, aid, display_name, username, email, password)
-        .map_err(|e| e.to_string())?;
-
-    Ok(account.into_safe())
+    state
+        .vault_manager
+        .update_account(
+            vid,
+            aid,
+            display_name,
+            username,
+            email,
+            favourite,
+            tags,
+            icon,
+            color,
+            password,
+        )
+        .map(|a| a.into_safe())
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub fn delete_account(
-    state: ManagerState,
-    service_id: String,
-    account_id: String,
-) -> Result<(), String> {
-    let mut manager = state.lock().map_err(|e| e.to_string())?;
-
-    let sid = Uuid::parse_str(&service_id).map_err(|e| e.to_string())?;
+pub fn delete_account(state: AppState, vault_id: String, account_id: String) -> Result<(), String> {
+    let mut state = state.lock().map_err(|e| e.to_string())?;
+    let vid = Uuid::parse_str(&vault_id).map_err(|e| e.to_string())?;
     let aid = Uuid::parse_str(&account_id).map_err(|e| e.to_string())?;
 
-    manager.delete_account(sid, aid).map_err(|e| e.to_string())
+    state
+        .vault_manager
+        .delete_account(vid, aid)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub fn get_secret(
-    state: ManagerState,
-    service_id: String,
-    account_id: String,
-) -> Result<String, String> {
-    let manager = state.lock().map_err(|e| e.to_string())?;
-
-    let sid = Uuid::parse_str(&service_id).map_err(|e| e.to_string())?;
+pub fn get_secret(state: AppState, vault_id: String, account_id: String) -> Result<String, String> {
+    let state = state.lock().map_err(|e| e.to_string())?;
+    let vid = Uuid::parse_str(&vault_id).map_err(|e| e.to_string())?;
     let aid = Uuid::parse_str(&account_id).map_err(|e| e.to_string())?;
 
-    manager.get_secret(sid, aid).map_err(|e| e.to_string())
+    state
+        .vault_manager
+        .get_secret(vid, aid)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn get_account_password_strength(
+    state: AppState,
+    vault_id: String,
+    account_id: String,
+) -> Result<Entropy, String> {
+    let state = state.lock().map_err(|e| e.to_string())?;
+    let vid = Uuid::parse_str(&vault_id).map_err(|e| e.to_string())?;
+    let aid = Uuid::parse_str(&account_id).map_err(|e| e.to_string())?;
+
+    state
+        .vault_manager
+        .get_account_password_strength(vid, aid)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn get_password_strength(password: String) -> Result<Entropy, String> {
+    Ok(zxcvbn(&password, &[]).into())
+}
+
+/// Flush a specific vault's unsaved changes to disk.
+/// Call this after batch operations when autosave is off.
+#[tauri::command]
+pub fn flush_vault(state: AppState, vault_id: String) -> Result<(), String> {
+    let mut state = state.lock().map_err(|e| e.to_string())?;
+    let id = Uuid::parse_str(&vault_id).map_err(|e| e.to_string())?;
+    state
+        .vault_manager
+        .flush_vault(id)
+        .map_err(|e| e.to_string())
+}
+
+/// Flush ALL dirty vaults to disk. Call this before backgrounding,
+/// navigating away, or periodically as a safety net.
+#[tauri::command]
+pub fn flush_all(state: AppState) -> Result<(), String> {
+    let mut state = state.lock().map_err(|e| e.to_string())?;
+    state.vault_manager.flush_all().map_err(|e| e.to_string())
+}
+
+/// Toggle autosave on/off.
+/// When off, mutations only mark vaults dirty — you must call
+/// flush_vault / flush_all to persist.
+#[tauri::command]
+pub fn set_autosave(state: AppState, enabled: bool) -> Result<(), String> {
+    let mut state = state.lock().map_err(|e| e.to_string())?;
+    state.vault_manager.set_autosave(enabled);
+    Ok(())
+}
+
+/// Check if a vault has unsaved changes.
+#[tauri::command]
+pub fn is_vault_dirty(state: AppState, vault_id: String) -> Result<bool, String> {
+    let state = state.lock().map_err(|e| e.to_string())?;
+    let id = Uuid::parse_str(&vault_id).map_err(|e| e.to_string())?;
+    Ok(state.vault_manager.is_dirty(id))
 }

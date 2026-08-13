@@ -1,0 +1,251 @@
+<script setup lang="ts">
+import { ref, watch, computed } from 'vue';
+import { useRoute, useRouter } from 'vue-router';
+import { Account } from '../../types';
+import { ChevronRight } from '@lucide/vue';
+import Button from '../ui/Button.vue';
+import TagList from '../ui/TagList.vue';
+import { formatTimestamp } from '../../util/timestamp.ts';
+import AccountField from '../ui/AccountField.vue';
+import IconUpload from '../ui/IconUpload.vue';
+import useAppStore from '../../stores/appStore.ts';
+
+const route = useRoute();
+const router = useRouter();
+const { state, updateActiveAccount } = useAppStore();
+
+const form = ref<Partial<Account>>({});
+// const isFetchingLogo = ref(false);
+const manuallySetIcon = ref(false);
+// let displayNameDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+
+const displayInitial = computed(() => {
+  return (form.value.display_name || form.value.username || '')[0]?.toUpperCase() || '?';
+});
+
+// Sync local form state whenever the globally active account changes
+watch(
+  () => state.activeAccount,
+  (newAccount) => {
+    form.value = newAccount ? { ...newAccount } : {};
+    manuallySetIcon.value = false; // Reset when loading a new account
+  },
+  { immediate: true }
+);
+
+// Auto-fetch logo when display name changes (if icon wasn't manually set)
+// watch(
+//   () => form.value.display_name,
+//   (displayName) => {
+//     if (!displayName || manuallySetIcon.value) {
+//       return;
+//     }
+
+//     // Debounce the logo fetch to avoid too many requests
+//     if (displayNameDebounceTimer) {
+//       clearTimeout(displayNameDebounceTimer);
+//     }
+
+//     displayNameDebounceTimer = setTimeout(async () => {
+//       try {
+//         isFetchingLogo.value = true;
+//         const logo = await fetchBrandLogoAsBase64(displayName);
+//         if (logo) {
+//           form.value.icon = logo;
+//         }
+//       } catch (error) {
+//         console.error('Logo fetch error:', error);
+//       } finally {
+//         isFetchingLogo.value = false;
+//       }
+//     }, 500);
+//   }
+// );
+
+function handleCancel() {
+  router.push({
+    name: route.name as string,
+    params: { ...route.params, mode: undefined },
+    query: route.query
+  });
+}
+
+async function handleSave() {
+  if (!state.activeAccount) return;
+
+  const updated = await updateActiveAccount(form.value);
+
+  if (updated) {
+    router.push({
+      name: route.name as string,
+      params: { ...route.params, mode: undefined },
+      query: route.query
+    });
+  }
+}
+</script>
+
+<template>
+  <!-- Empty -->
+  <div v-if="!state.activeAccount" class="wrapper">No account found.</div>
+
+  <!-- Edit Mode -->
+  <div v-else class="wrapper">
+    <header>
+      <span class="editmode-label">Editing</span>
+
+      <nav class="header-toolbar">
+        <Button variant="solid" size="small" @click="handleCancel">Cancel</Button>
+        <Button size="small" @click="handleSave">Save</Button>
+      </nav>
+    </header>
+
+    <main class="thin-scrollbar">
+      <section class="descriptor-section">
+        <IconUpload
+          v-model="form.icon"
+          :fallback-text="displayInitial"
+          aria-label="Click to upload account icon"
+        />
+
+        <AccountField
+          class="display-name"
+          label="display name"
+          type="text"
+          input
+          v-model="form.display_name"
+          placeholder="No Value"
+        />
+      </section>
+
+      <section class="account-fields-section">
+        <!-- Username -->
+        <AccountField
+          label="username"
+          type="text"
+          input
+          v-model="form.username"
+          placeholder="No Value"
+        />
+
+        <!-- Email -->
+        <AccountField
+          label="email"
+          type="email"
+          input
+          v-model="form.email"
+          placeholder="No Value"
+        />
+      </section>
+
+      <section class="tags-section">
+        <h2>tags</h2>
+
+        <TagList v-model="form.tags" editable />
+      </section>
+
+      <section class="timestamp-section">
+        <ChevronRight :size="20" />
+        <span>{{ `Last edited ${formatTimestamp(state.activeAccount.updated_at)} ` }}</span>
+      </section>
+    </main>
+  </div>
+</template>
+
+<style scoped>
+.wrapper {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+}
+
+header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 1rem;
+  background-color: #efecf9;
+}
+
+main {
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+  gap: 1.5rem;
+  padding: 1rem;
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.header-toolbar {
+  display: flex;
+  gap: 0.75rem;
+}
+
+.descriptor-section {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 0.75rem 0rem;
+}
+
+.display-name {
+  border-radius: 0.75rem;
+  flex: 1;
+}
+
+.account-fields-section {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+
+  & > *:first-child {
+    border-radius: 0.75rem 0.75rem 0 0;
+  }
+
+  & > *:last-child {
+    border-radius: 0 0 0.75rem 0.75rem;
+  }
+
+  & > *:not(:last-child) {
+    border-bottom: none;
+  }
+}
+
+.tags-section {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  padding: 0rem 1.5rem;
+
+  > h2 {
+    font-weight: 400;
+    font-size: 0.875rem;
+    color: var(--color-accent-muted);
+    margin-bottom: 0.25rem;
+  }
+}
+
+.timestamp-section {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 1.5rem;
+  padding-right: 0rem;
+  text-box-trim: trim-both;
+  text-box-edge: cap alphabetic;
+
+  > svg {
+    color: var(--color-text-muted);
+  }
+}
+
+.editmode-label {
+  font-family: var(--font-ui);
+  font-size: 1.25rem;
+  font-weight: 500;
+  color: var(--color-accent-muted);
+}
+</style>

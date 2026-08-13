@@ -1,18 +1,26 @@
-# Lockr
+<p align="center">
+  <img src="banner.png" alt="Project Banner" width="1200">
+</p>
 
-A secure, offline, cross-platform password vault built with Tauri, Rust, TypeScript, and Vue.js.
+![Status](https://img.shields.io/badge/Status-WiP-yellow)
+
+## Introduction
+
+Lockr is a secure, offline, cross-platform password vault built with Tauri, Rust, TypeScript, and Vue.js.
 
 This application prioritizes security by keeping all business logic, state management, and cryptography on the Rust backend. The Vue frontend acts strictly as a "dumb" display layer, ensuring sensitive data is handled safely.
 
 ## Features
 
+- **Multi-Vault Architecture**: Unlock and manage multiple vaults simultaneously (e.g., "Work" and "Personal"). Switch contexts seamlessly without re-entering passwords.
+- **Lightning-Fast Cross-Vault Search**: A powerful in-memory filtering engine allows you to search across all open vaults instantly by username, email, or tags.
+- **Flexible Organization**: Ditch rigid folder structures. Use a flat list of accounts organized by custom tags, favorites, and cross-vault text search.
 - **Strong Encryption at Rest**: Vault data is encrypted using AES-256-GCM before hitting your hard drive.
 - **Resistant Key Derivation**: Master passwords are hashed using Argon2id (64MB memory, 3 iterations), making brute-force attacks computationally infeasible.
-- **Memory Safety**: Uses the `zeroize` crate to ensure passwords and encryption keys are securely wiped from RAM when no longer needed.
-- **Zero-Knowledge Frontend**: The Vue UI never receives your passwords unless you explicitly click "Reveal". Decrypted vaults are stripped of secrets before crossing the Tauri bridge.
+- **Memory Safety**: Uses the `zeroize` crate and custom `Drop` implementations to ensure passwords and encryption keys are securely wiped from RAM when vaults are locked or swapped.
+- **Zero-Knowledge Frontend**: The Vue UI never receives your passwords unless you explicitly request them. Decrypted vaults are stripped of secrets before crossing the Tauri bridge.
 - **Local-First & Offline**: No servers, no cloud, no network requests. Your data stays on your machine.
 - **Cross-Platform**: Built with Tauri, resulting in a small, native-feeling application for Windows, macOS, and Linux.
-- **Hierarchical Structure**: Organize credentials logically by Vault → Service → Account.
 
 ## Tech Stack
 
@@ -35,9 +43,13 @@ This application prioritizes security by keeping all business logic, state manag
 
 This project is built around a strict separation of concerns to minimize the attack surface:
 
-1. **The Safe View Pattern**: The Rust backend maintains the true, decrypted `Vault` struct. When sending data to the UI, it translates it into `SafeVault`, `SafeService`, and `SafeAccount` structs, intentionally stripping out the `secret` fields.
+1. **The Safe View Pattern**: The Rust backend maintains the true, decrypted `Vault` and `Account` structs. When sending data to the UI, it translates them into `SafeVault` and `SafeAccount` structs, intentionally stripping out all `secret` fields.
 2. **On-Demand Decryption**: Passwords are only fetched individually via a dedicated `get_secret` command when the user explicitly requests to view or copy them.
-3. **Zeroizing on Lock**: When a vault is locked, the `ZeroizeOnDrop` trait automatically cascades through the vault structure, overwriting plain-text passwords in memory with zeros before the memory is freed.
+3. **Multi-Vault Memory Management**: Unlocked vaults are held in a secure `HashMap` in RAM. When a specific vault is locked (or the app closes), the `Drop` trait is triggered, automatically cascading through that specific vault's structure and overwriting plain-text passwords with zeros before the memory is freed, without affecting other open vaults.
+
+<p align="center">
+  <img src="architechture-overview.png" alt="Architechture Overview" width="1200">
+</p>
 
 ## Installation
 
@@ -51,7 +63,7 @@ This project is built around a strict separation of concerns to minimize the att
 
 ```bash
 # Clone the repository
-git clone https://github.com/DylanAlmond
+git clone https://github.com/DylanAlmond/lockr
 cd lockr
 
 # Install frontend dependencies
@@ -70,30 +82,26 @@ yarn tauri build
 
 _The compiled installer/binary will be located in `src-tauri/target/release/bundle/`._
 
-## Usage (W.I.P)
-
-1. **Create a Vault**: Open the app and click "Create New Vault". Enter a name and a strong master password.
-2. **Unlock**: Once created, the vault unlocks automatically. If you restart the app, select your vault from the list and enter your master password to unlock it.
-3. **Add Services**: Click "Add" in the Services column to create categories (e.g., GitHub, Gmail, Netflix).
-4. **Add Accounts**: Select a service and fill in the Username, Password, and optional Display Name/Email fields.
-5. **View & Copy Passwords**: Click the "Reveal" button next to an account to fetch the password from Rust securely into local component state. Click "Copy" to send it to your clipboard.
-6. **Editing**: Double-click or click "Edit" on Vaults, Services, or Accounts to modify them. Leaving optional fields (like Email) blank and saving will clear them.
-7. **Lock**: Click the red "Lock Vault" button at the top left. This immediately wipes the vault and master password from the application's memory.
-
 ## Project Structure
 
 ```
 ├── src/                      # Vue Frontend
+│   ├── assets/               # UI assets (icons, logos)
 │   ├── components/           # UI components
-│   ├── composables/          # Vue hooks
+│   ├── composables/          # Vue hooks (useVault, useUser)
+│   ├── router/               # Vue Router
+│   ├── types/                # Shared TypeScript interfaces
+│   ├── style.css             # Global styling
+│   |── main.ts               # Frontend entry
 │   └── App.vue
 └── src-tauri/                # Rust Backend
     ├── src/
-    │   ├── main.rs           # Rust project root (unchanged)
+    │   ├── main.rs           # Backend entry
     │   ├── lib.rs            # Tauri setup & command registration
     │   ├── commands.rs       # Tauri IPC bridge
-    │   ├── models.rs         # Core data structures & Safe View Models
-    │   ├── vault_manager.rs  # Business logic & state management
+    │   ├── models.rs         # Core data structures, Safe View Models, & Filter DTOs
+    │   ├── vault_manager.rs  # Multi-vault state, business logic, & aggregation engine
+    │   ├── user_manager.rs   # Unencrypted user profile persistence
     │   ├── crypto.rs         # Argon2 & AES-GCM implementations
     │   └── error.rs          # Custom error handling
     └── Cargo.toml
@@ -105,4 +113,4 @@ Pull requests are welcome. For major changes, please open an issue first to disc
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+Copyright (c) 2026 Dylan Almond All rights reserved.

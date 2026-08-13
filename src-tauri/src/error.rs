@@ -5,9 +5,6 @@ pub enum VaultError {
     #[error("Vault not found: {0}")]
     NotFound(String),
 
-    #[error("Service not found: {0}")]
-    ServiceNotFound(String),
-
     #[error("Account not found: {0}")]
     AccountNotFound(String),
 
@@ -28,6 +25,9 @@ pub enum VaultError {
 
     #[error("Serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
+
+    #[error("Validation Error: {0}")]
+    Validation(String),
 }
 
 // Tauri requires errors returned from commands to be serializable.
