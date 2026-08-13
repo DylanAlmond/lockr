@@ -13,7 +13,7 @@ pub struct User {
     pub id: UserId,
     pub name: String,
     pub color: String,
-    pub icon: String,
+    pub icon: Option<String>,
 
     /// Secret Key encrypted using the user's Master Password
     pub encrypted_secret_key: String,

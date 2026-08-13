@@ -2,7 +2,7 @@
 import { LucideProps } from '@lucide/vue';
 import { useAttrs, type Component } from 'vue';
 
-type Variant = 'accent' | 'outline' | 'label' | 'solid';
+type Variant = 'accent' | 'outline' | 'label' | 'solid' | 'danger';
 type Size = 'default' | 'small';
 
 interface Props {
@@ -157,6 +157,15 @@ const attrs = useAttrs();
   box-shadow: inset 0 0 0 1px var(--color-border);
 }
 
+/* ---------- Danger ---------- */
+
+.button--danger {
+  background: transparent;
+  color: var(--color-red);
+
+  box-shadow: inset 0 0 0 1px var(--color-red);
+}
+
 /* ---------- Label ---------- */
 
 .button--label {
@@ -190,6 +199,10 @@ const attrs = useAttrs();
 
 .button--outline .button__icon {
   color: var(--color-text-muted);
+}
+
+.button--danger .button__icon {
+  color: var(--color-red);
 }
 
 .button--label .button__icon {

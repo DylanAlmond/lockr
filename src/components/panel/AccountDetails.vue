@@ -113,6 +113,7 @@ const miscMenuItems = computed<DropdownItem[]>(() => [
           (state.activeAccount?.display_name ? `"${state.activeAccount.display_name}"` : 'Account'),
         message: "Are you sure you want to continue? This can't be undone.",
         actionLabel: 'Delete',
+        confirmationValue: state.activeAccount?.display_name || state.activeAccount?.username,
         onClose: () => {},
         onConfirm: () => handleDelete()
       });

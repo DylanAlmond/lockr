@@ -42,7 +42,7 @@ impl UserManager {
             id: Uuid::new_v4(),
             name,
             color: "#6240BF".to_string(),
-            icon: "user".to_string(),
+            icon: None,
             encrypted_secret_key,
             vault_ids: Vec::new(),
         };
@@ -98,7 +98,7 @@ impl UserManager {
             user.color = c;
         }
         if let Some(i) = icon {
-            user.icon = i;
+            user.icon = if i.is_empty() { None } else { Some(i) };
         }
 
         self.save_user(&user)

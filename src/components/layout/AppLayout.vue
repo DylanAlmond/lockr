@@ -1,11 +1,10 @@
 <script setup lang="ts">
 import { ArrowLeft, ArrowRight, KeyRound, Plus, Search, Vault } from '@lucide/vue';
 import Input from '../ui/Input.vue';
-import Sidebar from './Sidebar.vue';
+import AppShell from './AppShell.vue';
 import Button from '../ui/Button.vue';
 import { useRouterHistory } from '../../composables/useRouterHistory.ts';
 import { useRoute, useRouter } from 'vue-router';
-import Titlebar from './Titlebar.vue';
 import { useSearch } from '../../composables/useSearch.ts';
 import Dropdown, { DropdownItem } from '../ui/Dropdown.vue';
 import { ref, computed, markRaw } from 'vue';
@@ -48,82 +47,66 @@ const createMenuItems = ref<DropdownItem[]>([
 </script>
 
 <template>
-  <div class="app-layout">
-    <Sidebar />
-
-    <div class="main-wrapper">
-      <Titlebar>
-        <div class="nav-button-container">
-          <Button
-            name="navigate-back"
-            variant="label"
-            :icon-component="ArrowLeft"
-            icon-only
-            :disabled="!canGoBack"
-            @click="goBack"
-          />
-          <Button
-            name="navigate-forward"
-            variant="label"
-            :icon-component="ArrowRight"
-            icon-only
-            :disabled="!canGoForward"
-            @click="goForward"
-          />
-        </div>
-
-        <Input
-          :disabled="isEditing"
-          class="nav-search"
-          name="nav-search"
-          type="search"
-          v-model="searchQuery"
-          :icon-component="Search"
-          placeholder="Search..."
+  <AppShell>
+    <template #titlebar>
+      <div class="nav-button-container">
+        <Button
+          name="navigate-back"
+          aria-label="Back"
+          variant="label"
+          :icon-component="ArrowLeft"
+          icon-only
+          :disabled="!canGoBack"
+          @click="goBack"
         />
-
-        <Dropdown :list="createMenuItems" #trigger="{ triggerProps }">
-          <Button
-            name="Create"
-            variant="accent"
-            :icon-component="Plus"
-            :disabled="isEditing"
-            v-bind="triggerProps"
-          >
-            Create
-          </Button>
-        </Dropdown>
-      </Titlebar>
-
-      <div class="content">
-        <main>
-          <router-view name="list" />
-        </main>
-
-        <aside>
-          <router-view name="panel" />
-        </aside>
+        <Button
+          name="navigate-forward"
+          aria-label="Forward"
+          variant="label"
+          :icon-component="ArrowRight"
+          icon-only
+          :disabled="!canGoForward"
+          @click="goForward"
+        />
       </div>
+
+      <Input
+        :disabled="isEditing"
+        class="nav-search"
+        name="nav-search"
+        type="search"
+        v-model="searchQuery"
+        :icon-component="Search"
+        placeholder="Search..."
+      />
+
+      <Dropdown :list="createMenuItems" #trigger="{ triggerProps }">
+        <Button
+          name="Create"
+          variant="accent"
+          :icon-component="Plus"
+          :disabled="isEditing"
+          v-bind="triggerProps"
+        >
+          Create
+        </Button>
+      </Dropdown>
+    </template>
+
+    <div class="accounts-content">
+      <main>
+        <router-view name="list" />
+      </main>
+
+      <aside>
+        <router-view name="panel" />
+      </aside>
     </div>
-  </div>
+  </AppShell>
 </template>
 
 <style scoped>
-.app-layout {
-  display: flex;
-  width: 100%;
-  height: 100%;
-  overflow: hidden;
-}
-
-.main-wrapper {
-  display: flex;
-  flex-direction: column;
-  flex: 1;
-  background: var(--color-bg);
-}
-
-.content {
+.accounts-content {
   display: grid;
   grid-template-columns: 440px 1fr;
   grid-template-rows: minmax(0, 1fr);

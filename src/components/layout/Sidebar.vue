@@ -76,6 +76,7 @@ function vaultMenuItems(vault: Vault): DropdownItem[] {
           message:
             "Are you sure you want to continue? All accounts in this vault will be deleted. This can't be undone.",
           actionLabel: 'Delete',
+          confirmationValue: vault.name,
           onClose: () => {},
           onConfirm: () => handleDeleteVault(vault)
         });
@@ -96,8 +97,19 @@ onMounted(refreshVaults);
     </div>
 
     <div class="user-profile">
-      <span class="user-icon">{{ (user?.name || 'No User ')[0] }}</span>
-      <span class="user-name">{{ user?.name || 'No User' }}</span>
+      <RouterLink
+        to="/settings"
+        class="user-profile-link"
+        aria-label="Settings"
+        :class="{ active: route.path.startsWith('/settings') }"
+      >
+        <div class="user-icon">
+          <img v-if="user?.icon" :src="user.icon" alt="User icon" class="icon-image" />
+          <span v-else class="icon-text"> {{ (user?.name || 'No User ')[0] }} </span>
+        </div>
+
+        <span class="user-name">{{ user?.name || 'No User' }}</span>
+      </RouterLink>
     </div>
 
     <nav class="sidebar-nav">
@@ -180,13 +192,46 @@ onMounted(refreshVaults);
 }
 
 .user-profile {
+  padding-left: 0.75rem;
+  padding-right: 0.75rem;
+  padding-top: 0.625rem;
+  padding-bottom: 0.25rem;
+}
+
+.user-profile-link {
   display: flex;
   align-items: center;
   gap: 0.75rem;
-  padding-left: 1.25rem;
-  padding-right: 1.25rem;
-  padding-top: 0.625rem;
-  padding-bottom: 1rem;
+
+  width: 100%;
+  padding: 0.5rem;
+  box-sizing: border-box;
+
+  text-decoration: none;
+  color: inherit;
+  cursor: pointer;
+
+  border-radius: 0.75rem;
+  transition: background-color 0.2s ease;
+
+  &:hover,
+  &.active {
+    background-color: var(--color-hover);
+  }
+
+  &.active {
+    box-shadow: var(--inset-sm);
+  }
+
+  &:focus-visible {
+    outline: none;
+    box-shadow: inset 0 0 0 2px var(--color-accent);
+  }
+
+  @supports (corner-shape: squircle) {
+    corner-shape: squircle;
+    border-radius: 1.5rem;
+  }
 }
 
 .user-icon {
@@ -204,6 +249,17 @@ onMounted(refreshVaults);
   color: var(--color-accent);
 
   border-radius: 0.375rem;
+
+  .icon-image {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    border-radius: 0.375rem;
+  }
+
+  .icon-text {
+    pointer-events: none;
+  }
 }
 
 .user-name {

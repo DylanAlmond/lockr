@@ -1,6 +1,7 @@
 import { createRouter, createWebHistory, RouteRecordRaw } from 'vue-router';
 import AppLayout from '../components/layout/AppLayout.vue';
 import AuthView from '../components/views/AuthView.vue';
+import SettingsView from '../components/views/SettingsView.vue';
 import { useUser } from '../composables/useUser';
 import AccountList from '../components/panel/AccountList.vue';
 import AccountPanel from '../components/panel/AccountPanel.vue';
@@ -50,6 +51,12 @@ const routes: RouteRecordRaw[] = [
         }
       }
     ]
+  },
+  {
+    path: '/settings',
+    name: 'settings',
+    component: SettingsView,
+    meta: { requiresAuth: true }
   },
   {
     path: '/auth',

@@ -3,6 +3,7 @@ import { ref, computed } from 'vue';
 import { Vault } from '../../types/index.ts';
 import Button from './Button.vue';
 import AccountField from './AccountField.vue';
+import ColorPicker from './ColorPicker.vue';
 import useAppStore from '../../stores/appStore.ts';
 import { VAULT_COLORS } from '../../util/constants.ts';
 import { useRouter } from 'vue-router';
@@ -81,22 +82,7 @@ async function handleConfirm() {
           />
 
           <div class="color-section">
-            <h2 id="vault-color-label">color</h2>
-            <div class="color-swatches" role="radiogroup" aria-labelledby="vault-color-label">
-              <button
-                v-for="color in VAULT_COLORS"
-                :key="color.hex"
-                type="button"
-                class="color-swatch"
-                role="radio"
-                :disabled="isLoading"
-                :class="{ active: form.color === color.hex }"
-                :style="{ backgroundColor: color.hex, color: color.hex }"
-                :aria-checked="form.color === color.hex"
-                :aria-label="color.name"
-                @click="form.color = color.hex"
-              />
-            </div>
+            <ColorPicker v-model="form.color" :disabled="isLoading" />
           </div>
         </section>
       </main>
@@ -179,66 +165,11 @@ footer {
     box-shadow 0.2s ease,
     border-color 0.2s ease;
 
-  > h2 {
-    font-weight: 400;
-    font-size: 0.875rem;
-    color: var(--color-accent-muted);
-    margin-bottom: 0.25rem;
-  }
-
   &:focus-within {
     box-shadow: inset 0 0 0 2px var(--color-accent);
   }
 
   @supports (corner-shape: squircle) {
-    corner-shape: squircle;
-  }
-}
-
-.color-swatches {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.75rem;
-  padding: 0.375rem 0rem;
-}
-
-.color-swatch {
-  appearance: none;
-  border: none;
-  outline: none;
-  width: 2.25rem;
-  height: 2.25rem;
-  border-radius: 0.5rem;
-  cursor: pointer;
-  box-shadow: var(--shadow-sm);
-  transition:
-    transform 0.15s ease,
-    box-shadow 0.2s ease;
-
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.2) 0%, rgba(0, 0, 0, 0.2) 100%);
-
-  &:hover {
-    transform: scale(1.1);
-  }
-
-  &:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-
-  &.active {
-    box-shadow:
-      0 0 0 2px var(--color-bg),
-      0 0 0 4px currentColor;
-  }
-
-  &:focus-visible {
-    outline: none;
-    box-shadow: inset 0 0 0 2px var(--color-accent);
-  }
-
-  @supports (corner-shape: squircle) {
-    border-radius: 1.5rem;
     corner-shape: squircle;
   }
 }

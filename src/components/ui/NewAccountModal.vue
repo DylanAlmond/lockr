@@ -6,14 +6,11 @@ import AccountField from './AccountField.vue';
 import { CreateAccountProps, useVault } from '../../composables/useVault.ts';
 import { PASSWORDSTRENGTHS } from '../../util/constants.ts';
 import { useRoute, useRouter } from 'vue-router';
-import { Eye, EyeOff, Image } from '@lucide/vue';
+import { Eye, EyeOff } from '@lucide/vue';
 import useAppStore from '../../stores/appStore.ts';
-import {
-  selectImageFile,
-  processImageToBase64,
-  fetchBrandLogoAsBase64
-} from '../../util/imageUpload.ts';
+import { fetchBrandLogoAsBase64 } from '../../util/imageUpload.ts';
 import Select from './Select.vue';
+import IconUpload from './IconUpload.vue';
 
 const route = useRoute();
 const router = useRouter();
@@ -22,7 +19,6 @@ const { getPasswordStrength, getUnlockedVaults } = useVault();
 const { createNewAccount } = useAppStore();
 
 const vaults = ref<Vault[]>([]);
-const isUploadingIcon = ref(false);
 const isFetchingLogo = ref(false);
 const manuallySetIcon = ref(false);
 let displayNameDebounceTimer: ReturnType<typeof setTimeout> | null = null;
@@ -35,11 +31,6 @@ const form = ref<CreateAccountProps>({
 
 const passwordEntropy = ref<Entropy | null>(null);
 const showPassword = ref(false);
-
-// Compute the display icon - either the uploaded base64 image or the initials
-const displayIcon = computed(() => {
-  return form.value.icon;
-});
 
 const displayInitial = computed(() => {
   return (form.value.displayName || form.value.username || '')[0]?.toUpperCase() || '?';
@@ -78,26 +69,6 @@ watch(
     }, 500);
   }
 );
-
-async function handleIconUpload() {
-  try {
-    isUploadingIcon.value = true;
-    const file = await selectImageFile();
-
-    if (!file) {
-      isUploadingIcon.value = false;
-      return;
-    }
-
-    const base64 = await processImageToBase64(file);
-    form.value.icon = base64;
-    manuallySetIcon.value = true; // Mark as manually set so we don't auto-fetch
-  } catch (error) {
-    console.error('Icon upload failed:', error);
-  } finally {
-    isUploadingIcon.value = false;
-  }
-}
 
 async function handleConfirm() {
   if (!form.value) return;
@@ -142,23 +113,13 @@ onMounted(async () => {
         <h2>New Account</h2>
       </header>
 
-      <section class="icon-section">
-        <div
-          class="account-icon"
-          :class="{ 'cursor-pointer hover:opacity-80': !isUploadingIcon, loading: isUploadingIcon }"
-          @click="handleIconUpload"
-          role="button"
-          tabindex="0"
-          aria-label="Click to upload account icon"
-          @keydown.enter="handleIconUpload"
-          @keydown.space="handleIconUpload"
-        >
-          <img v-if="displayIcon" :src="displayIcon" alt="Account icon" class="icon-image" />
-          <span v-else class="icon-text">{{ displayInitial }}</span>
-          <Image class="upload-overlay" :size="28" />
-        </div>
-        <p class="icon-hint">Click icon to upload image</p>
-      </section>
+      <IconUpload
+        v-model="form.icon"
+        :fallback-text="displayInitial"
+        aria-label="Click to upload account icon"
+        hint="Click icon to upload image"
+        @update:model-value="manuallySetIcon = true"
+      />
 
       <main>
         <section class="account-fields-section">
@@ -323,75 +284,5 @@ footer {
     corner-shape: squircle;
   }
 }
-
-.icon-section {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 0.5rem;
-  padding: 1rem 0;
-}
-
-.account-icon {
-  position: relative;
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  width: 5.25rem;
-  height: 5.25rem;
-  aspect-ratio: 1/1;
-  font-size: 2rem;
-  font-family: var(--font-geo);
-  font-weight: 500;
-  background-color: var(--color-accent-hover);
-  color: var(--color-accent);
-  border-radius: 0.75rem;
-  box-shadow: var(--shadow-sm);
-  cursor: pointer;
-  transition: all 0.2s ease;
-
-  &:hover:not(.loading) {
-    opacity: 0.6;
-    color: transparent;
-
-    .upload-overlay {
-      opacity: 1;
-    }
-  }
-
-  &.loading {
-    cursor: not-allowed;
-    opacity: 0.6;
-  }
-
-  &:focus-visible {
-    outline: none;
-    box-shadow: inset 0 0 0 2px var(--color-accent);
-  }
-
-  .icon-image {
-    width: 100%;
-    height: 100%;
-    object-fit: cover;
-    border-radius: 0.75rem;
-  }
-
-  .icon-text {
-    pointer-events: none;
-  }
-
-  .upload-overlay {
-    position: absolute;
-    opacity: 0;
-    transition: opacity 0.2s ease;
-    color: var(--color-accent);
-    pointer-events: none;
-  }
-}
-
-.icon-hint {
-  font-size: 0.75rem;
-  color: var(--color-text-muted);
-  margin: 0;
-}
 </style>
+
