@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, computed, nextTick } from 'vue';
+import { ref, onMounted, onUnmounted, computed, nextTick, useAttrs } from 'vue';
 import type { Component } from 'vue';
 
 export interface DropdownItem {
@@ -19,6 +19,11 @@ const props = withDefaults(
     align: 'left'
   }
 );
+
+defineOptions({ inheritAttrs: false });
+
+// Multi-root template disables auto fallthrough — forward attrs (class, etc.) to the trigger wrapper
+const attrs = useAttrs();
 
 const emit = defineEmits<{
   (e: 'select', item: DropdownItem): void;
@@ -212,7 +217,7 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <span ref="triggerWrapperRef" class="dropdown-trigger-wrapper">
+  <span ref="triggerWrapperRef" class="dropdown-trigger-wrapper" v-bind="attrs">
     <slot
       name="trigger"
       :is-open="isOpen"

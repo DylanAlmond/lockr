@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { LucideProps } from '@lucide/vue';
-import type { Component } from 'vue';
+import { useAttrs, type Component } from 'vue';
 
 type Variant = 'accent' | 'outline' | 'label' | 'solid';
 type Size = 'default' | 'small';
@@ -16,6 +16,8 @@ interface Props {
   fill?: boolean;
 }
 
+defineOptions({ inheritAttrs: false });
+
 withDefaults(defineProps<Props>(), {
   variant: 'accent',
   size: 'default',
@@ -23,10 +25,14 @@ withDefaults(defineProps<Props>(), {
   type: 'button',
   disabled: false
 });
+
+// Native attrs (class, aria-*, name, form, title, etc.) forward to the root <button>
+const attrs = useAttrs();
 </script>
 
 <template>
   <button
+    v-bind="attrs"
     :type="type"
     :disabled="disabled"
     :class="[

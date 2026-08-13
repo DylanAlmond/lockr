@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { Eye, EyeOff } from '@lucide/vue';
-import { computed, ref, type Component } from 'vue';
+import { computed, ref, useAttrs, type Component } from 'vue';
 
 interface Props {
   modelValue?: string | null;
@@ -13,6 +13,8 @@ interface Props {
   iconComponent?: Component;
 }
 
+defineOptions({ inheritAttrs: false });
+
 const props = withDefaults(defineProps<Props>(), {
   modelValue: '',
   type: 'text',
@@ -23,6 +25,14 @@ const props = withDefaults(defineProps<Props>(), {
 const emit = defineEmits<{
   (e: 'update:modelValue', value: string): void;
 }>();
+
+const attrs = useAttrs();
+
+// class/style stay on the wrapper; everything else (required, maxlength, aria-*, etc.) belongs on the real <input>
+const inputAttrs = computed(() => {
+  const { class: _class, style: _style, ...rest } = attrs;
+  return rest;
+});
 
 const showPassword = ref(false);
 
@@ -47,7 +57,7 @@ function togglePassword() {
 </script>
 
 <template>
-  <div class="input">
+  <div class="input" :class="attrs.class" :style="attrs.style as any">
     <component
       v-if="iconComponent"
       :is="iconComponent"
@@ -57,6 +67,7 @@ function togglePassword() {
     />
 
     <input
+      v-bind="inputAttrs"
       v-model="localValue"
       :id="id"
       :name="name"
