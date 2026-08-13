@@ -5,6 +5,7 @@ import { Vault } from '../../types/index.ts';
 import Button from './Button.vue';
 import { useVault } from '../../composables/useVault.ts';
 import useAppStore from '../../stores/appStore.ts';
+import Select from './Select.vue';
 
 const { getUnlockedVaults } = useVault();
 const { state, moveActiveAccount } = useAppStore();
@@ -75,17 +76,14 @@ onMounted(async () => {
 
         <div class="select-section">
           <h2 id="move-vault-label">vault</h2>
-          <select
+          <Select
             v-model="selectedVaultId"
             required
+            :options="vaults.map((v) => ({ value: v.id, label: v.name }))"
             :disabled="isLoading || !otherVaults.length"
             aria-labelledby="move-vault-label"
-          >
-            <option value="" disabled>Select a vault</option>
-            <option v-for="vault in otherVaults" :key="vault.id" :value="vault.id">
-              {{ vault.name }}
-            </option>
-          </select>
+            fill
+          />
         </div>
 
         <p v-if="!otherVaults.length" class="empty-hint">

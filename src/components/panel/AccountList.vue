@@ -10,9 +10,11 @@ import {
   ArrowDownWideNarrow,
   ArrowUpWideNarrow,
   ArrowDownZA,
-  Star
+  Star,
+  Grid2X2
 } from '@lucide/vue';
 import useAppStore from '../../stores/appStore.ts';
+import Select from '../ui/Select.vue';
 
 type Props = AccountFilter & {
   recently_accessed: boolean;
@@ -51,6 +53,11 @@ const monthNames = [
   'October',
   'November',
   'December'
+];
+
+const categories = [
+  { value: 'date', label: 'Date Updated' },
+  { value: 'alphabetical', label: 'Alphabetical' }
 ];
 
 const filteredAccounts = computed(() => {
@@ -151,13 +158,16 @@ watch(
 <template>
   <div class="container">
     <div class="filter-wrapper">
-      <select
-        :value="sortCategory"
-        @change="setSortCategory(($event.target as HTMLSelectElement).value as SortCategory)"
-      >
-        <option value="date">Date Updated</option>
-        <option value="alphabetical">Alphabetical</option>
-      </select>
+      <Select
+        :model-value="sortCategory"
+        :options="categories"
+        variant="label"
+        :icon-component="Grid2X2"
+        :icon-props="{
+          color: 'var(--color-accent)'
+        }"
+        @update:model-value="setSortCategory($event as SortCategory)"
+      />
 
       <Button
         @click="toggleSort"

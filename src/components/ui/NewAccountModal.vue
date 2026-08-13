@@ -8,7 +8,12 @@ import { PASSWORDSTRENGTHS } from '../../util/constants.ts';
 import { useRouter } from 'vue-router';
 import { Eye, EyeOff, Image } from '@lucide/vue';
 import useAppStore from '../../stores/appStore.ts';
-import { selectImageFile, processImageToBase64, fetchBrandLogoAsBase64 } from '../../util/imageUpload.ts';
+import {
+  selectImageFile,
+  processImageToBase64,
+  fetchBrandLogoAsBase64
+} from '../../util/imageUpload.ts';
+import Select from './Select.vue';
 
 const { getPasswordStrength, getUnlockedVaults } = useVault();
 const { createNewAccount } = useAppStore();
@@ -155,13 +160,15 @@ onMounted(async () => {
 
       <main>
         <section class="account-fields-section">
-          <select v-model="form.vaultId" required>
-            <option value="" disabled>Select a vault</option>
-
-            <option v-for="vault in vaults" :key="vault.id" :value="vault.id">
-              {{ vault.name }}
-            </option>
-          </select>
+          <div class="select-field">
+            <h2 id="move-vault-label">vault</h2>
+            <Select
+              v-model="form.vaultId"
+              :options="vaults.map((v) => ({ value: v.id, label: v.name }))"
+              required
+              fill
+            />
+          </div>
 
           <!-- Display Name -->
           <AccountField
@@ -286,6 +293,32 @@ footer {
 
   & > *:not(:last-child) {
     border-bottom: none;
+  }
+}
+
+.select-field {
+  display: flex;
+  flex-direction: column;
+  padding: 1rem 1.5rem;
+  overflow: hidden;
+  border: 1px solid var(--color-border);
+  transition:
+    box-shadow 0.2s ease,
+    border-color 0.2s ease;
+
+  > h2 {
+    font-weight: 400;
+    font-size: 0.875rem;
+    color: var(--color-accent-muted);
+    margin-bottom: 0.25rem;
+  }
+
+  &:focus-within {
+    box-shadow: inset 0 0 0 2px var(--color-accent);
+  }
+
+  @supports (corner-shape: squircle) {
+    corner-shape: squircle;
   }
 }
 

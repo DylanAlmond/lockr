@@ -84,7 +84,7 @@ const toggleDropdown = async (event: Event) => {
 
   // Focus if not mouse toggled
   if (isOpen.value && (event as MouseEvent).detail === 0) {
-    focusFirstItem();
+    nextTick(() => focusFirstItem());
   }
 };
 
@@ -231,37 +231,37 @@ onUnmounted(() => {
     />
   </span>
 
-  <Teleport to="body">
-    <ul
-      v-if="isOpen && list.length"
-      :id="dropdownId"
-      ref="menuRef"
-      class="dropdown-menu"
-      :class="alignClass"
-      :style="menuStyles"
-      role="menu"
-      @keydown="handleMenuKeydown"
-    >
-      <li v-for="(item, index) in list" :key="item.id || index" role="none">
-        <button
-          type="button"
-          class="dropdown-item"
-          role="menuitem"
-          :disabled="item.disabled"
-          @click="handleSelect(item)"
-        >
-          <component
-            v-if="item.icon"
-            :is="item.icon"
-            :size="16"
-            color="var(--color-accent)"
-            aria-hidden="true"
-          />
-          <span>{{ item.label }}</span>
-        </button>
-      </li>
-    </ul>
-  </Teleport>
+  <!-- <Teleport to="body"> -->
+  <ul
+    v-if="isOpen && list.length"
+    :id="dropdownId"
+    ref="menuRef"
+    class="dropdown-menu"
+    :class="alignClass"
+    :style="menuStyles"
+    role="menu"
+    @keydown="handleMenuKeydown"
+  >
+    <li v-for="(item, index) in list" :key="item.id || index" role="none">
+      <button
+        type="button"
+        class="dropdown-item"
+        role="menuitem"
+        :disabled="item.disabled"
+        @click="handleSelect(item)"
+      >
+        <component
+          v-if="item.icon"
+          :is="item.icon"
+          :size="16"
+          color="var(--color-accent)"
+          aria-hidden="true"
+        />
+        <span>{{ item.label }}</span>
+      </button>
+    </li>
+  </ul>
+  <!-- </Teleport> -->
 </template>
 
 <style scoped>
