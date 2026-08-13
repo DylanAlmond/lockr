@@ -1,6 +1,6 @@
 import { reactive } from 'vue';
 import { Account, Vault } from '../types';
-import { CreateAccountProps, useVault } from '../composables/useVault';
+import { useVault, type CreateAccountProps } from '../composables/useVault';
 
 interface AppStore {
   activeAccount: Account | null;
@@ -21,6 +21,7 @@ function useAppStore() {
     updateAccountPassword,
     deleteAccount,
     addAccount,
+    getSecret,
     createVault,
     updateVault,
     deleteVault
@@ -86,6 +87,41 @@ function useAppStore() {
     }
   }
 
+  // No backend "move" primitive exists — recreate the account in the target
+  // vault (preserving its fields/secret) then remove it from the source vault.
+  async function moveActiveAccount(targetVaultId: string): Promise<Account | null> {
+    const account = state.activeAccount;
+    if (!account || account.vault_id === targetVaultId) return null;
+
+    try {
+      const password = (await getSecret(account.vault_id, account.id)) || '';
+
+      const newAccount = await addAccount({
+        vaultId: targetVaultId,
+        username: account.username,
+        password,
+        displayName: account.display_name,
+        email: account.email,
+        icon: account.icon
+      });
+      if (!newAccount) return null;
+
+      const finalAccount = await updateAccount(targetVaultId, newAccount.id, {
+        favourite: account.favourite,
+        tags: account.tags,
+        color: account.color
+      });
+
+      await deleteAccount(account.vault_id, account.id);
+
+      state.activeAccount = finalAccount || newAccount;
+      state.mutationCount++;
+      return state.activeAccount;
+    } catch (error) {
+      return null;
+    }
+  }
+
   async function createNewVault(data: Partial<Omit<Vault, 'id'>>): Promise<Vault | null> {
     try {
       const vault = await createVault(data);
@@ -126,6 +162,7 @@ function useAppStore() {
     createNewAccount,
     updateActiveAccountPassword,
     deleteActiveAccount,
+    moveActiveAccount,
     createNewVault,
     updateVaultDetails,
     deleteVaultById

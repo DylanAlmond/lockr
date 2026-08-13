@@ -13,6 +13,7 @@ import { useModal } from '../../composables/useModal.ts';
 import { useVault } from '../../composables/useVault.ts';
 import { markRaw } from 'vue';
 import ChangePasswordModal from '../ui/ChangePasswordModal.vue';
+import MoveAccountModal from '../ui/MoveAccountModal.vue';
 import useAppStore from '../../stores/appStore.ts';
 import { Entropy, Vault } from '../../types/index.ts';
 
@@ -87,6 +88,17 @@ const miscMenuItems = computed<DropdownItem[]>(() => [
     onSelect: () => {
       if (!state.activeAccount) return;
       openModal(markRaw(ChangePasswordModal), {
+        onClose: () => {},
+        onConfirm: () => {}
+      });
+    }
+  },
+  {
+    label: 'Move to Vault',
+    disabled: state.activeAccount == null,
+    onSelect: () => {
+      if (!state.activeAccount) return;
+      openModal(markRaw(MoveAccountModal), {
         onClose: () => {},
         onConfirm: () => {}
       });
