@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue';
 import { Account, AccountFilter } from '../../types/index.ts';
-import { useRoute, useRouter } from 'vue-router';
+import { useRoute } from 'vue-router';
 import { useVault } from '../../composables/useVault.ts';
 import { useSearch } from '../../composables/useSearch.ts';
 import Button from '../ui/Button.vue';
@@ -12,7 +12,6 @@ import {
   ArrowDownZA,
   Star,
   Grid2X2,
-  KeyRound,
   Plus
 } from '@lucide/vue';
 import useAppStore from '../../stores/appStore.ts';

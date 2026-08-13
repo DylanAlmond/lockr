@@ -6,7 +6,7 @@ import AppShell from '../layout/AppShell.vue';
 import Button from '../ui/Button.vue';
 import AccountField from '../ui/AccountField.vue';
 import IconUpload from '../ui/IconUpload.vue';
-import ColorPicker from '../ui/ColorPicker.vue';
+// import ColorPicker from '../ui/ColorPicker.vue';
 import AlertModal from '../ui/AlertModal.vue';
 import { useModal } from '../../composables/useModal.ts';
 import { useUser } from '../../composables/useUser.ts';
@@ -112,7 +112,7 @@ watch(
               />
             </div>
 
-            <ColorPicker v-model="form.color" :disabled="isLoading" />
+            <!-- <ColorPicker v-model="form.color" :disabled="isLoading" /> -->
 
             <div class="section-footer">
               <Button type="submit" :disabled="isLoading || !hasChanges || !form.name.trim()">

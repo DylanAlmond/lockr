@@ -100,6 +100,7 @@ const focusFirstItem = () => {
   const items = menuRef.value?.querySelectorAll<HTMLButtonElement>(
     'button[role="menuitem"]:not([disabled])'
   );
+  // @ts-ignore Get an unknown property error on build?
   items?.[0]?.focus({ focusVisible: true });
 };
 
