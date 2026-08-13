@@ -8,7 +8,7 @@ import { PASSWORDSTRENGTHS } from '../../util/constants.ts';
 import { useRoute, useRouter } from 'vue-router';
 import { Eye, EyeOff } from '@lucide/vue';
 import useAppStore from '../../stores/appStore.ts';
-import { fetchBrandLogoAsBase64 } from '../../util/imageUpload.ts';
+// import { fetchBrandLogoAsBase64 } from '../../util/imageUpload.ts';
 import Select from './Select.vue';
 import IconUpload from './IconUpload.vue';
 
@@ -19,9 +19,9 @@ const { getPasswordStrength, getUnlockedVaults } = useVault();
 const { createNewAccount } = useAppStore();
 
 const vaults = ref<Vault[]>([]);
-const isFetchingLogo = ref(false);
+// const isFetchingLogo = ref(false);
 const manuallySetIcon = ref(false);
-let displayNameDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+// let displayNameDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 
 const form = ref<CreateAccountProps>({
   vaultId: (route.params.vaultId as string) || '',
@@ -42,33 +42,33 @@ const emit = defineEmits<{
 }>();
 
 // Auto-fetch logo when display name changes (if icon wasn't manually set)
-watch(
-  () => form.value.displayName,
-  (displayName) => {
-    if (!displayName || manuallySetIcon.value) {
-      return;
-    }
+// watch(
+//   () => form.value.displayName,
+//   (displayName) => {
+//     if (!displayName || manuallySetIcon.value) {
+//       return;
+//     }
 
-    // Debounce the logo fetch to avoid too many requests
-    if (displayNameDebounceTimer) {
-      clearTimeout(displayNameDebounceTimer);
-    }
+//     // Debounce the logo fetch to avoid too many requests
+//     if (displayNameDebounceTimer) {
+//       clearTimeout(displayNameDebounceTimer);
+//     }
 
-    displayNameDebounceTimer = setTimeout(async () => {
-      try {
-        isFetchingLogo.value = true;
-        const logo = await fetchBrandLogoAsBase64(displayName);
-        if (logo) {
-          form.value.icon = logo;
-        }
-      } catch (error) {
-        console.error('Logo fetch error:', error);
-      } finally {
-        isFetchingLogo.value = false;
-      }
-    }, 500);
-  }
-);
+//     displayNameDebounceTimer = setTimeout(async () => {
+//       try {
+//         isFetchingLogo.value = true;
+//         const logo = await fetchBrandLogoAsBase64(displayName);
+//         if (logo) {
+//           form.value.icon = logo;
+//         }
+//       } catch (error) {
+//         console.error('Logo fetch error:', error);
+//       } finally {
+//         isFetchingLogo.value = false;
+//       }
+//     }, 500);
+//   }
+// );
 
 async function handleConfirm() {
   if (!form.value) return;
