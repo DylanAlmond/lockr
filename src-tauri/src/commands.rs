@@ -53,7 +53,7 @@ pub fn register_user(
 
     // Create default vault
     let new_vault = vault_manager
-        .create_vault("Personal".to_string(), mp, sk)
+        .create_vault("Personal".to_string(), "#6240BF".to_string(), mp, sk)
         .map_err(|e| e.to_string())?;
 
     user_manager
@@ -167,7 +167,7 @@ pub fn get_unlocked_vaults(state: AppState) -> Result<Vec<SafeVault>, String> {
 }
 
 #[tauri::command]
-pub fn create_vault(state: AppState, name: String) -> Result<SafeVault, String> {
+pub fn create_vault(state: AppState, name: String, color: String) -> Result<SafeVault, String> {
     let mut state = state.lock().map_err(|e| e.to_string())?;
 
     let ManagerState {
@@ -181,7 +181,7 @@ pub fn create_vault(state: AppState, name: String) -> Result<SafeVault, String> 
     let sk = secret_key.as_ref().ok_or("Not logged in")?;
 
     let vault = vault_manager
-        .create_vault(name, mp, sk)
+        .create_vault(name, color, mp, sk)
         .map_err(|e| e.to_string())?;
 
     user_manager

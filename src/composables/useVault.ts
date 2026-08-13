@@ -42,12 +42,12 @@ export function useVault() {
     }
   }
 
-  async function createVault(name: string): Promise<Vault | null> {
+  async function createVault(data: Partial<Omit<Vault, 'id'>>): Promise<Vault | null> {
     isLoading.value = true;
     error.value = null;
 
     try {
-      const vault = await invoke<Vault>('create_vault', { name });
+      const vault = await invoke<Vault>('create_vault', { name: data.name, color: data.color });
       return vault;
     } catch (e) {
       error.value = String(e);

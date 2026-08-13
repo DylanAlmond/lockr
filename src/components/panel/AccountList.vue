@@ -124,7 +124,8 @@ watch(
     props.tags,
     props.recently_accessed,
     searchQuery.value,
-    state.mutationCount
+    state.mutationCount,
+    state.vaultMutationCount
   ],
   async () => {
     const nextAccounts = await getAllAccounts({

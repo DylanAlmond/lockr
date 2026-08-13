@@ -110,7 +110,7 @@ const miscMenuItems = computed<DropdownItem[]>(() => [
 
 // clear the local password state so it fetches the correct one next time.
 watch(
-  () => [state.activeAccount?.id, state.activeAccount?.updated_at],
+  () => [state.activeAccount?.id, state.activeAccount?.updated_at, state.vaultMutationCount],
   async () => {
     password.value = null;
     showPassword.value = false;

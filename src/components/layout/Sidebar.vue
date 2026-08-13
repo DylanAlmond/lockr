@@ -1,16 +1,24 @@
 <script setup lang="ts">
-import { RouterLink, useRoute } from 'vue-router';
+import { RouterLink, useRoute, useRouter } from 'vue-router';
 import Logo from '../../assets/logo-text.svg';
-import { ChevronUp, Clock, KeyRound, Lock, Plus, Star } from '@lucide/vue';
+import { ChevronUp, Clock, EllipsisVertical, KeyRound, Lock, Plus, Star } from '@lucide/vue';
 import { useUser } from '../../composables/useUser';
 import Button from '../ui/Button.vue';
+import Dropdown, { DropdownItem } from '../ui/Dropdown.vue';
 import { useVault } from '../../composables/useVault';
-import { onMounted, ref } from 'vue';
+import { markRaw, onMounted, ref, watch } from 'vue';
 import { Vault } from '../../types/index.ts';
+import { useModal } from '../../composables/useModal.ts';
+import VaultModal from '../ui/VaultModal.vue';
+import AlertModal from '../ui/AlertModal.vue';
+import useAppStore from '../../stores/appStore.ts';
 
 const route = useRoute();
+const router = useRouter();
 const { user } = useUser();
 const { getUnlockedVaults } = useVault();
+const { openModal } = useModal();
+const { state, deleteVaultById } = useAppStore();
 
 const vaults = ref<Vault[]>([]);
 
@@ -25,9 +33,60 @@ function isNavActive(filter: string | undefined) {
   return route.name === 'all-items' && (route.query.filter as string | undefined) === filter;
 }
 
-onMounted(async () => {
+async function refreshVaults() {
   vaults.value = await getUnlockedVaults();
-});
+}
+
+function openCreateVaultModal(event: Event) {
+  event.preventDefault();
+  event.stopPropagation();
+
+  openModal(markRaw(VaultModal), {
+    vault: null,
+    onClose: () => {},
+    onConfirm: () => {}
+  });
+}
+
+async function handleDeleteVault(vault: Vault) {
+  const success = await deleteVaultById(vault.id);
+
+  if (success && route.params.vaultId === vault.id) {
+    router.replace({ name: 'all-items' });
+  }
+}
+
+function vaultMenuItems(vault: Vault): DropdownItem[] {
+  return [
+    {
+      label: 'Edit Vault',
+      onSelect: () => {
+        openModal(markRaw(VaultModal), {
+          vault,
+          onClose: () => {},
+          onConfirm: () => {}
+        });
+      }
+    },
+    {
+      label: 'Delete Vault',
+      onSelect: () => {
+        openModal(markRaw(AlertModal), {
+          title: `Delete "${vault.name}"`,
+          message:
+            "Are you sure you want to continue? All accounts in this vault will be deleted. This can't be undone.",
+          actionLabel: 'Delete',
+          onClose: () => {},
+          onConfirm: () => handleDeleteVault(vault)
+        });
+      }
+    }
+  ];
+}
+
+watch(() => state.vaultMutationCount, refreshVaults);
+
+onMounted(refreshVaults);
 </script>
 
 <template>
@@ -59,11 +118,18 @@ onMounted(async () => {
         <summary class="vaults-accordion">
           <ChevronUp class="vaults-chevron" :size="20" />
           <span>Vaults</span>
-          <Button :icon-component="Plus" variant="label" size="small" icon-only />
+          <Button
+            :icon-component="Plus"
+            variant="label"
+            size="small"
+            icon-only
+            aria-label="New Vault"
+            @click="openCreateVaultModal"
+          />
         </summary>
 
         <ul class="link-list">
-          <li v-for="vault in vaults" :key="vault.id">
+          <li v-for="vault in vaults" :key="vault.id" class="vault-item">
             <RouterLink
               :to="{ name: 'vault', params: { vaultId: vault.id } }"
               class="nav-link"
@@ -72,6 +138,17 @@ onMounted(async () => {
               <Lock :size="20" aria-hidden="true" :color="vault.color" />
               <span>{{ vault.name }}</span>
             </RouterLink>
+
+            <Dropdown class="vault-menu" :list="vaultMenuItems(vault)" #trigger="{ triggerProps }">
+              <Button
+                aria-label="Vault Options"
+                icon-only
+                variant="label"
+                size="small"
+                :icon-component="EllipsisVertical"
+                v-bind="triggerProps"
+              />
+            </Dropdown>
           </li>
         </ul>
       </details>
@@ -146,6 +223,69 @@ onMounted(async () => {
   display: flex;
   flex-direction: column;
   list-style: none;
+}
+
+.vault-item {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  border-radius: 0.75rem;
+
+  transition:
+    background-color 0.2s ease,
+    color 0.2s ease;
+
+  .nav-link {
+    flex: 1;
+    min-width: 0;
+
+    /* Row-level hover/active owns the background; the link itself stays transparent */
+    &:hover,
+    &.active {
+      background-color: transparent;
+      box-shadow: none;
+      color: inherit;
+    }
+
+    span {
+      overflow: hidden;
+      white-space: nowrap;
+      text-overflow: ellipsis;
+    }
+  }
+
+  &:hover,
+  &:focus-within,
+  &:has(.nav-link.active) {
+    background-color: var(--color-accent-hover);
+    color: var(--color-accent-dark);
+  }
+
+  &:has(.nav-link.active) {
+    box-shadow: var(--inset-sm);
+  }
+
+  @supports (corner-shape: squircle) {
+    corner-shape: squircle;
+    border-radius: 1.5rem;
+  }
+
+  @media (hover: hover) {
+    :deep(.vault-menu) {
+      opacity: 0;
+      transition: opacity 0.15s ease;
+    }
+
+    &:hover :deep(.vault-menu),
+    &:focus-within :deep(.vault-menu) {
+      opacity: 1;
+    }
+  }
+}
+
+.vault-item :deep(.vault-menu) {
+  flex-shrink: 0;
+  margin-right: 0.5rem;
 }
 
 .vaults-container[open] .vaults-chevron {

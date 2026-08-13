@@ -19,6 +19,7 @@
   --color-accent-muted: hsl(256 50% 50%);
 
   --color-green: hsl(131 50% 50%);
+  --color-red: hsl(0 70% 50%);
 
   --font-ui: 'Cal Sans UI', ui-sans-serif, sans-serif;
   --font-geo: 'Cal Sans UI Geo', ui-sans-serif, sans-serif;

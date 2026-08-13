@@ -8,9 +8,10 @@ import { useRoute, useRouter } from 'vue-router';
 import Titlebar from './Titlebar.vue';
 import { useSearch } from '../../composables/useSearch.ts';
 import Dropdown, { DropdownItem } from '../ui/Dropdown.vue';
-import { ref, computed } from 'vue';
+import { ref, computed, markRaw } from 'vue';
 import { useModal } from '../../composables/useModal.ts';
 import NewAccountModal from '../ui/NewAccountModal.vue';
+import VaultModal from '../ui/VaultModal.vue';
 
 const route = useRoute();
 const router = useRouter();
@@ -25,9 +26,12 @@ const createMenuItems = ref<DropdownItem[]>([
   {
     label: 'Vault',
     icon: Vault,
-    disabled: true,
     onSelect: () => {
-      console.log('Create vault!');
+      openModal(markRaw(VaultModal), {
+        vault: null,
+        onClose: () => {},
+        onConfirm: () => {}
+      });
     }
   },
   {

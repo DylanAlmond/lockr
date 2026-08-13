@@ -125,14 +125,14 @@ impl VaultManager {
     pub fn create_vault(
         &mut self,
         name: String,
+        color: String,
         master_password: &str,
         secret_key: &[u8],
     ) -> Result<Vault, VaultError> {
         let vault = Vault {
             id: Uuid::new_v4(),
-            name: name.clone(),
-            // Color Accent Muted
-            color: "#6240BF".to_string(),
+            name: name,
+            color,
             accounts: Vec::new(),
         };
 
@@ -563,7 +563,12 @@ mod tests {
         let mut manager = VaultManager::new(temp_dir.clone()).unwrap();
 
         let created = manager
-            .create_vault("My Vault".to_string(), MASTER_PW, &KEY)
+            .create_vault(
+                "My Vault".to_string(),
+                "#6240BF".to_string(),
+                MASTER_PW,
+                &KEY,
+            )
             .unwrap();
         assert_eq!(created.name, "My Vault");
         assert_eq!(created.color, "#6240BF");
@@ -581,7 +586,7 @@ mod tests {
         let temp_dir = setup();
         let mut manager = VaultManager::new(temp_dir.clone()).unwrap();
         let vault = manager
-            .create_vault("Test".to_string(), MASTER_PW, &KEY)
+            .create_vault("Test".to_string(), "#6240BF".to_string(), MASTER_PW, &KEY)
             .unwrap();
 
         // Note: no more mp/sk arguments needed!
@@ -612,7 +617,7 @@ mod tests {
         let temp_dir = setup();
         let mut manager = VaultManager::new(temp_dir.clone()).unwrap();
         let vault = manager
-            .create_vault("Test".to_string(), MASTER_PW, &KEY)
+            .create_vault("Test".to_string(), "#6240BF".to_string(), MASTER_PW, &KEY)
             .unwrap();
 
         let account = manager
@@ -654,7 +659,7 @@ mod tests {
         let temp_dir = setup();
         let mut manager = VaultManager::new(temp_dir.clone()).unwrap();
         let vault = manager
-            .create_vault("Test".to_string(), MASTER_PW, &KEY)
+            .create_vault("Test".to_string(), "#6240BF".to_string(), MASTER_PW, &KEY)
             .unwrap();
 
         let account = manager
@@ -680,7 +685,7 @@ mod tests {
         let temp_dir = setup();
         let mut manager = VaultManager::new(temp_dir.clone()).unwrap();
         let vault = manager
-            .create_vault("Test".to_string(), MASTER_PW, &KEY)
+            .create_vault("Test".to_string(), "#6240BF".to_string(), MASTER_PW, &KEY)
             .unwrap();
 
         // Disable autosave for batch operations
@@ -750,10 +755,10 @@ mod tests {
         let mut manager = VaultManager::new(temp_dir.clone()).unwrap();
 
         let vault1 = manager
-            .create_vault("V1".to_string(), MASTER_PW, &KEY)
+            .create_vault("V1".to_string(), "#6240BF".to_string(), MASTER_PW, &KEY)
             .unwrap();
         let vault2 = manager
-            .create_vault("V2".to_string(), MASTER_PW, &KEY)
+            .create_vault("V2".to_string(), "#6240BF".to_string(), MASTER_PW, &KEY)
             .unwrap();
 
         manager.set_autosave(false);
@@ -800,7 +805,7 @@ mod tests {
         let temp_dir = setup();
         let mut manager = VaultManager::new(temp_dir.clone()).unwrap();
         let vault = manager
-            .create_vault("Test".to_string(), MASTER_PW, &KEY)
+            .create_vault("Test".to_string(), "#6240BF".to_string(), MASTER_PW, &KEY)
             .unwrap();
 
         // Autosave is on by default — add account and verify it persists
