@@ -248,7 +248,7 @@ onMounted(refreshVaults);
     }
 
     span {
-      overflow: hidden;
+      overflow-y: visible;
       white-space: nowrap;
       text-overflow: ellipsis;
     }
@@ -257,8 +257,7 @@ onMounted(refreshVaults);
   &:hover,
   &:focus-within,
   &:has(.nav-link.active) {
-    background-color: var(--color-accent-hover);
-    color: var(--color-accent-dark);
+    background-color: var(--color-hover);
   }
 
   &:has(.nav-link.active) {
@@ -270,12 +269,13 @@ onMounted(refreshVaults);
     border-radius: 1.5rem;
   }
 
-  @media (hover: hover) {
-    :deep(.vault-menu) {
-      opacity: 0;
-      transition: opacity 0.15s ease;
-    }
+  &:deep(.vault-menu) {
+    opacity: 0;
+    transition: opacity 0.15s ease;
+  }
 
+  @media (hover: hover) {
+    &:has(.nav-link.active):deep(.vault-menu),
     &:hover :deep(.vault-menu),
     &:focus-within :deep(.vault-menu) {
       opacity: 1;
@@ -308,6 +308,8 @@ onMounted(refreshVaults);
   height: 2.625rem;
   border-radius: 0.375rem;
 
+  transition: box-shadow 0.2s ease;
+
   > svg {
     color: var(--color-text-tertiary);
   }
@@ -322,7 +324,8 @@ onMounted(refreshVaults);
   }
 
   &:focus-visible {
-    outline: 2px solid var(--color-accent);
+    outline: none;
+    box-shadow: inset 0 0 0 2px var(--color-accent);
   }
 
   /* Corner smoothing */
@@ -365,8 +368,7 @@ onMounted(refreshVaults);
 
   &.active {
     box-shadow: var(--inset-sm);
-    background-color: var(--color-accent-hover);
-    color: var(--color-accent-dark);
+    background-color: var(--color-hover);
   }
 
   & > svg {
@@ -374,13 +376,12 @@ onMounted(refreshVaults);
   }
 
   &:focus-visible {
-    outline: 2px solid var(--color-accent);
-    outline-offset: 2px;
+    outline: none;
+    box-shadow: inset 0 0 0 2px var(--color-accent);
   }
 
   &:hover {
-    background-color: var(--color-accent-hover);
-    color: var(--color-accent-dark);
+    background-color: var(--color-hover);
   }
 
   /* Corner smoothing */

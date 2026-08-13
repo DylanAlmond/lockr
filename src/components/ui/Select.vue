@@ -305,8 +305,8 @@ function handleNativeInvalid() {
 }
 
 .select-trigger:focus-visible {
-  outline: 2px solid var(--color-accent);
-  outline-offset: 2px;
+  outline: none;
+  box-shadow: inset 0 0 0 2px var(--color-accent);
 }
 
 /* .select-trigger--invalid {

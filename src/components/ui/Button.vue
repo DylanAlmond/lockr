@@ -94,11 +94,7 @@ const attrs = useAttrs();
 
   border-radius: 0.75rem;
 
-  transition:
-    opacity 0.2s ease,
-    background-color 0.2s ease,
-    box-shadow 0.2s ease,
-    border-color 0.2s ease;
+  transition: all 0.2s ease;
 }
 
 /* Corner smoothing */
@@ -219,8 +215,12 @@ const attrs = useAttrs();
 }
 
 .button:focus-visible {
-  outline: 2px solid var(--color-accent);
-  outline-offset: 2px;
+  outline: none;
+  box-shadow: inset 0 0 0 2px var(--color-accent);
+
+  &.button--accent {
+    box-shadow: inset 0 0 0 2px var(--color-text);
+  }
 }
 
 .button:disabled {

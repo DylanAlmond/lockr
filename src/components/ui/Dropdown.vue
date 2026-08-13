@@ -295,7 +295,7 @@ onUnmounted(() => {
 
 .dropdown-item:focus-visible,
 .dropdown-item:hover:not(:disabled) {
-  background-color: var(--color-accent-hover);
+  background-color: var(--color-hover);
 }
 
 .dropdown-item:disabled {
