@@ -5,7 +5,7 @@ import Button from './Button.vue';
 import AccountField from './AccountField.vue';
 import { CreateAccountProps, useVault } from '../../composables/useVault.ts';
 import { PASSWORDSTRENGTHS } from '../../util/constants.ts';
-import { useRouter } from 'vue-router';
+import { useRoute, useRouter } from 'vue-router';
 import { Eye, EyeOff, Image } from '@lucide/vue';
 import useAppStore from '../../stores/appStore.ts';
 import {
@@ -15,9 +15,11 @@ import {
 } from '../../util/imageUpload.ts';
 import Select from './Select.vue';
 
+const route = useRoute();
+const router = useRouter();
+
 const { getPasswordStrength, getUnlockedVaults } = useVault();
 const { createNewAccount } = useAppStore();
-const router = useRouter();
 
 const vaults = ref<Vault[]>([]);
 const isUploadingIcon = ref(false);
@@ -26,7 +28,7 @@ const manuallySetIcon = ref(false);
 let displayNameDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 
 const form = ref<CreateAccountProps>({
-  vaultId: '',
+  vaultId: (route.params.vaultId as string) || '',
   username: '',
   password: ''
 });

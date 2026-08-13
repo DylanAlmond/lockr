@@ -11,10 +11,14 @@ import {
   ArrowUpWideNarrow,
   ArrowDownZA,
   Star,
-  Grid2X2
+  Grid2X2,
+  KeyRound,
+  Plus
 } from '@lucide/vue';
 import useAppStore from '../../stores/appStore.ts';
 import Select from '../ui/Select.vue';
+import { useModal } from '../../composables/useModal.ts';
+import NewAccountModal from '../ui/NewAccountModal.vue';
 
 type Props = AccountFilter & {
   recently_accessed: boolean;
@@ -35,6 +39,7 @@ const route = useRoute();
 const { searchQuery } = useSearch();
 const { state } = useAppStore();
 const { getAllAccounts } = useVault();
+const { openModal } = useModal();
 
 const accounts = ref<Account[]>([]);
 const sortCategory = ref<SortCategory>('alphabetical');
@@ -110,6 +115,13 @@ function toggleSort() {
   sortAsc.value = !sortAsc.value;
 }
 
+function openCreateAccountModal() {
+  openModal(NewAccountModal, {
+    onClose: () => {},
+    onConfirm: () => {}
+  });
+}
+
 // Update links to preserve current view context and clear 'edit'/'create' modes
 function accountRoute(accountId: string) {
   return {
@@ -159,6 +171,7 @@ watch(
   <div class="container">
     <div class="filter-wrapper">
       <Select
+        :disabled="groupedAccounts.length === 0"
         :model-value="sortCategory"
         :options="categories"
         variant="label"
@@ -171,6 +184,7 @@ watch(
 
       <Button
         @click="toggleSort"
+        :disabled="groupedAccounts.length === 0"
         icon-only
         variant="outline"
         :icon-component="
@@ -195,8 +209,13 @@ watch(
     </div>
 
     <div class="results-wrapper no-scrollbar">
-      <div v-if="groupedAccounts.length === 0">
-        <p>No accounts found.</p>
+      <div v-if="groupedAccounts.length === 0" class="empty-state">
+        <h3>No accounts found</h3>
+
+        <p>Add your first account to get started.</p>
+        <Button variant="accent" :icon-component="Plus" @click="openCreateAccountModal">
+          New Account
+        </Button>
       </div>
 
       <div v-for="group in groupedAccounts" class="account-group" :key="group.label">
@@ -255,6 +274,34 @@ watch(
   flex: 1;
   overflow-y: auto;
   padding-bottom: 1rem;
+}
+
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  gap: 0.75rem;
+  height: 100%;
+  padding: 3rem 1.5rem;
+  text-align: center;
+
+  padding-bottom: 5.5rem;
+
+  > h3 {
+    font-family: var(--font-geo);
+    font-size: 1.125rem;
+    font-weight: 550;
+    color: var(--color-text);
+  }
+
+  > p {
+    font-size: 0.875rem;
+    color: var(--color-text-tertiary);
+    max-width: 20rem;
+    margin-bottom: 0.5rem;
+  }
 }
 
 .account-group {
