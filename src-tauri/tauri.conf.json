@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "lockr",
+  "productName": "Lockr",
   "version": "0.1.0",
   "identifier": "com.karkand.lockr",
   "build": {
