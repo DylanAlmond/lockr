@@ -12,6 +12,7 @@ import { useModal } from '../../composables/useModal.ts';
 import VaultModal from '../ui/VaultModal.vue';
 import AlertModal from '../ui/AlertModal.vue';
 import useAppStore from '../../stores/appStore.ts';
+import AboutAppModal from '../ui/AboutAppModal.vue';
 
 const route = useRoute();
 const router = useRouter();
@@ -26,6 +27,19 @@ const navItems = [
   { icon: KeyRound, title: 'All Items', filter: undefined },
   { icon: Star, title: 'Favourites', filter: 'favourites' },
   { icon: Clock, title: 'Recently Accessed', filter: 'recently-accessed' }
+];
+
+const topMenu: DropdownItem[] = [
+  {
+    label: 'Settings',
+    onSelect: () => router.push({ name: 'settings' })
+  },
+  {
+    label: 'About',
+    onSelect: () => {
+      openModal(markRaw(AboutAppModal), { onClose: () => {}, onConfirm: () => {} });
+    }
+  }
 ];
 
 // Helper to determine if a nav item is strictly active based on the query parameter
@@ -94,6 +108,17 @@ onMounted(refreshVaults);
   <header class="sidebar">
     <div class="logo-container" data-tauri-drag-region>
       <Logo />
+
+      <Dropdown :list="topMenu" #trigger="{ triggerProps }">
+        <Button
+          aria-label="Vault Options"
+          icon-only
+          variant="label"
+          size="small"
+          :icon-component="EllipsisVertical"
+          v-bind="triggerProps"
+        />
+      </Dropdown>
     </div>
 
     <div class="user-profile">
@@ -184,6 +209,7 @@ onMounted(refreshVaults);
 .logo-container {
   display: flex;
   align-items: center;
+  justify-content: space-between;
   box-sizing: border-box;
   width: 100%;
   height: 4rem;
