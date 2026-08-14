@@ -2,8 +2,8 @@
 import { LucideProps } from '@lucide/vue';
 import { useAttrs, type Component } from 'vue';
 
-type Variant = 'accent' | 'outline' | 'label' | 'solid' | 'danger';
-type Size = 'default' | 'small';
+type Variant = 'accent' | 'outline' | 'label' | 'solid' | 'danger' | 'neon';
+type Size = 'default' | 'small' | 'xs';
 
 interface Props {
   variant?: Variant;
@@ -117,6 +117,16 @@ const attrs = useAttrs();
   --button-icon-size: 1rem;
 }
 
+.button--xs {
+  --button-height: 2rem;
+  --button-icon-size: 1rem;
+  --button-padding-x: 0.75rem;
+  --button-padding-y: 0.375rem;
+
+  gap: 0.375rem;
+  font-size: 0.875rem;
+}
+
 .button--fill {
   width: 100%;
 }
@@ -139,12 +149,8 @@ const attrs = useAttrs();
 /* ---------- Accent ---------- */
 
 .button--accent {
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.2) 0%, rgba(0, 0, 0, 0.2) 100%),
-    var(--color-accent);
-
+  background: var(--color-accent);
   color: var(--color-bg);
-
   box-shadow: var(--shadow-sm);
 }
 
@@ -189,6 +195,13 @@ const attrs = useAttrs();
   height: var(--button-icon-size);
 
   stroke-width: 2;
+}
+
+/* ---------- Neon ---------- */
+
+.button--neon {
+  background: var(--color-accent-hover);
+  color: var(--color-accent);
 }
 
 /* Variant colours */

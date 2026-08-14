@@ -158,6 +158,7 @@ async function handleSave() {
   flex-direction: column;
   height: 100%;
   overflow: hidden;
+  flex: 1;
 }
 
 header {

@@ -81,8 +81,6 @@ const labelId = useId();
     transform 0.15s ease,
     box-shadow 0.2s ease;
 
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.2) 0%, rgba(0, 0, 0, 0.2) 100%);
-
   &:hover {
     transform: scale(1.1);
   }

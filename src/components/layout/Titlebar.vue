@@ -1,17 +1,22 @@
 <script setup lang="ts">
 import { Minus, Square, SquaresUnite, X } from '@lucide/vue';
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import { onMounted, onUnmounted, ref } from 'vue';
+import { onMounted, onUnmounted, ref, useAttrs } from 'vue';
 
 const appWindow = getCurrentWindow();
 
 const isMaximized = ref(false);
+
+defineOptions({ inheritAttrs: false });
 
 let unlisten: (() => void) | undefined;
 
 async function refreshMaximizedState() {
   isMaximized.value = await appWindow.isMaximized();
 }
+
+// Native attrs (class, aria-*, name, form, title, etc.) forward to the root <nav>
+const attrs = useAttrs();
 
 onMounted(async () => {
   await refreshMaximizedState();
@@ -27,18 +32,18 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <nav class="title-bar" data-tauri-drag-region>
+  <nav v-bind="attrs" class="title-bar" data-tauri-drag-region>
     <slot />
 
     <div class="window-button-container">
-      <button @click="appWindow.minimize()"><Minus :size="16" /></button>
+      <button class="window-button" @click="appWindow.minimize()"><Minus :size="16" /></button>
 
-      <button @click="appWindow.toggleMaximize()">
+      <button class="window-button" @click="appWindow.toggleMaximize()">
         <SquaresUnite v-if="isMaximized" :size="16" />
         <Square v-else :size="16" />
       </button>
 
-      <button @click="appWindow.close()"><X :size="18" /></button>
+      <button class="window-button" @click="appWindow.close()"><X :size="18" /></button>
     </div>
   </nav>
 </template>
@@ -65,7 +70,7 @@ onUnmounted(() => {
   flex-shrink: 0;
   margin-left: 0.25rem;
 
-  button {
+  .window-button {
     display: flex;
     justify-content: center;
     align-items: center;

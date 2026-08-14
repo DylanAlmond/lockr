@@ -52,5 +52,6 @@ watch(
   align-items: center;
   height: 100%;
   color: var(--color-text-tertiary);
+  flex: 1;
 }
 </style>

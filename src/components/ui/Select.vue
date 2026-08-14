@@ -231,9 +231,7 @@ function handleNativeInvalid() {
 
 .select-trigger--outline:focus-visible {
   outline: none;
-  box-shadow:
-    inset 0 0 0 2px var(--color-accent),
-    var(--inset-sm);
+  box-shadow: inset 0 0 0 2px var(--color-accent);
 }
 
 /* ---------- Label ---------- */
@@ -308,12 +306,6 @@ function handleNativeInvalid() {
   outline: none;
   box-shadow: inset 0 0 0 2px var(--color-accent);
 }
-
-/* .select-trigger--invalid {
-  box-shadow:
-    inset 0 0 0 2px var(--color-danger, #ef4444),
-    var(--inset-sm);
-} */
 
 /* ---------- Root ---------- */
 

@@ -107,11 +107,7 @@ function togglePassword() {
 
   border-radius: 0.75rem;
 
-  background: var(--color-bg);
-
-  box-shadow:
-    inset 0 0 0 2px var(--color-border),
-    var(--inset-sm);
+  background: var(--color-hover);
 
   transition:
     box-shadow 0.2s ease,
@@ -127,9 +123,7 @@ function togglePassword() {
 }
 
 .input:focus-within {
-  box-shadow:
-    inset 0 0 0 2px var(--color-accent),
-    var(--inset-sm);
+  box-shadow: inset 0 0 0 2px var(--color-accent);
 }
 
 .input__icon {

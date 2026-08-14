@@ -6,7 +6,7 @@
   --color-bg: hsl(0 0 100%);
   --color-bg-nav: hsl(0 0 98%);
   --color-border: hsl(0 0 90%);
-  --color-hover: hsl(0 0 94%);
+  --color-hover: hsl(0 0 96%);
 
   --color-text: hsl(0 0 0%);
   --color-text-muted: hsl(0 0 50%);
@@ -15,7 +15,7 @@
 
   --color-accent: hsl(256 100% 63%);
   --color-accent-dark: hsl(256 50% 30%);
-  --color-accent-hover: hsl(256 80% 94%);
+  --color-accent-hover: hsl(256 80% 96%);
   --color-accent-muted: hsl(256 50% 50%);
 
   --color-green: hsl(131 50% 50%);

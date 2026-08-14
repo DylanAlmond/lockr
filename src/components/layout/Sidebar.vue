@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { RouterLink, useRoute, useRouter } from 'vue-router';
 import Logo from '../../assets/logo-text.svg';
-import { ChevronUp, Clock, EllipsisVertical, KeyRound, Lock, Plus, Star } from '@lucide/vue';
+import { Clock, EllipsisVertical, KeyRound, Plus, Settings, Star } from '@lucide/vue';
 import { useUser } from '../../composables/useUser';
 import Button from '../ui/Button.vue';
 import Dropdown, { DropdownItem } from '../ui/Dropdown.vue';
@@ -137,7 +137,7 @@ onMounted(refreshVaults);
       </RouterLink>
     </div>
 
-    <nav class="sidebar-nav">
+    <nav class="sidebar-nav thin-scrollbar">
       <ul class="link-list">
         <li v-for="item in navItems" :key="item.title">
           <RouterLink
@@ -151,19 +151,19 @@ onMounted(refreshVaults);
         </li>
       </ul>
 
-      <details class="vaults-container" open>
-        <summary class="vaults-accordion">
-          <ChevronUp class="vaults-chevron" :size="20" />
-          <span>Vaults</span>
+      <div class="vaults-container" open>
+        <header class="vaults-header">
+          <span>My Vaults</span>
           <Button
             :icon-component="Plus"
-            variant="label"
-            size="small"
-            icon-only
+            variant="neon"
+            size="xs"
             aria-label="New Vault"
             @click="openCreateVaultModal"
-          />
-        </summary>
+          >
+            Add
+          </Button>
+        </header>
 
         <ul class="link-list">
           <li v-for="vault in vaults" :key="vault.id" class="vault-item">
@@ -172,7 +172,11 @@ onMounted(refreshVaults);
               class="nav-link"
               active-class="active"
             >
-              <Lock :size="20" aria-hidden="true" :color="vault.color" />
+              <span
+                class="vault-indicator"
+                :style="{ backgroundColor: vault.color }"
+                aria-hidden="true"
+              ></span>
               <span>{{ vault.name }}</span>
             </RouterLink>
 
@@ -188,7 +192,18 @@ onMounted(refreshVaults);
             </Dropdown>
           </li>
         </ul>
-      </details>
+      </div>
+
+      <RouterLink
+        to="/settings"
+        class="nav-link settings-link"
+        aria-label="Settings"
+        :class="{ active: route.path.startsWith('/settings') }"
+      >
+        <Settings :size="20" aria-hidden="true" />
+
+        <span>Settings</span>
+      </RouterLink>
     </nav>
   </header>
 </template>
@@ -198,7 +213,7 @@ onMounted(refreshVaults);
   display: flex;
   flex-direction: column;
 
-  width: 320px;
+  width: 17.5rem;
   height: 100%;
 
   background: var(--color-bg-nav);
@@ -214,13 +229,13 @@ onMounted(refreshVaults);
   width: 100%;
   height: 4rem;
 
-  padding: 0.75rem 1rem;
+  padding: 0.75rem;
+  padding-right: 0.5rem;
 }
 
 .user-profile {
-  padding-left: 0.75rem;
-  padding-right: 0.75rem;
-  padding-top: 0.625rem;
+  padding: 0.5rem;
+  padding-top: 0.125rem;
   padding-bottom: 0.25rem;
 }
 
@@ -243,10 +258,6 @@ onMounted(refreshVaults);
   &:hover,
   &.active {
     background-color: var(--color-hover);
-  }
-
-  &.active {
-    box-shadow: var(--inset-sm);
   }
 
   &:focus-visible {
@@ -289,7 +300,7 @@ onMounted(refreshVaults);
 }
 
 .user-name {
-  font-size: 1.25rem;
+  font-size: 1.125rem;
   font-family: var(--font-geo);
   font-weight: 500;
 }
@@ -298,7 +309,9 @@ onMounted(refreshVaults);
   display: flex;
   flex-direction: column;
   gap: 2rem;
-  padding: 1rem;
+  padding: 1rem 0.5rem;
+  flex: 1;
+  overflow-y: auto;
 }
 
 .link-list {
@@ -342,10 +355,6 @@ onMounted(refreshVaults);
     background-color: var(--color-hover);
   }
 
-  &:has(.nav-link.active) {
-    box-shadow: var(--inset-sm);
-  }
-
   @supports (corner-shape: squircle) {
     corner-shape: squircle;
     border-radius: 1.5rem;
@@ -378,7 +387,7 @@ onMounted(refreshVaults);
   transition: transform 0.25s ease;
 }
 
-.vaults-accordion {
+.vaults-header {
   display: flex;
   align-items: center;
   gap: 0.75rem;
@@ -387,7 +396,6 @@ onMounted(refreshVaults);
   box-sizing: border-box;
   cursor: pointer;
 
-  height: 2.625rem;
   border-radius: 0.375rem;
 
   transition: box-shadow 0.2s ease;
@@ -398,11 +406,6 @@ onMounted(refreshVaults);
 
   button {
     margin-left: auto;
-  }
-
-  /* Hide default marker */
-  &::-webkit-details-marker {
-    display: none;
   }
 
   &:focus-visible {
@@ -428,7 +431,7 @@ onMounted(refreshVaults);
   gap: 0.75rem;
 
   width: 100%;
-  height: 3rem;
+  height: 2.75rem;
   padding: 0.5rem 1rem;
   box-sizing: border-box;
 
@@ -440,7 +443,7 @@ onMounted(refreshVaults);
   user-select: none;
 
   font: inherit;
-  font-size: 1rem;
+  font-size: 0.875rem;
   line-height: 1;
   color: inherit;
 
@@ -448,13 +451,21 @@ onMounted(refreshVaults);
 
   transition: all 0.2s ease;
 
-  &.active {
-    box-shadow: var(--inset-sm);
+  > span {
+    text-box-trim: trim-both;
+    text-box-edge: cap alphabetic;
+  }
+
+  &:hover {
     background-color: var(--color-hover);
   }
 
-  & > svg {
-    color: var(--color-accent-muted);
+  &.active {
+    background-color: var(--color-accent-hover);
+
+    & > svg {
+      color: var(--color-accent-muted);
+    }
   }
 
   &:focus-visible {
@@ -462,14 +473,21 @@ onMounted(refreshVaults);
     box-shadow: inset 0 0 0 2px var(--color-accent);
   }
 
-  &:hover {
-    background-color: var(--color-hover);
-  }
-
   /* Corner smoothing */
   @supports (corner-shape: squircle) {
     corner-shape: squircle;
     border-radius: 1.5rem;
   }
+}
+
+.settings-link {
+  margin-top: auto;
+}
+
+.vault-indicator {
+  width: 0.75rem;
+  height: 0.75rem;
+  aspect-ratio: 1;
+  border-radius: 0.25rem;
 }
 </style>
