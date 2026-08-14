@@ -12,9 +12,11 @@
   "app": {
     "windows": [
       {
-        "title": "lockr",
+        "title": "Lockr",
         "width": 1440,
         "height": 980,
+        "minWidth": 940,
+        "minHeight": 600,
         "decorations": false,
         "transparent": true
       }

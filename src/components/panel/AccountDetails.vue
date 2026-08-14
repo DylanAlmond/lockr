@@ -1,12 +1,12 @@
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
-import { ChevronRight, EllipsisVertical, Eye, EyeOff, Lock, Pencil, Star } from '@lucide/vue';
+import { ChevronRight, EllipsisVertical, Eye, EyeOff, Pencil, Star } from '@lucide/vue';
 import Button from '../ui/Button.vue';
 import TagList from '../ui/TagList.vue';
 import { formatTimestamp } from '../../util/timestamp.ts';
 import AccountField from '../ui/AccountField.vue';
-import { PASSWORDSTRENGTHS } from '../../util/constants.ts';
+import { PASSWORDSTRENGTHS, VAULT_COLORS } from '../../util/constants.ts';
 import Dropdown, { DropdownItem } from '../ui/Dropdown.vue';
 import AlertModal from '../ui/AlertModal.vue';
 import { useModal } from '../../composables/useModal.ts';
@@ -153,8 +153,12 @@ watch(
   <div v-else class="wrapper">
     <header>
       <div class="vault-label">
-        <Lock :size="20" aria-hidden="true" :color="parentVault?.color || '#6240BF'" />
-        <span>{{ parentVault?.name || 'Unknown Vault' }}</span>
+        <span
+          class="vault-indicator"
+          :style="{ backgroundColor: parentVault?.color || VAULT_COLORS[0].hex }"
+          aria-hidden="true"
+        ></span>
+        <span class="vault-name">{{ parentVault?.name || 'Unknown Vault' }}</span>
       </div>
 
       <nav class="header-toolbar">
@@ -199,7 +203,9 @@ watch(
             class="icon-image"
           />
           <span v-else class="icon-text">
-            {{ (state.activeAccount.display_name || state.activeAccount.username)[0].toUpperCase() }}
+            {{
+              (state.activeAccount.display_name || state.activeAccount.username)[0].toUpperCase()
+            }}
           </span>
           <Star
             v-if="state.activeAccount.favourite"
@@ -274,6 +280,7 @@ watch(
   flex-direction: column;
   height: 100%;
   overflow: hidden;
+  flex: 1;
 }
 
 header {
@@ -301,11 +308,17 @@ main {
 .vault-label {
   display: flex;
   align-items: center;
-  gap: 0.5rem;
+  gap: 0.75rem;
 
-  > span {
+  .vault-indicator {
+    width: 1rem;
+    height: 1rem;
+    aspect-ratio: 1;
+    border-radius: 0.25rem;
+  }
+
+  .vault-name {
     font-size: 1.125rem;
-    color: var(--color-text-tertiary);
     font-weight: 350;
     text-box-trim: trim-both;
     text-box-edge: cap alphabetic;

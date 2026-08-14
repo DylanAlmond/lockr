@@ -43,12 +43,12 @@ const updatePosition = () => {
   const rect = triggerWrapperRef.value.getBoundingClientRect();
   const menuEl = document.getElementById(dropdownId);
 
-  const menuWidth = menuEl ? menuEl.offsetWidth : Math.max(rect.width, 180);
+  const menuWidth = menuEl ? menuEl.offsetWidth : Math.max(rect.width, 240);
   const menuHeight = menuEl ? menuEl.offsetHeight : 200;
 
   const styles: Record<string, string> = {
     position: 'fixed',
-    minWidth: `${Math.max(rect.width, 180)}px`,
+    minWidth: `${Math.max(rect.width, 240)}px`,
     zIndex: '9999'
   };
 
@@ -251,13 +251,7 @@ onUnmounted(() => {
         :disabled="item.disabled"
         @click="handleSelect(item)"
       >
-        <component
-          v-if="item.icon"
-          :is="item.icon"
-          :size="16"
-          color="var(--color-accent)"
-          aria-hidden="true"
-        />
+        <component v-if="item.icon" :is="item.icon" :size="16" aria-hidden="true" />
         <span>{{ item.label }}</span>
       </button>
     </li>
@@ -274,9 +268,13 @@ onUnmounted(() => {
   background-color: var(--color-bg);
   border: 1px solid var(--color-border);
   border-radius: 0.75rem;
-  padding: 0.25rem;
+  padding: 0.375rem;
   list-style: none;
   margin: 0;
+  box-sizing: border-box;
+
+  width: 15rem;
+  min-width: fit-content;
 }
 
 .dropdown-item {
@@ -284,19 +282,29 @@ onUnmounted(() => {
   align-items: center;
   gap: 0.75rem;
   width: 100%;
-  padding: 0.75rem 0.75rem;
-  font-size: 1rem;
+  height: 2.25rem;
+  padding: 0.75rem 0.5rem;
+  font-size: 0.875rem;
   border: none;
   background: none;
   cursor: pointer;
   border-radius: 0.5rem;
   transition: background-color 0.15s ease;
   outline: none;
+
+  > svg {
+    color: var(--color-accent);
+  }
 }
 
 .dropdown-item:focus-visible,
 .dropdown-item:hover:not(:disabled) {
-  background-color: var(--color-hover);
+  color: var(--color-bg);
+  background-color: var(--color-accent);
+
+  > svg {
+    color: var(--color-bg);
+  }
 }
 
 .dropdown-item:disabled {

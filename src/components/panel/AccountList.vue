@@ -346,7 +346,6 @@ watch(
   transition: all 0.2s ease;
 
   &.active {
-    box-shadow: var(--inset-sm);
     background-color: var(--color-hover);
   }
 

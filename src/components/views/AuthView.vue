@@ -5,6 +5,7 @@ import Input from '../../components/ui/Input.vue';
 import { useRouter } from 'vue-router';
 import { useUser } from '../../composables/useUser.ts';
 import Logo from '../../assets/logo.svg';
+import Shield from '../../assets/logo-shield.svg';
 import Titlebar from '../layout/Titlebar.vue';
 import { LockOpen } from '@lucide/vue';
 
@@ -83,13 +84,14 @@ async function handleRegister() {
 
 <template>
   <div class="wrapper">
-    <Titlebar />
+    <Titlebar class="titlebar" />
 
     <div class="login-container">
       <Logo class="logo" />
 
       <form v-if="hasUser" @submit.prevent="handleLogin" class="login-form">
         <Input
+          class="password-input"
           v-model="masterPassword"
           type="password"
           placeholder="Enter your master password..."
@@ -98,7 +100,7 @@ async function handleRegister() {
 
         <Button
           type="submit"
-          variant="accent"
+          variant="solid"
           :icon-component="LockOpen"
           :disabled="isLoading || !masterPassword"
           fill
@@ -120,7 +122,7 @@ async function handleRegister() {
 
         <Button
           type="submit"
-          variant="accent"
+          variant="solid"
           :icon-component="LockOpen"
           :disabled="isLoading || !masterPassword"
           fill
@@ -132,14 +134,38 @@ async function handleRegister() {
 
       <p v-if="error" class="error-text">{{ error }}</p>
     </div>
+
+    <Shield class="shield" />
   </div>
 </template>
 
 <style scoped>
+.titlebar :deep(.window-button) {
+  color: var(--color-accent-hover) !important;
+  background-color: transparent !important;
+}
+
+.shield {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+
+  width: 240%;
+  height: auto;
+  opacity: 0.025;
+
+  pointer-events: none;
+
+  & * {
+    fill: white;
+  }
+}
+
 .wrapper {
-  background: var(--color-bg);
   height: 100%;
   width: 100%;
+  background: linear-gradient(135deg, #875cff 0%, #7542ff 100%), #ffffff;
 }
 
 .login-container {
@@ -161,13 +187,33 @@ async function handleRegister() {
 .logo {
   height: 7.5rem;
   width: auto;
+
+  & * {
+    fill: white !important;
+  }
 }
 
 .login-form {
   display: flex;
   flex-direction: column;
   width: 100%;
-  max-width: 25rem;
+  max-width: 22.5rem;
   gap: 1rem;
+}
+
+.login-form :deep(.input) {
+  background-color: var(--color-bg);
+}
+
+.login-form :deep(button) {
+  color: var(--color-accent);
+}
+
+.login-form :deep(.input),
+.login-form :deep(button) {
+  transition: all 0.2s ease;
+  &:focus-within {
+    box-shadow: inset 0 0 0 2px var(--color-accent-muted);
+  }
 }
 </style>
