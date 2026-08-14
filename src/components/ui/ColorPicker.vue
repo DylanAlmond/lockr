@@ -97,8 +97,9 @@ const labelId = useId();
   }
 
   &:focus-visible {
-    outline: none;
-    box-shadow: inset 0 0 0 2px var(--color-accent);
+    box-shadow:
+      0 0 0 2px var(--color-bg),
+      0 0 0 4px var(--color-accent);
   }
 
   @supports (corner-shape: squircle) {
