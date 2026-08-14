@@ -1,61 +1,97 @@
 <script setup lang="ts">
-import { ref, watch } from 'vue';
+import { ref, watch, onMounted, onUnmounted, nextTick } from 'vue';
 import { useModal } from '../../composables/useModal';
 
 const { isOpen, modalState, closeModal } = useModal();
-const dialogRef = ref<HTMLDialogElement | null>(null);
 
-watch(isOpen, (newValue) => {
-  if (newValue) {
-    dialogRef.value?.showModal();
+const modalRef = ref<HTMLDivElement | null>(null);
+
+function handleKeydown(event: KeyboardEvent) {
+  if (event.key === 'Escape' && isOpen.value) {
+    closeModal();
+  }
+}
+
+function handleBackdropClick(event: MouseEvent) {
+  if (event.target === event.currentTarget) {
+    closeModal();
+  }
+}
+
+watch(isOpen, (open) => {
+  if (open) {
+    document.body.style.overflow = 'hidden';
+    nextTick(() => modalRef.value?.focus());
   } else {
-    if (dialogRef.value?.open) {
-      dialogRef.value?.close();
-    }
+    document.body.style.overflow = '';
   }
 });
 
-function handleNativeClose() {
-  closeModal();
-}
+onMounted(() => {
+  document.addEventListener('keydown', handleKeydown);
+});
 
-// function handleOutsideClick(event: MouseEvent) {
-//   if (event.target === dialogRef.value) {
-//     closeModal();
-//   }
-// }
+onUnmounted(() => {
+  document.removeEventListener('keydown', handleKeydown);
+  document.body.style.overflow = '';
+});
 </script>
 
 <template>
-  <dialog ref="dialogRef" class="modal" @close="handleNativeClose">
-    <div v-if="modalState.component" class="modal-container">
-      <component
-        :is="modalState.component"
-        v-bind="modalState.props"
-        @close="closeModal"
-        @confirm="closeModal"
-      />
+  <Teleport to="body">
+    <div
+      v-if="isOpen"
+      ref="modalRef"
+      class="modal-backdrop"
+      tabindex="-1"
+      @mousedown="handleBackdropClick"
+    >
+      <div class="modal thin-scrollbar" role="dialog" aria-modal="true" @mousedown.stop>
+        <div v-if="modalState.component" class="modal-container">
+          <component
+            :is="modalState.component"
+            v-bind="modalState.props"
+            @close="closeModal"
+            @confirm="closeModal"
+          />
+        </div>
+      </div>
     </div>
-  </dialog>
+  </Teleport>
 </template>
 
 <style scoped>
-.modal {
-  margin: auto;
-  border: none;
-  box-sizing: border-box;
-  border-radius: 12px;
-  padding: 1.5rem;
-  background: transparent;
-  max-width: 480px;
-  width: 90%;
-  box-shadow: var(--shadow-sm);
-  background-color: var(--color-bg);
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  pointer-events: none;
+
+  display: flex;
+  align-items: center;
+  justify-content: center;
+
+  background-color: rgba(0, 0, 0, 0.1);
+  /* backdrop-filter: blur(4px); */
 }
 
-.modal::backdrop {
-  background-color: rgba(0, 0, 0, 0.6);
-  backdrop-filter: blur(4px);
+.modal {
+  pointer-events: initial;
+  box-sizing: border-box;
+  width: 90%;
+  max-width: 480px;
+  max-height: calc(100% - 2rem);
+
+  border-radius: 12px;
+  padding: 1.5rem;
+  margin: 1rem;
+
+  background-color: var(--color-bg);
+  box-shadow: var(--shadow-sm);
+  border: 1px solid var(--color-border);
+  overflow-y: auto;
+
+  outline: none;
 }
 
 .modal-container {
