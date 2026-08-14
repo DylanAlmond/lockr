@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, computed, nextTick, useAttrs } from 'vue';
-import type { Component } from 'vue';
+import type { Component, CSSProperties } from 'vue';
 
 export interface DropdownItem {
   id?: string | number;
@@ -22,7 +22,6 @@ const props = withDefaults(
 
 defineOptions({ inheritAttrs: false });
 
-// Multi-root template disables auto fallthrough — forward attrs (class, etc.) to the trigger wrapper
 const attrs = useAttrs();
 
 const emit = defineEmits<{
@@ -32,59 +31,73 @@ const emit = defineEmits<{
 const isOpen = ref(false);
 const triggerWrapperRef = ref<HTMLElement | null>(null);
 const menuRef = ref<HTMLUListElement | null>(null);
-const menuStyles = ref<Record<string, string>>({});
+const menuStyles = ref<CSSProperties>({});
 
 const dropdownId = `dropdown-menu-${Math.random().toString(36).substring(2, 9)}`;
 const alignClass = computed(() => `dropdown-menu--${props.align}`);
 
 const updatePosition = () => {
-  if (!triggerWrapperRef.value) return;
+  const trigger = triggerWrapperRef.value;
+  const menu = menuRef.value;
 
-  const rect = triggerWrapperRef.value.getBoundingClientRect();
-  const menuEl = document.getElementById(dropdownId);
+  if (!trigger || !menu) return;
 
-  const menuWidth = menuEl ? menuEl.offsetWidth : Math.max(rect.width, 240);
-  const menuHeight = menuEl ? menuEl.offsetHeight : 200;
+  const rect = trigger.getBoundingClientRect();
 
-  const styles: Record<string, string> = {
-    position: 'fixed',
-    minWidth: `${Math.max(rect.width, 240)}px`,
-    zIndex: '9999'
-  };
+  const menuWidth = menu.offsetWidth || rect.width;
+  const menuHeight = menu.offsetHeight || 200;
 
+  const viewportWidth = window.innerWidth;
+  const viewportHeight = window.innerHeight;
+
+  // 1. Calculate Left Position
   let leftPos = rect.left;
   if (props.align === 'right') {
     leftPos = rect.right - menuWidth;
   }
 
-  if (leftPos + menuWidth > window.innerWidth - 8) {
-    leftPos = window.innerWidth - menuWidth - 8;
-  }
-  if (leftPos < 8) {
-    leftPos = 8;
-  }
-  styles.left = `${leftPos}px`;
+  // Clamp left position to stay within viewport (with 8px padding)
+  const maxLeft = viewportWidth - menuWidth - 8;
+  leftPos = Math.max(8, Math.min(leftPos, maxLeft));
 
-  const spaceBelow = window.innerHeight - rect.bottom;
+  // 2. Calculate Top Position
+  const spaceBelow = viewportHeight - rect.bottom;
   const spaceAbove = rect.top;
+  let topPos: number;
 
-  if (spaceBelow < menuHeight + 8 && spaceAbove > spaceBelow) {
-    styles.top = `${rect.top - menuHeight - 8}px`;
+  // Decide whether to open downwards or upwards
+  if (spaceBelow >= menuHeight + 8 || spaceBelow >= spaceAbove) {
+    topPos = rect.bottom + 8; // Open downwards
   } else {
-    styles.top = `${rect.bottom + 8}px`;
+    topPos = rect.top - menuHeight - 8; // Open upwards
   }
 
-  menuStyles.value = styles;
+  // Final clamping for top to prevent off-screen issues on very short screens
+  const maxTop = viewportHeight - menuHeight - 8;
+  topPos = Math.max(8, Math.min(topPos, maxTop));
+
+  menuStyles.value = {
+    position: 'fixed',
+    top: `${topPos}px`,
+    left: `${leftPos}px`,
+    minWidth: `${rect.width}px`,
+    zIndex: '9999'
+  };
 };
 
 const toggleDropdown = async (event: Event) => {
   event.stopPropagation();
   isOpen.value = !isOpen.value;
-  updatePosition();
 
-  // Focus if not mouse toggled
-  if (isOpen.value && (event as MouseEvent).detail === 0) {
-    nextTick(() => focusFirstItem());
+  if (isOpen.value) {
+    // Wait for the DOM to render the <ul> element before measuring it
+    await nextTick();
+    updatePosition();
+
+    // Focus if not mouse toggled (detail === 0 means keyboard interaction)
+    if ((event as MouseEvent).detail === 0) {
+      focusFirstItem();
+    }
   }
 };
 
@@ -100,8 +113,7 @@ const focusFirstItem = () => {
   const items = menuRef.value?.querySelectorAll<HTMLButtonElement>(
     'button[role="menuitem"]:not([disabled])'
   );
-  // @ts-ignore Get an unknown property error on build?
-  items?.[0]?.focus({ focusVisible: true });
+  items?.[0]?.focus();
 };
 
 const handleSelect = (item: DropdownItem) => {
@@ -109,10 +121,9 @@ const handleSelect = (item: DropdownItem) => {
   if (item.onSelect) item.onSelect();
   emit('select', item);
   closeDropdown();
-  focusTrigger(); // Return focus to trigger after selection
+  focusTrigger();
 };
 
-// Handle keyboard navigation INSIDE the menu
 const handleMenuKeydown = (event: KeyboardEvent) => {
   if (!menuRef.value) return;
 
@@ -142,18 +153,15 @@ const handleMenuKeydown = (event: KeyboardEvent) => {
       items[items.length - 1].focus();
       break;
     case 'Tab':
-      // Prevent the browser from tabbing out to the body element
       event.preventDefault();
       if (event.shiftKey) {
-        // Shift + Tab
-        if (currentIndex === 0 || currentIndex === -1) {
+        if (currentIndex <= 0) {
           closeDropdown();
           focusTrigger();
         } else {
           items[currentIndex - 1].focus();
         }
       } else {
-        // Tab
         if (currentIndex === items.length - 1 || currentIndex === -1) {
           closeDropdown();
           focusTrigger();
@@ -170,7 +178,6 @@ const handleMenuKeydown = (event: KeyboardEvent) => {
   }
 };
 
-// Handle keyboard navigation ON the trigger button
 const handleTriggerKeydown = (event: KeyboardEvent) => {
   if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
     event.preventDefault();
@@ -232,31 +239,31 @@ onUnmounted(() => {
     />
   </span>
 
-  <!-- <Teleport to="body"> -->
-  <ul
-    v-if="isOpen && list.length"
-    :id="dropdownId"
-    ref="menuRef"
-    class="dropdown-menu"
-    :class="alignClass"
-    :style="menuStyles"
-    role="menu"
-    @keydown="handleMenuKeydown"
-  >
-    <li v-for="(item, index) in list" :key="item.id || index" role="none">
-      <button
-        type="button"
-        class="dropdown-item"
-        role="menuitem"
-        :disabled="item.disabled"
-        @click="handleSelect(item)"
-      >
-        <component v-if="item.icon" :is="item.icon" :size="16" aria-hidden="true" />
-        <span>{{ item.label }}</span>
-      </button>
-    </li>
-  </ul>
-  <!-- </Teleport> -->
+  <Teleport to="body">
+    <ul
+      v-if="isOpen && list.length"
+      :id="dropdownId"
+      ref="menuRef"
+      class="dropdown-menu"
+      :class="alignClass"
+      :style="menuStyles"
+      role="menu"
+      @keydown="handleMenuKeydown"
+    >
+      <li v-for="(item, index) in list" :key="item.id || index" role="none">
+        <button
+          type="button"
+          class="dropdown-item"
+          role="menuitem"
+          :disabled="item.disabled"
+          @click="handleSelect(item)"
+        >
+          <component v-if="item.icon" :is="item.icon" :size="16" aria-hidden="true" />
+          <span>{{ item.label }}</span>
+        </button>
+      </li>
+    </ul>
+  </Teleport>
 </template>
 
 <style scoped>
@@ -275,6 +282,9 @@ onUnmounted(() => {
 
   width: 15rem;
   min-width: fit-content;
+  max-width: calc(100vw - 1rem);
+  max-height: calc(100vh - 2rem);
+  overflow-y: auto;
 }
 
 .dropdown-item {

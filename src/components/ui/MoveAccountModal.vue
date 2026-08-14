@@ -145,8 +145,10 @@ main {
   padding: 1rem 1.5rem;
   overflow: hidden;
   border-radius: 0.75rem;
-  box-shadow: inset 0 0 0 2px var(--color-border);
-  transition: box-shadow 0.2s ease;
+  border: 1px solid var(--color-border);
+  transition:
+    box-shadow 0.2s ease,
+    border-color 0.2s ease;
 
   > h2 {
     font-weight: 400;
