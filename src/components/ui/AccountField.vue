@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import { ref, computed, onUnmounted } from 'vue';
+import { ref, computed, onUnmounted, watch } from 'vue';
 import { Copy, Check } from '@lucide/vue';
 import Button from './Button.vue';
 
 type CopyableValue = string | null | (() => string | null | Promise<string | null>);
 
 interface Props {
+  id?: string;
   label: string;
   displayValue?: string | null;
   copyValue?: CopyableValue;
@@ -70,13 +71,37 @@ async function handleCopy() {
   }
 }
 
+watch(
+  () => [
+    props.id,
+    props.label,
+    props.displayValue,
+    props.copyValue,
+    props.canCopy,
+    props.type,
+    props.modelValue,
+    props.input,
+    props.required,
+    props.placeholder
+  ],
+  () => {
+    if (cooldownTimer) {
+      clearTimeout(cooldownTimer);
+      cooldownTimer = null;
+    }
+
+    copied.value = false;
+  },
+  { deep: true }
+);
+
 onUnmounted(() => {
   if (cooldownTimer) clearTimeout(cooldownTimer);
 });
 </script>
 
 <template>
-  <div class="account-field">
+  <div :id="id" class="account-field">
     <div class="field-meta">
       <h2>{{ label }}</h2>
 

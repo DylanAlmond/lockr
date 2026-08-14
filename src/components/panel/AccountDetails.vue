@@ -219,6 +219,7 @@ watch(
       <section class="account-fields-section">
         <!-- Username -->
         <AccountField
+          :id="`${state.activeAccount.id}-username`"
           label="username"
           :display-value="state.activeAccount.username"
           :copy-value="state.activeAccount.username"
@@ -227,6 +228,7 @@ watch(
 
         <!-- Email -->
         <AccountField
+          :id="`${state.activeAccount.id}-email`"
           label="email"
           :display-value="state.activeAccount.email || 'No Email'"
           :copy-value="state.activeAccount.email"
@@ -235,6 +237,7 @@ watch(
 
         <!-- Password -->
         <AccountField
+          :id="`${state.activeAccount.id}-password`"
           label="password"
           :display-value="
             !passwordEntropy?.guesses ? 'No Value' : showPassword ? password : '••••••••••••••••'
