@@ -165,7 +165,7 @@ async function handleRegister() {
 .wrapper {
   height: 100%;
   width: 100%;
-  background: linear-gradient(135deg, #875cff 0%, #7542ff 100%), #ffffff;
+  background: linear-gradient(135deg, hsla(256, 100%, 68%, 0.7) 0%, hsla(256, 100%, 63%, 0.7) 100%);
 }
 
 .login-container {

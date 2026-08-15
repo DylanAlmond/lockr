@@ -4,7 +4,7 @@
 
 :root {
   --color-bg: hsl(0 0 100%);
-  --color-bg-nav: hsl(0 0 98%);
+  --color-bg-nav: rgba(255, 255, 255, 0.95);
   --color-border: hsl(0 0 90%);
   --color-hover: hsl(0 0 96%);
 

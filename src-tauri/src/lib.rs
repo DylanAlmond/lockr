@@ -6,6 +6,8 @@ mod user_manager;
 mod vault_manager;
 
 use std::sync::Mutex;
+#[cfg(target_os = "windows")]
+use window_vibrancy::apply_tabbed;
 
 pub use error::VaultError;
 pub use models::*;
@@ -17,6 +19,14 @@ use crate::{commands::ManagerState, user_manager::UserManager, vault_manager::Va
 pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
+            let window = app
+                .get_webview_window("main")
+                .expect("main window not found");
+
+            #[cfg(target_os = "windows")]
+            apply_tabbed(&window, Some(false))
+                .expect("Unsupported platform! 'apply_blur' is only supported on Windows");
+
             let app_data_dir = app
                 .path()
                 .app_data_dir()
