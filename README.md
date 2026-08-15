@@ -2,7 +2,8 @@
   <img src="banner.png" alt="Project Banner" width="1200">
 </p>
 
-![Status](https://img.shields.io/badge/Status-WiP-yellow)
+![Status](https://img.shields.io/badge/Status-Beta-orange)
+![GitHub Release](https://img.shields.io/github/v/release/DylanAlmond/lockr)
 
 ## Introduction
 
