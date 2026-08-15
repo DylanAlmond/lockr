@@ -255,9 +255,12 @@ onMounted(refreshVaults);
   border-radius: 0.75rem;
   transition: background-color 0.2s ease;
 
-  &:hover,
-  &.active {
+  &:hover {
     background-color: var(--color-hover);
+  }
+
+  &.active {
+    background-color: var(--color-accent-hover);
   }
 
   &:focus-visible {
@@ -334,11 +337,9 @@ onMounted(refreshVaults);
     flex: 1;
     min-width: 0;
 
-    /* Row-level hover/active owns the background; the link itself stays transparent */
     &:hover,
     &.active {
       background-color: transparent;
-      box-shadow: none;
       color: inherit;
     }
 
@@ -349,10 +350,12 @@ onMounted(refreshVaults);
     }
   }
 
-  &:hover,
-  &:focus-within,
-  &:has(.nav-link.active) {
+  &:hover {
     background-color: var(--color-hover);
+  }
+
+  &:has(.nav-link.active) {
+    background-color: var(--color-accent-hover);
   }
 
   @supports (corner-shape: squircle) {
