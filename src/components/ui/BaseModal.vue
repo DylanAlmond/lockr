@@ -82,7 +82,7 @@ onUnmounted(() => {
   max-width: 480px;
   max-height: calc(100% - 2rem);
 
-  border-radius: 12px;
+  border-radius: 0.75rem;
   padding: 1.5rem;
   margin: 1rem;
 
@@ -92,6 +92,12 @@ onUnmounted(() => {
   overflow-y: auto;
 
   outline: none;
+
+  /* Corner smoothing */
+  @supports (corner-shape: squircle) {
+    corner-shape: squircle;
+    border-radius: 1.5rem;
+  }
 }
 
 .modal-container {
