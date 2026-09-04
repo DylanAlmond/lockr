@@ -8,8 +8,9 @@ import Logo from '../../assets/logo.svg';
 import Shield from '../../assets/logo-shield.svg';
 import Titlebar from '../layout/Titlebar.vue';
 import { LockOpen } from '@lucide/vue';
+import { User } from '../../types/index.ts';
 
-const { login, register, fetchUser } = useUser();
+const { login, register, getUsers } = useUser();
 const router = useRouter();
 
 const name = ref('');
@@ -18,11 +19,19 @@ const error = ref('');
 const isLoading = ref(false);
 const hasUser = ref(false);
 
+const availableUsers = ref<User[]>([]);
+
 onMounted(async () => {
-  hasUser.value = !!(await fetchUser());
+  availableUsers.value = (await getUsers()) || [];
+  hasUser.value = !!availableUsers.value.length;
 });
 
 async function handleLogin() {
+  if (!availableUsers.value.length) {
+    error.value = 'No users exist.';
+    return;
+  }
+
   if (!masterPassword.value) {
     error.value = 'Please enter a master password.';
     return;
@@ -32,7 +41,8 @@ async function handleLogin() {
   error.value = '';
 
   try {
-    const vaults = await login(masterPassword.value);
+    // Default to first user for now, placeholder    
+    const vaults = await login(availableUsers.value[0].id, masterPassword.value);    
 
     if (vaults && vaults.length > 0) {
       router.push('/all-items');
@@ -72,6 +82,8 @@ async function handleRegister() {
       error.value = 'Failed to create a new user.';
     }
   } catch (e) {
+    console.log(e);
+    
     error.value = String(e);
   } finally {
     // Add a small delay so the user sees the success before the screen switches

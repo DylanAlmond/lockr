@@ -44,9 +44,11 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             // User
+            commands::get_users,
             commands::register_user,
             commands::login_user,
             commands::get_user,
+            commands::get_user_by_id,
             commands::update_profile,
             commands::logout,
             commands::delete_user,
