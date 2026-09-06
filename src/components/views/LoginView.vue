@@ -15,36 +15,39 @@ const masterPassword = ref('');
 const error = ref('');
 const isLoading = ref(false);
 
-const selectedUser = ref<User | null>(null);
 const availableUsers = ref<User[]>([]);
-const hasUser = computed(() => !!selectedUser.value);
+const selectedUser = ref<User | null>(null);
+
+const hasUser = computed(() => {
+  error.value = '';
+  return !!selectedUser.value;
+});
+
+const scrollContainer = ref<HTMLElement | null>(null);
 
 onMounted(async () => {
   availableUsers.value = (await getUsers()) || [];
 });
 
+// Translate vertical wheel scroll into horizontal scroll
+function handleWheel(e: WheelEvent) {
+  if (!scrollContainer.value) return;
+
+  // If it's a vertical scroll (deltaY is non-zero), prevent default and scroll horizontally
+  if (e.deltaY !== 0) {
+    e.preventDefault();
+    scrollContainer.value.scrollLeft += e.deltaY;
+  }
+}
+
 function selectUser(user: User) {
   selectedUser.value = user;
-
-  router.push({
-    path: '/auth',
-    query: { user: user.id }
-  });
+  router.push({ path: '/auth', query: { user: user.id } });
 }
 
 async function handleLogin() {
-  if (!availableUsers.value.length) {
-    error.value = 'No users exist.';
-    return;
-  }
-
-  if (!selectedUser.value) {
-    error.value = 'No user selected.';
-    return;
-  }
-
-  if (!masterPassword.value) {
-    error.value = 'Please enter a master password.';
+  if (!selectedUser.value || !masterPassword.value) {
+    error.value = 'Please select a user and enter a master password.';
     return;
   }
 
@@ -53,19 +56,15 @@ async function handleLogin() {
 
   try {
     const vaults = await login(selectedUser.value.id, masterPassword.value);
-
     if (vaults && vaults.length > 0) {
       router.push('/all-items');
     } else {
       error.value = 'Failed to unlock vaults. Is the password correct?';
+      isLoading.value = false;
     }
   } catch (e) {
     error.value = String(e);
-  } finally {
-    // Add a small delay so the user sees the success before the screen switches
-    setTimeout(() => {
-      isLoading.value = false;
-    }, 300);
+    isLoading.value = false;
   }
 }
 
@@ -76,7 +75,6 @@ watch(
       selectedUser.value = null;
       return;
     }
-
     selectedUser.value = availableUsers.value.find((u) => u.id === userId) || null;
   },
   { immediate: true }
@@ -84,6 +82,7 @@ watch(
 </script>
 
 <template>
+  <!-- Login Form (User Selected) -->
   <form v-if="hasUser" @submit.prevent="handleLogin" class="login-form">
     <div class="user-profile">
       <div class="user-button">
@@ -93,18 +92,17 @@ watch(
           alt="User icon"
           class="icon-image"
         />
-        <span v-else class="icon-text"> {{ (selectedUser?.name || 'No User ')[0] }} </span>
+        <span v-else class="icon-text">{{ (selectedUser?.name || 'U')[0] }}</span>
       </div>
-
       <span>{{ selectedUser?.name }}</span>
     </div>
 
     <Input
-      class="password-input"
       v-model="masterPassword"
       type="password"
       placeholder="Enter your master password..."
       name="master_password"
+      autofocus
     />
 
     <Button
@@ -119,30 +117,36 @@ watch(
     </Button>
   </form>
 
-  <div v-else>
-    <ul class="user-list">
+  <!-- User Selection List -->
+  <div
+    v-else
+    ref="scrollContainer"
+    class="user-list-wrapper no-scrollbar"
+    @wheel.passive="handleWheel"
+  >
+    <ul class="user-list no-scrollbar">
       <li v-for="user in availableUsers" :key="user.id">
         <div class="user-profile">
           <button class="user-button" @click="selectUser(user)" :aria-label="user.name">
             <img v-if="user?.icon" :src="user.icon" alt="User icon" class="icon-image" />
-            <span v-else class="icon-text"> {{ (user?.name || 'No User ')[0] }} </span>
+            <span v-else class="icon-text">{{ (user?.name || 'U')[0] }}</span>
           </button>
-
           <span>{{ user.name }}</span>
         </div>
       </li>
 
-      <div class="user-profile">
-        <button
-          @click="router.push('/auth/new')"
-          class="user-button new-user-button"
-          aria-label="New User"
-        >
-          <Plus :size="40" />
-        </button>
-
-        <span>New User</span>
-      </div>
+      <li>
+        <div class="user-profile">
+          <button
+            @click="router.push('/auth/new')"
+            class="user-button new-user-button"
+            aria-label="New User"
+          >
+            <Plus :size="40" />
+          </button>
+          <span>New User</span>
+        </div>
+      </li>
     </ul>
   </div>
 
@@ -150,11 +154,46 @@ watch(
 </template>
 
 <style scoped>
+.user-list-wrapper {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  max-width: 40rem;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 1.5rem 4rem;
+  scroll-snap-type: x proximity;
+  scroll-behavior: smooth;
+  mask-image: linear-gradient(to right, transparent 0%, black 8%, black 92%, transparent 100%);
+
+  -webkit-mask-image: linear-gradient(
+    to right,
+    transparent 0%,
+    black 8%,
+    black 92%,
+    transparent 100%
+  );
+}
+
 .user-list {
   display: flex;
   list-style: none;
   align-items: center;
   gap: 1.5rem;
+  padding: 0 1rem;
+  width: max-content;
+  margin: 0 auto;
+}
+
+.user-profile {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.75rem;
+  font-weight: 300;
+  font-family: var(--font-geo);
+  color: var(--color-bg);
+  scroll-snap-align: center;
 }
 
 .user-button {
@@ -175,88 +214,43 @@ watch(
   border: none;
   transition: all 0.2s ease;
   overflow: hidden;
-
   border-radius: 0.375rem;
+}
 
-  .icon-image {
-    width: 100%;
-    height: 100%;
-    object-fit: cover;
-    border-radius: 0.375rem;
-  }
+.user-button .icon-image {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
 
-  .icon-text {
-    pointer-events: none;
-  }
+.user-button:hover:not(:disabled) {
+  opacity: 0.8;
+}
 
-  @supports (corner-shape: squircle) {
-    corner-shape: squircle;
-    border-radius: 1.5rem;
-  }
+.user-button:active:not(:disabled) {
+  opacity: 0.5;
+}
 
-  &:hover:not(:disabled) {
-    opacity: 0.8;
-  }
-
-  &:active:not(:disabled) {
-    opacity: 0.5;
-  }
-
-  &:focus-visible {
-    outline: none;
-    box-shadow: inset 0 0 0 2px var(--color-accent);
-  }
-
-  &:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
+.user-button:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 2px var(--color-accent);
 }
 
 .new-user-button {
   background-color: transparent;
   color: var(--color-bg);
+  border: 2px dashed var(--color-bg);
+}
 
-  &:focus-visible {
-    outline: none;
-    box-shadow: inset 0 0 0 2px var(--color-bg);
+.new-user-button:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 2px var(--color-bg);
+}
+
+@supports (corner-shape: squircle) {
+  .user-button {
+    corner-shape: squircle;
+    border-radius: 1.5rem;
   }
-}
-
-.login-form {
-  display: flex;
-  flex-direction: column;
-  width: 100%;
-  max-width: 22.5rem;
-  gap: 1rem;
-}
-
-.login-form :deep(.input) {
-  background-color: var(--color-bg);
-}
-
-.login-form :deep(button) {
-  color: var(--color-accent);
-}
-
-.login-form :deep(.input),
-.login-form :deep(button) {
-  transition: all 0.2s ease;
-  &:focus-within {
-    box-shadow: inset 0 0 0 2px var(--color-accent-muted);
-  }
-}
-
-.user-profile {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 0.75rem;
-  margin: auto;
-  margin-bottom: 1rem;
-  font-weight: 300;
-  font-family: var(--font-geo);
-
-  color: var(--color-bg);
 }
 </style>

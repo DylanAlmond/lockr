@@ -10,7 +10,6 @@ import Titlebar from '../layout/Titlebar.vue';
 
     <div class="login-container">
       <Logo class="logo" />
-
       <router-view />
     </div>
 
@@ -19,6 +18,18 @@ import Titlebar from '../layout/Titlebar.vue';
 </template>
 
 <style scoped>
+.wrapper {
+  height: 100%;
+  width: 100%;
+  background: linear-gradient(135deg, #875cff 0%, #7542ff 100%), #ffffff;
+  position: relative;
+  overflow: hidden;
+}
+
+.titlebar {
+  border: none;
+}
+
 .titlebar :deep(.window-button) {
   color: var(--color-accent-hover) !important;
   background-color: transparent !important;
@@ -29,25 +40,20 @@ import Titlebar from '../layout/Titlebar.vue';
   top: 50%;
   left: 50%;
   transform: translate(-50%, -50%);
-
   width: 240%;
   height: auto;
   opacity: 0.025;
-
   pointer-events: none;
-
-  & * {
-    fill: white;
-  }
+  z-index: 0;
 }
 
-.wrapper {
-  height: 100%;
-  width: 100%;
-  background: linear-gradient(135deg, #875cff 0%, #7542ff 100%), #ffffff;
+.shield :deep(*) {
+  fill: white;
 }
 
 .login-container {
+  position: relative;
+  z-index: 1;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -59,20 +65,17 @@ import Titlebar from '../layout/Titlebar.vue';
   padding-bottom: 5rem;
 }
 
-.title-bar {
-  border: none;
-}
-
 .logo {
   height: 7.5rem;
   width: auto;
-
-  & * {
-    fill: white !important;
-  }
 }
 
-.login-form {
+.logo :deep(*) {
+  fill: white !important;
+}
+
+/* Shared styles for child views (Login & Register) */
+.login-container :deep(.login-form) {
   display: flex;
   flex-direction: column;
   width: 100%;
@@ -80,19 +83,30 @@ import Titlebar from '../layout/Titlebar.vue';
   gap: 1rem;
 }
 
-.login-form :deep(.input) {
+.login-container :deep(.login-form .input) {
   background-color: var(--color-bg);
 }
 
-.login-form :deep(button) {
+.login-container :deep(.login-form button) {
   color: var(--color-accent);
 }
 
-.login-form :deep(.input),
-.login-form :deep(button) {
+.login-container :deep(.login-form .input),
+.login-container :deep(.login-form button) {
   transition: all 0.2s ease;
-  &:focus-within {
-    box-shadow: inset 0 0 0 2px var(--color-accent-muted);
-  }
+}
+
+.login-container :deep(.login-form .input:focus-within),
+.login-container :deep(.login-form button:focus-visible) {
+  box-shadow: inset 0 0 0 2px var(--color-accent-muted);
+}
+
+.login-container :deep(.error-text) {
+  color: #ffcccc;
+  font-size: 0.875rem;
+  text-align: center;
+  margin-top: 0.5rem;
+  width: 100%;
+  max-width: 22.5rem;
 }
 </style>
