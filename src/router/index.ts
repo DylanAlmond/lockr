@@ -5,6 +5,8 @@ import SettingsView from '../components/views/SettingsView.vue';
 import { useUser } from '../composables/useUser';
 import AccountList from '../components/panel/AccountList.vue';
 import AccountPanel from '../components/panel/AccountPanel.vue';
+import RegisterView from '../components/views/RegisterView.vue';
+import LoginView from '../components/views/LoginView.vue';
 
 const routes: RouteRecordRaw[] = [
   {
@@ -60,8 +62,19 @@ const routes: RouteRecordRaw[] = [
   },
   {
     path: '/auth',
-    component: AuthView
+    component: AuthView,
+    children: [
+      {
+        path: '',
+        component: LoginView
+      },
+      {
+        path: 'new',
+        component: RegisterView
+      }
+    ]
   },
+
   /* 404 fallback */
   {
     path: '/:pathMatch(.*)*',
