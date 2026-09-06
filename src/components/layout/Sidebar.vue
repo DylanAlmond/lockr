@@ -16,7 +16,7 @@ import AboutAppModal from '../ui/AboutAppModal.vue';
 
 const route = useRoute();
 const router = useRouter();
-const { user } = useUser();
+const { user, logout } = useUser();
 const { getUnlockedVaults } = useVault();
 const { openModal } = useModal();
 const { state, deleteVaultById } = useAppStore();
@@ -30,6 +30,10 @@ const navItems = [
 ];
 
 const topMenu: DropdownItem[] = [
+  {
+    label: 'Logout',
+    onSelect: () => logout()
+  },
   {
     label: 'Settings',
     onSelect: () => router.push({ name: 'settings' })
