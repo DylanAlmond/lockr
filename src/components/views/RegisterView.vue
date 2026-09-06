@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue';
+import { ref } from 'vue';
 import Button from '../../components/ui/Button.vue';
 import Input from '../../components/ui/Input.vue';
 import { useRouter } from 'vue-router';
@@ -13,10 +13,6 @@ const name = ref('');
 const masterPassword = ref('');
 const error = ref('');
 const isLoading = ref(false);
-
-const displayInitial = computed(() => {
-  return (name.value || '')[0]?.toUpperCase() || '?';
-});
 
 async function handleRegister() {
   if (!name.value || !masterPassword.value) {
