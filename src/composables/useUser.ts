@@ -1,12 +1,25 @@
 import { ref } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import type { User, Vault } from '../types';
+import { useRouter } from 'vue-router';
 
 const user = ref<User | null>(null);
 const isLoading = ref(false);
 const error = ref<string | null>(null);
 
 export function useUser() {
+  const router = useRouter();
+
+  async function getUsers(): Promise<User[] | null> {
+    try {
+      const users = await invoke<User[]>('get_users');
+      return users;
+    } catch (e) {
+      error.value = String(e);
+      return null;
+    }
+  }
+
   async function register(name: string, masterPassword: string): Promise<Vault[] | null> {
     isLoading.value = true;
     error.value = null;
@@ -25,12 +38,12 @@ export function useUser() {
     }
   }
 
-  async function login(masterPassword: string): Promise<Vault[] | null> {
+  async function login(id: string, masterPassword: string): Promise<Vault[] | null> {
     isLoading.value = true;
     error.value = null;
 
     try {
-      const vaults = await invoke<Vault[]>('login_user', { masterPassword });
+      const vaults = await invoke<Vault[]>('login_user', { id, masterPassword });
 
       await fetchUser();
 
@@ -47,6 +60,7 @@ export function useUser() {
     try {
       await invoke('logout');
       user.value = null;
+      router.replace('/auth');
       return true;
     } catch (e) {
       error.value = String(e);
@@ -99,6 +113,7 @@ export function useUser() {
     try {
       await invoke<User>('delete_user');
       user.value = null;
+      router.replace('/auth');
       return true;
     } catch (e) {
       error.value = String(e);
@@ -110,6 +125,7 @@ export function useUser() {
     user,
     isLoading,
     error,
+    getUsers,
     register,
     login,
     logout,

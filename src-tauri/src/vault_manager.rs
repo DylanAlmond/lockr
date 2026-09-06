@@ -129,6 +129,11 @@ impl VaultManager {
         master_password: &str,
         secret_key: &[u8],
     ) -> Result<Vault, VaultError> {
+        // Getting some weird issue in Win 10 where suddenly it wouldn't make the vaults dir on init
+        if !self.vaults_dir.exists() {
+            std::fs::create_dir_all(&self.vaults_dir)?;
+        }
+
         let vault = Vault {
             id: Uuid::new_v4(),
             name: name,

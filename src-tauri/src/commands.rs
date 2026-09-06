@@ -1,3 +1,4 @@
+use std::println;
 use std::sync::Mutex;
 
 use tauri::State;
@@ -7,7 +8,7 @@ use zxcvbn::{zxcvbn, Entropy};
 
 use crate::user_manager::UserManager;
 use crate::vault_manager::VaultManager;
-use crate::{AccountFilter, IntoSafe, SafeAccount, SafeVault, User};
+use crate::{AccountFilter, IntoSafe, SafeAccount, SafeVault, User, UserId};
 
 pub struct ManagerState {
     pub vault_manager: VaultManager,
@@ -37,12 +38,12 @@ pub fn register_user(
         secret_key: sk_state,
     } = &mut *state;
 
-    user_manager
+    let user = user_manager
         .register(name, &master_password)
         .map_err(|e| e.to_string())?;
 
     let sk = user_manager
-        .login(&master_password)
+        .login(&user.id, &master_password)
         .map_err(|e| e.to_string())?;
 
     *mp_state = Some(master_password);
@@ -64,9 +65,37 @@ pub fn register_user(
 }
 
 #[tauri::command]
+pub fn get_users(state: AppState) -> Result<Vec<User>, String> {
+    let state = state.lock().map_err(|e| e.to_string())?;
+    Ok(state.user_manager.get_users().map_err(|e| e.to_string())?)
+}
+
+#[tauri::command]
 pub fn get_user(state: AppState) -> Result<User, String> {
     let state = state.lock().map_err(|e| e.to_string())?;
-    Ok(state.user_manager.get_user().map_err(|e| e.to_string())?)
+    let user_id = state
+        .user_manager
+        .active_user_id
+        .as_ref()
+        .ok_or_else(|| "No user is active".to_string())?;
+
+    println!("id: {}", user_id);
+
+    Ok(state
+        .user_manager
+        .get_user(user_id)
+        .map_err(|e| e.to_string())?)
+}
+
+#[tauri::command]
+pub fn get_user_by_id(state: AppState, id: String) -> Result<User, String> {
+    let state = state.lock().map_err(|e| e.to_string())?;
+    let user_id: UserId = Uuid::parse_str(&id).map_err(|e| e.to_string())?;
+
+    Ok(state
+        .user_manager
+        .get_user(&user_id)
+        .map_err(|e| e.to_string())?)
 }
 
 #[tauri::command]
@@ -84,7 +113,11 @@ pub fn update_profile(
 }
 
 #[tauri::command]
-pub fn login_user(state: AppState, master_password: String) -> Result<Vec<SafeVault>, String> {
+pub fn login_user(
+    state: AppState,
+    id: String,
+    master_password: String,
+) -> Result<Vec<SafeVault>, String> {
     let mut state = state.lock().map_err(|e| e.to_string())?;
 
     let ManagerState {
@@ -94,8 +127,10 @@ pub fn login_user(state: AppState, master_password: String) -> Result<Vec<SafeVa
         secret_key: sk_state,
     } = &mut *state;
 
+    let user_id: UserId = Uuid::parse_str(&id).map_err(|e| e.to_string())?;
+
     let sk = user_manager
-        .login(&master_password)
+        .login(&user_id, &master_password)
         .map_err(|e| e.to_string())?;
 
     *mp_state = Some(master_password);
@@ -104,7 +139,7 @@ pub fn login_user(state: AppState, master_password: String) -> Result<Vec<SafeVa
     let mp = mp_state.as_ref().ok_or("Not logged in")?;
     let sk = sk_state.as_ref().ok_or("Not logged in")?;
 
-    let user = user_manager.get_user().map_err(|e| e.to_string())?;
+    let user = user_manager.get_user(&user_id).map_err(|e| e.to_string())?;
 
     // Unlock all vaults — each derives its master key once (Argon2id).
     // After this, all further operations use the cached keys.
@@ -118,6 +153,8 @@ pub fn login_user(state: AppState, master_password: String) -> Result<Vec<SafeVa
 #[tauri::command]
 pub fn logout(state: AppState) -> Result<(), String> {
     let mut state = state.lock().map_err(|e| e.to_string())?;
+
+    state.user_manager.logout().map_err(|e| e.to_string())?;
 
     // Flush any unsaved changes before locking
     state.vault_manager.flush_all().map_err(|e| e.to_string())?;

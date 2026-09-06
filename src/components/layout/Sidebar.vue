@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { RouterLink, useRoute, useRouter } from 'vue-router';
 import Logo from '../../assets/logo-text.svg';
-import { Clock, EllipsisVertical, KeyRound, Plus, Settings, Star } from '@lucide/vue';
+import { Clock, EllipsisVertical, KeyRound, LogOut, Plus, Settings, Star } from '@lucide/vue';
 import { useUser } from '../../composables/useUser';
 import Button from '../ui/Button.vue';
 import Dropdown, { DropdownItem } from '../ui/Dropdown.vue';
@@ -16,7 +16,7 @@ import AboutAppModal from '../ui/AboutAppModal.vue';
 
 const route = useRoute();
 const router = useRouter();
-const { user } = useUser();
+const { user, logout } = useUser();
 const { getUnlockedVaults } = useVault();
 const { openModal } = useModal();
 const { state, deleteVaultById } = useAppStore();
@@ -30,6 +30,10 @@ const navItems = [
 ];
 
 const topMenu: DropdownItem[] = [
+  {
+    label: 'Logout',
+    onSelect: () => logout()
+  },
   {
     label: 'Settings',
     onSelect: () => router.push({ name: 'settings' })
@@ -122,19 +126,22 @@ onMounted(refreshVaults);
     </div>
 
     <div class="user-profile">
-      <RouterLink
-        to="/settings"
-        class="user-profile-link"
-        aria-label="Settings"
-        :class="{ active: route.path.startsWith('/settings') }"
-      >
+      <div class="user-info">
         <div class="user-icon">
           <img v-if="user?.icon" :src="user.icon" alt="User icon" class="icon-image" />
           <span v-else class="icon-text"> {{ (user?.name || 'No User ')[0] }} </span>
         </div>
-
         <span class="user-name">{{ user?.name || 'No User' }}</span>
-      </RouterLink>
+      </div>
+
+      <Button
+        aria-label="Logout"
+        icon-only
+        variant="label"
+        size="small"
+        :icon-component="LogOut"
+        @click="logout"
+      />
     </div>
 
     <nav class="sidebar-nav thin-scrollbar">
@@ -234,41 +241,23 @@ onMounted(refreshVaults);
 }
 
 .user-profile {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+
   padding: 0.5rem;
   padding-top: 0.125rem;
   padding-bottom: 0.25rem;
 }
 
-.user-profile-link {
+.user-info {
   display: flex;
   align-items: center;
   gap: 0.75rem;
-
-  width: 100%;
-  padding: 0.5rem;
-  box-sizing: border-box;
-
-  text-decoration: none;
-  color: inherit;
-  cursor: pointer;
-
-  border-radius: 0.75rem;
-  transition: background-color 0.2s ease;
-
-  &:hover,
-  &.active {
-    background-color: var(--color-hover);
-  }
-
-  &:focus-visible {
-    outline: none;
-    box-shadow: inset 0 0 0 2px var(--color-accent);
-  }
-
-  @supports (corner-shape: squircle) {
-    corner-shape: squircle;
-    border-radius: 1.5rem;
-  }
+  flex: 1;
+  min-width: 0;
+  padding: 0.25rem;
 }
 
 .user-icon {
@@ -303,6 +292,10 @@ onMounted(refreshVaults);
   font-size: 1.125rem;
   font-family: var(--font-geo);
   font-weight: 500;
+
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .sidebar-nav {
@@ -334,11 +327,9 @@ onMounted(refreshVaults);
     flex: 1;
     min-width: 0;
 
-    /* Row-level hover/active owns the background; the link itself stays transparent */
     &:hover,
     &.active {
       background-color: transparent;
-      box-shadow: none;
       color: inherit;
     }
 
@@ -349,10 +340,12 @@ onMounted(refreshVaults);
     }
   }
 
-  &:hover,
-  &:focus-within,
-  &:has(.nav-link.active) {
+  &:hover {
     background-color: var(--color-hover);
+  }
+
+  &:has(.nav-link.active) {
+    background-color: var(--color-accent-hover);
   }
 
   @supports (corner-shape: squircle) {
