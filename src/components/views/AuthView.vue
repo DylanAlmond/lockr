@@ -2,11 +2,27 @@
 import Logo from '../../assets/logo.svg';
 import Shield from '../../assets/logo-shield.svg';
 import Titlebar from '../layout/Titlebar.vue';
+import { ArrowLeft } from '@lucide/vue';
+import { useRouter } from 'vue-router';
+import Button from '../ui/Button.vue';
+
+const router = useRouter();
 </script>
 
 <template>
   <div class="wrapper">
-    <Titlebar class="titlebar" />
+    <Titlebar class="titlebar">
+      <Button
+        v-if="router.currentRoute.value.fullPath !== '/auth'"
+        class="back-button"
+        name="navigate-back"
+        aria-label="Back"
+        variant="label"
+        :icon-component="ArrowLeft"
+        icon-only
+        @click="router.replace('/auth')"
+      />
+    </Titlebar>
 
     <div class="login-container">
       <Logo class="logo" />
@@ -18,6 +34,11 @@ import Titlebar from '../layout/Titlebar.vue';
 </template>
 
 <style scoped>
+.back-button {
+  --button-icon-color: var(--color-bg);
+  margin-right: auto;
+}
+
 .wrapper {
   height: 100%;
   width: 100%;
