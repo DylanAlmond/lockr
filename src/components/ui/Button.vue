@@ -66,6 +66,7 @@ const attrs = useAttrs();
   --button-padding-x: 1rem;
   --button-padding-y: 0.5rem;
   --button-icon-size: 1.125rem;
+  --button-icon-color: var(--color-bg);
 
   appearance: none;
   border: none;
@@ -149,6 +150,8 @@ const attrs = useAttrs();
 /* ---------- Accent ---------- */
 
 .button--accent {
+  --button-icon-color: var(--color-bg);
+
   background: var(--color-accent);
   color: var(--color-bg);
   box-shadow: var(--shadow-sm);
@@ -157,6 +160,8 @@ const attrs = useAttrs();
 /* ---------- Outline ---------- */
 
 .button--outline {
+  --button-icon-color: var(--color-text-muted);
+
   background: transparent;
   color: var(--color-text);
 
@@ -166,6 +171,8 @@ const attrs = useAttrs();
 /* ---------- Danger ---------- */
 
 .button--danger {
+  --button-icon-color: var(--color-red);
+
   background: transparent;
   color: var(--color-red);
 
@@ -175,6 +182,8 @@ const attrs = useAttrs();
 /* ---------- Label ---------- */
 
 .button--label {
+  --button-icon-color: var(--color-text-muted);
+
   background: transparent;
   color: var(--color-text);
 }
@@ -193,6 +202,7 @@ const attrs = useAttrs();
 
   width: var(--button-icon-size);
   height: var(--button-icon-size);
+  color: var(--button-icon-color);
 
   stroke-width: 2;
 }
@@ -200,26 +210,10 @@ const attrs = useAttrs();
 /* ---------- Neon ---------- */
 
 .button--neon {
+  --button-icon-color: var(--color-accent);
+
   background: var(--color-accent-hover);
   color: var(--color-accent);
-}
-
-/* Variant colours */
-
-.button--accent .button__icon {
-  color: var(--color-bg);
-}
-
-.button--outline .button__icon {
-  color: var(--color-text-muted);
-}
-
-.button--danger .button__icon {
-  color: var(--color-red);
-}
-
-.button--label .button__icon {
-  color: var(--color-text-muted);
 }
 
 /* ---------- Label ---------- */
