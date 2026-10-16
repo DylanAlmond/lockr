@@ -9,11 +9,12 @@ import AccountField from '../ui/AccountField.vue';
 import IconUpload from '../ui/IconUpload.vue';
 import useAppStore from '../../stores/appStore.ts';
 import { useVault } from '../../composables/useVault.ts';
+import { cardSecretMask, cardNumberLast4, SECRET_FIELD_CARD_NUMBER } from '../../util/secrets.ts';
 
 const route = useRoute();
 const router = useRouter();
-const { state, updateActiveItem } = useAppStore();
-const { updateItemSecret } = useVault();
+const { state, updateActiveItem, setActiveItem } = useAppStore();
+const { getItemSecret, updateItemSecret } = useVault();
 
 const card = computed(() => (state.activeItem?.kind === 'card' ? state.activeItem : null));
 
@@ -40,33 +41,96 @@ const form = ref<CardForm>({
   tags: []
 });
 
-// Secrets are never prefetched in edit mode. Typing into a secret field
-// updates just that field via update_item_secret; leaving it blank keeps
-// the stored value.
-interface SecretInputs {
-  card_number: string;
-  security_code: string;
-  pin: string;
+// Secrets are fetched on focus: an unfocused field renders the stored
+// value's structural mask as its displayed content (card numbers keep
+// their real last 4), while focusing reveals the real value and blurring
+// re-masks. Input type is always text so the mask structure is visible.
+type SecretKey = 'card_number' | 'security_code' | 'pin';
+
+const SECRET_KEYS: SecretKey[] = ['card_number', 'security_code', 'pin'];
+
+interface SecretState {
+  /** Value as fetched ('' when the key has none); null until fetched */
+  original: string | null;
+  input: string;
+  fetched: boolean;
 }
-const secretInputs = ref<SecretInputs>({
-  card_number: '',
-  security_code: '',
-  pin: ''
-});
-const savedSecretInput = ref<SecretInputs>({
-  card_number: '',
-  security_code: '',
-  pin: ''
-});
 
-// Fields explicitly marked "clear stored value"; typing into a field
-// cancels its clear mark. Applied to values on save.
-const clearedSecrets = ref(new Set<string>());
+function freshSecretStates(): Record<SecretKey, SecretState> {
+  return {
+    card_number: { original: null, input: '', fetched: false },
+    security_code: { original: null, input: '', fetched: false },
+    pin: { original: null, input: '', fetched: false }
+  };
+}
 
-function onSecretInput(key: string, value: string | null) {
-  if (value && clearedSecrets.value.has(key)) {
-    clearedSecrets.value.delete(key);
+const secretStates = ref<Record<SecretKey, SecretState>>(freshSecretStates());
+const focusedSecret = ref<SecretKey | null>(null);
+
+async function onSecretFocus(key: SecretKey) {
+  focusedSecret.value = key;
+  const state = secretStates.value[key];
+  if (state.fetched || !card.value) return;
+
+  // The fetch may outlive this card's context; discard if it changed
+  const targetId = card.value.id;
+  const stored = await getItemSecret(card.value.vault_id, card.value.id, key);
+  if (!card.value || card.value.id !== targetId) return;
+
+  const fresh = secretStates.value[key];
+  fresh.original = stored ?? ''; // '' == this key has no stored value
+  fresh.input = stored ?? '';
+  fresh.fetched = true;
+}
+
+function onSecretBlur(key: SecretKey) {
+  if (focusedSecret.value === key) {
+    focusedSecret.value = null;
   }
+}
+
+/** Structural mask derived from typed/stored content */
+function secretMask(key: SecretKey, content: string): string {
+  if (key === 'card_number') {
+    return cardSecretMask(SECRET_FIELD_CARD_NUMBER, true, cardNumberLast4(content)) ?? '';
+  }
+  return cardSecretMask(key, true, null) ?? '';
+}
+
+/** Structural mask from payload-only knowledge (before the field is
+ * fetched): the card number keeps the derived last 4, others mask fully. */
+function payloadMask(key: SecretKey): string {
+  if (key === 'card_number') {
+    return cardSecretMask(
+      SECRET_FIELD_CARD_NUMBER,
+      true,
+      card.value?.card_number_last4 ?? null
+    ) ?? '';
+  }
+  return cardSecretMask(key, true, null) ?? '';
+}
+
+function secretPresent(key: SecretKey): boolean {
+  return !!card.value?.secrets_present.includes(key);
+}
+
+/** Input content: the real value while focused (including mid-typing),
+ * otherwise the structural mask — or nothing for an absent key, leaving
+ * the 'No Value' placeholder visible. */
+function secretDisplay(key: SecretKey): string {
+  const s = secretStates.value[key];
+  if (focusedSecret.value === key) return s.input;
+  if (s.fetched) return s.input ? secretMask(key, s.input) : '';
+  return secretPresent(key) ? payloadMask(key) : '';
+}
+
+// Placeholder only surfaces when the displayed content is empty: a stored
+// value shows its mask, a fetched-and-emptied field (the user is clearing
+// it) and absent keys show 'No Value'.
+function secretPlaceholder(key: SecretKey): string {
+  const s = secretStates.value[key];
+  if (s.fetched && !s.input) return 'No Value';
+  return secretPresent(key) ? payloadMask(key) : 'No Value';
 }
 
 // Sync local form state whenever the globally active card changes
@@ -82,9 +146,8 @@ watch(
         expiry_year: String(nextCard.expiry_year),
         tags: [...nextCard.tags]
       };
-      secretInputs.value = { card_number: '', security_code: '', pin: '' };
-      savedSecretInput.value = { card_number: '', security_code: '', pin: '' };
-      clearedSecrets.value = new Set();
+      secretStates.value = freshSecretStates();
+      focusedSecret.value = null;
     }
   },
   { immediate: true }
@@ -106,6 +169,11 @@ async function handleSave() {
   if (!Number.isInteger(month) || month < 1 || month > 12) return;
   if (!Number.isInteger(year) || year < 2000 || year > 9999) return;
 
+  // Snapshot the secret states FIRST: pushing metadata replaces the
+  // active item object, which re-triggers the reset watcher below and
+  // would otherwise wipe the fetched values before the diff loop runs.
+  const snapshot = SECRET_KEYS.map((key) => ({ key, ...secretStates.value[key] }));
+
   const success = await updateActiveItem({
     icon: form.value.icon,
     tags: form.value.tags,
@@ -119,22 +187,25 @@ async function handleSave() {
   });
   if (!success) return;
 
-  // Push only the secret fields the user actually touched. The input keys
-  // are the backend's field keys verbatim.
-  const secretKeys: Array<keyof SecretInputs> = [
-    'card_number',
-    'security_code',
-    'pin'
-  ];
-  for (const key of secretKeys) {
-    const input = secretInputs.value[key].trim();
+  // Push only the secret fields the user actually opened and edited,
+  // from the pre-save snapshot: typed → update; emptied from a value →
+  // clear; unchanged → no call. Emptying a secret removes the value,
+  // like any other field.
+  let secretsTouched = false;
+  for (const { key, original, input, fetched } of snapshot) {
+    if (!fetched || !card.value) continue;
 
-    if (clearedSecrets.value.has(key)) {
-      // Explicit "clear" wins even if the user also typed a replacement
-      await updateItemSecret(card.value.vault_id, card.value.id, key, null);
-    } else if (input && input !== savedSecretInput.value[key]) {
-      await updateItemSecret(card.value.vault_id, card.value.id, key, input);
+    const value = input.trim();
+    if (value !== original) {
+      await updateItemSecret(card.value.vault_id, card.value.id, key, value || null);
+      secretsTouched = true;
     }
+  }
+
+  // Secret changes re-derive the payload (presence flags, last4); refresh
+  // the active item so the details view shows the final state.
+  if (secretsTouched && card.value) {
+    await setActiveItem(card.value.id);
   }
 
   navigateToDetails();
@@ -203,77 +274,43 @@ async function handleSave() {
         />
       </section>
 
+      <!-- Secret fields (no heading; value revealed only while focused) -->
       <section class="card-secret-section">
-        <h2>secrets</h2>
-
-        <div class="secret-hint">
-          Leave a field blank to keep its stored value; Clear discards it on save.
-        </div>
-        <!-- Card Number -->
+        <!-- Card Number: mask as displayed value, real value while focused -->
         <AccountField
           label="card number"
           type="text"
           input
-          v-model="secretInputs.card_number"
-          :placeholder="clearedSecrets.has('card_number') ? 'will be cleared' : 'unchanged'"
-          @update:model-value="(value) => onSecretInput('card_number', value)"
-        >
-          <template #actions>
-            <Button
-              :disabled="!secretInputs.card_number.length"
-              aria-label="Discard stored card number on save"
-              variant="outline"
-              size="small"
-              @click="clearedSecrets.add('card_number')"
-            >
-              Clear
-            </Button>
-          </template>
-        </AccountField>
+          :model-value="secretDisplay('card_number')"
+          :placeholder="secretPlaceholder('card_number')"
+          @update:model-value="(value) => (secretStates.card_number.input = value)"
+          @focus="onSecretFocus('card_number')"
+          @blur="onSecretBlur('card_number')"
+        />
 
         <!-- Security Code -->
         <AccountField
           label="security code"
           type="text"
           input
-          v-model="secretInputs.security_code"
-          :placeholder="clearedSecrets.has('security_code') ? 'will be cleared' : 'unchanged'"
-          @update:model-value="(value) => onSecretInput('security_code', value)"
-        >
-          <template #actions>
-            <Button
-              :disabled="!secretInputs.security_code.length"
-              aria-label="Discard stored security code on save"
-              variant="outline"
-              size="small"
-              @click="clearedSecrets.add('security_code')"
-            >
-              Clear
-            </Button>
-          </template>
-        </AccountField>
+          :model-value="secretDisplay('security_code')"
+          :placeholder="secretPlaceholder('security_code')"
+          @update:model-value="(value) => (secretStates.security_code.input = value)"
+          @focus="onSecretFocus('security_code')"
+          @blur="onSecretBlur('security_code')"
+        />
 
         <!-- PIN -->
         <AccountField
           label="pin"
           type="text"
           input
-          v-model="secretInputs.pin"
-          :placeholder="clearedSecrets.has('pin') ? 'will be cleared' : 'unchanged'"
-          @update:model-value="(value) => onSecretInput('pin', value)"
-        >
-          <template #actions>
-            <Button
-              :disabled="!secretInputs.pin.length"
-              aria-label="Discard stored PIN on save"
-              variant="outline"
-              size="small"
-              @click="clearedSecrets.add('pin')"
-            >
-              Clear
-            </Button>
-          </template>
-        </AccountField>
+          :model-value="secretDisplay('pin')"
+          :placeholder="secretPlaceholder('pin')"
+          @update:model-value="(value) => (secretStates.pin.input = value)"
+          @focus="onSecretFocus('pin')"
+          @blur="onSecretBlur('pin')"
+        />
       </section>
 
       <section class="tags-section">
@@ -350,19 +387,9 @@ main {
 }
 
 .card-secret-section {
-  > h2 {
-    font-weight: 400;
-    font-size: 0.875rem;
-    color: var(--color-accent-muted);
-    margin-bottom: 0.25rem;
-    padding: 0 1.5rem;
-  }
-}
-
-.secret-hint {
-  padding: 0 1.5rem 0.5rem;
-  font-size: 0.8125rem;
-  color: var(--color-text-tertiary);
+  display: flex;
+  flex-direction: column;
+  width: 100%;
 }
 
 .tags-section {

@@ -26,7 +26,6 @@ function useAppStore() {
   const {
     getAccountbyId,
     updateAccount,
-    updateAccountPassword,
     deleteAccount,
     addAccount,
     createVault,
@@ -77,21 +76,6 @@ function useAppStore() {
       return newAccount;
     } catch (error) {
       return null;
-    }
-  }
-
-  async function updateActiveAccountPassword(password: string | null): Promise<boolean> {
-    if (!state.activeAccount) return false;
-    try {
-      state.activeAccount = await updateAccountPassword(
-        state.activeAccount.vault_id,
-        state.activeAccount.id,
-        password
-      );
-      state.mutationCount++;
-      return true;
-    } catch (error) {
-      return false;
     }
   }
 
@@ -209,7 +193,6 @@ function useAppStore() {
     setActiveItem,
     updateActiveAccount,
     createNewAccount,
-    updateActiveAccountPassword,
     deleteActiveAccount,
     createNewItem,
     updateActiveItem,

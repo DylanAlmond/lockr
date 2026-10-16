@@ -523,6 +523,10 @@ pub struct SafeCard {
     pub expiry_year: u16,
 
     pub card_number_last4: Option<String>,
+
+    /// Which secret field keys have values (never the values themselves),
+    /// so the UI can gate copy affordances without fetching any secret.
+    pub secrets_present: Vec<String>,
 }
 
 /// The Safe View of any item, tagged by kind for the frontend.
@@ -564,11 +568,17 @@ pub fn card_from_item(item: &VaultItem, secrets: &[ItemSecrets]) -> SafeCard {
         unreachable!("card_from_item on a non-card item");
     };
 
-    let card_number = secrets
-        .iter()
-        .find(|s| s.item_id == item.id)
+    let entry = secrets.iter().find(|s| s.item_id == item.id);
+    let card_number = entry
         .and_then(|s| s.get(SECRET_FIELD_CARD_NUMBER))
         .and_then(card_number_last4);
+
+    // Keys of the fields that actually have values, in presentation order
+    let secrets_present = allowed_secret_keys(&item.kind)
+        .iter()
+        .filter(|key| entry.is_some_and(|s| s.get(key).is_some()))
+        .map(|key| key.to_string())
+        .collect();
 
     SafeCard {
         id: item.id,
@@ -585,6 +595,7 @@ pub fn card_from_item(item: &VaultItem, secrets: &[ItemSecrets]) -> SafeCard {
         expiry_month: data.expiry_month,
         expiry_year: data.expiry_year,
         card_number_last4: card_number,
+        secrets_present,
     }
 }
 

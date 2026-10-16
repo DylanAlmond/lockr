@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, watch, computed } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
-import { Account } from '../../types';
+import { Account, Entropy } from '../../types';
 import { ChevronRight } from '@lucide/vue';
 import Button from '../ui/Button.vue';
 import TagList from '../ui/TagList.vue';
@@ -9,15 +9,63 @@ import { formatTimestamp } from '../../util/timestamp.ts';
 import AccountField from '../ui/AccountField.vue';
 import IconUpload from '../ui/IconUpload.vue';
 import useAppStore from '../../stores/appStore.ts';
+import { PASSWORDSTRENGTHS } from '../../util/constants.ts';
+import { SECRET_FIELD_PASSWORD } from '../../util/secrets.ts';
+import { useVault } from '../../composables/useVault.ts';
 
 const route = useRoute();
 const router = useRouter();
-const { state, updateActiveAccount } = useAppStore();
+const { state, updateActiveAccount, setActiveAccount } = useAppStore();
+const { getSecret, getPasswordStrength, updateItemSecret } = useVault();
 
 const form = ref<Partial<Account>>({});
 // const isFetchingLogo = ref(false);
 const manuallySetIcon = ref(false);
 // let displayNameDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+
+// The stored value is prefetched on mount; the input holds the real
+// value, masked as password dots until the field is focused. A present
+// value masks as the account password shape; an empty one shows
+// 'No Value' like any other empty field.
+const passwordInput = ref<string | null>(null);
+const passwordOriginal = ref<string | null>(null);
+const passwordEntropy = ref<Entropy | null>(null);
+
+// Like the other secret fields: revealed only while the field is focused
+const passwordFocused = ref(false);
+
+const passwordPlaceholder = computed(() => {
+  // Once the stored state is known: an empty-or-emptied field (the user
+  // is clearing it) shows 'No Value'; a present value shows the mask.
+  const fetched = passwordOriginal.value !== null;
+  if (fetched && (passwordInput.value === '' || passwordOriginal.value === '')) {
+    return 'No Value';
+  }
+  return '••••••••••••••••';
+});
+
+async function fetchPassword() {
+  const account = state.activeAccount;
+  if (!account || passwordOriginal.value !== null) return;
+
+  const stored = await getSecret(account.vault_id, account.id);
+
+  // The fetch may outlive this account's context; discard if it changed
+  if (state.activeAccount?.id !== account.id) return;
+
+  passwordOriginal.value = stored ?? '';
+  // (assignment also triggers the strength watcher below)
+  passwordInput.value = stored ?? '';
+}
+
+// Calculate password strength in real-time as the user types
+watch(passwordInput, async (val) => {
+  if (!val) {
+    passwordEntropy.value = null;
+    return;
+  }
+  passwordEntropy.value = await getPasswordStrength(val);
+});
 
 const displayInitial = computed(() => {
   return (form.value.display_name || form.value.username || '')[0]?.toUpperCase() || '?';
@@ -29,6 +77,13 @@ watch(
   (newAccount) => {
     form.value = newAccount ? { ...newAccount } : {};
     manuallySetIcon.value = false; // Reset when loading a new account
+
+    // Reset the password row and fetch for the (new) account
+    passwordOriginal.value = null;
+    passwordInput.value = null;
+    passwordEntropy.value = null;
+    passwordFocused.value = false;
+    fetchPassword();
   },
   { immediate: true }
 );
@@ -73,9 +128,34 @@ function handleCancel() {
 async function handleSave() {
   if (!state.activeAccount) return;
 
+  // Snapshot the password FIRST: pushing metadata replaces the active
+  // account object, which re-triggers the reset watcher below and would
+  // otherwise wipe the fetched value before the password push runs.
+  const original = passwordOriginal.value;
+  const input = passwordInput.value;
+
   const updated = await updateActiveAccount(form.value);
 
+  // Push the password only when it changed from the fetched original.
+  // Emptying the field removes the value, like any other secret field.
+  let passwordTouched = false;
+  if (updated && original !== null && input !== original) {
+    passwordTouched = true;
+    await updateItemSecret(
+      state.activeAccount.vault_id,
+      state.activeAccount.id,
+      SECRET_FIELD_PASSWORD,
+      input || null
+    );
+  }
+
   if (updated) {
+    // Secret changes re-derive the payload (presence, entropy); refresh
+    // the active account so the details view shows the final state
+    if (passwordTouched) {
+      await setActiveAccount(state.activeAccount.id);
+    }
+
     router.push({
       name: route.name as string,
       params: { ...route.params, mode: undefined },
@@ -136,6 +216,23 @@ async function handleSave() {
           v-model="form.email"
           placeholder="No Value"
         />
+
+        <!-- Password (part of the shared section; emptying it removes the value) -->
+        <AccountField
+          label="password"
+          :type="passwordFocused ? 'text' : 'password'"
+          input
+          v-model="passwordInput"
+          :placeholder="passwordPlaceholder"
+          @focus="passwordFocused = true"
+          @blur="passwordFocused = false"
+        >
+          <template #actions>
+            <span v-if="passwordEntropy" class="password-strength">
+              {{ PASSWORDSTRENGTHS[passwordEntropy.score] }}
+            </span>
+          </template>
+        </AccountField>
       </section>
 
       <section class="tags-section">
@@ -213,6 +310,14 @@ main {
   & > *:not(:last-child) {
     border-bottom: none;
   }
+}
+
+.password-strength {
+  margin-right: 0.5rem;
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: var(--color-green);
+  white-space: nowrap;
 }
 
 .tags-section {

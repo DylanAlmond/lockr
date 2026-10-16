@@ -2088,6 +2088,12 @@ mod tests {
         assert_eq!(json["expiry_year"], 2030);
         assert_eq!(json["card_number_last4"], "1234");
 
+        // Which secret keys have values (never the values themselves)
+        assert_eq!(
+            json["secrets_present"],
+            serde_json::json!(["card_number", "security_code", "pin"])
+        );
+
         for secret_key in ["card_number", "security_code", "pin"] {
             assert!(
                 json.get(secret_key).is_none(),
@@ -2130,6 +2136,49 @@ mod tests {
         assert_eq!(card_number_last4("123"), None, "too short");
         assert_eq!(card_number_last4(""), None);
         assert_eq!(card_number_last4("4111abcd"), None, "not digits");
+    }
+
+    #[test]
+    fn test_card_without_secrets_has_no_present_keys_or_last4() {
+        let temp_dir = setup();
+        let mut manager = VaultManager::new(temp_dir.clone()).unwrap();
+        let vault = manager
+            .create_vault("Test".to_string(), "#6240BF".to_string(), MASTER_PW, &KEY)
+            .unwrap();
+
+        let card = manager
+            .add_item(
+                vault.id,
+                Some("Bare card".to_string()),
+                None,
+                crate::NewItemData::Card(crate::CardData {
+                    cardholder_name: "Alex".to_string(),
+                    expiry_month: 5,
+                    expiry_year: 2031,
+                    brand: None,
+                }),
+                None,
+            )
+            .unwrap();
+
+        assert!(
+            matches!(&card, SafeItem::Card(c) if c.secrets_present.is_empty() && c.card_number_last4.is_none()),
+            "got {card:?}"
+        );
+
+        let card_id = match &card {
+            SafeItem::Card(c) => c.id,
+            _ => panic!("expected card view"),
+        };
+
+        // Adding a secret afterwards reflects in the next safe view
+        manager
+            .update_item_secret(vault.id, card_id, SECRET_FIELD_PIN, Some("9999".to_string()))
+            .unwrap();
+        assert!(matches!(
+            manager.get_item_by_id(card_id).unwrap(),
+            SafeItem::Card(c) if c.secrets_present == [SECRET_FIELD_PIN]
+        ));
     }
 
     #[test]
@@ -2216,6 +2265,11 @@ mod tests {
             manager.get_item_secret(vault.id, card_id, SECRET_FIELD_CARD_NUMBER).unwrap(),
             "4111 1111 1111 1234"
         );
+        // secrets_present drops the cleared key
+        assert!(matches!(
+            manager.get_item_by_id(card_id).unwrap(),
+            SafeItem::Card(c) if !c.secrets_present.iter().any(|k| k == SECRET_FIELD_SECURITY_CODE)
+        ));
 
         // Unknown key rejected on update too
         assert!(manager

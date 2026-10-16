@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue';
-import { Eye, EyeOff } from '@lucide/vue';
 import { CreateItemProps, useVault } from '../../composables/useVault.ts';
 import {
   SECRET_FIELD_CARD_NUMBER,
@@ -8,6 +7,7 @@ import {
   SECRET_FIELD_SECURITY_CODE
 } from '../../util/secrets.ts';
 import { SecretInput, Vault } from '../../types/index.ts';
+import { cardSecretMask, cardNumberLast4 } from '../../util/secrets.ts';
 import AccountField from './AccountField.vue';
 import Button from './Button.vue';
 import IconUpload from './IconUpload.vue';
@@ -48,10 +48,22 @@ const form = ref<CardForm>({
   pin: ''
 });
 
-// Store the numbers as text, mask the ones the user won't be reading as
-// they type: the card number stays visible, the codes start hidden.
-const showSecurityCode = ref(false);
-const showPin = ref(false);
+// Secret fields reveal their typed value only while the field is focused;
+// blurred they display the value's structural mask — card numbers keep
+// their real last 4 digits, derived live from the typed content. An empty
+// field shows the 'No Value' placeholder like any other empty field.
+const focusedSecret = ref<string | null>(null);
+
+/** Input content: real typed value while focused, otherwise the mask
+ * derived from whatever has been typed (nothing → nothing, so the
+ * placeholder shows). */
+function secretDisplay(key: 'card_number' | 'security_code' | 'pin'): string {
+  if (focusedSecret.value === key) return form.value[key];
+  const content = form.value[key].trim();
+  if (!content) return '';
+  const last4 = key === 'card_number' ? cardNumberLast4(content) : null;
+  return cardSecretMask(key, true, last4) ?? '';
+}
 
 const displayInitial = computed(() => (form.value.cardholder_name || 'C')[0].toUpperCase());
 
@@ -178,56 +190,41 @@ onMounted(async () => {
             placeholder="e.g. 2030"
           />
 
-          <!-- Card Number (secret, visible while typing) -->
+          <!-- Card Number: mask as displayed value, typed value while focused -->
           <AccountField
             label="card number"
             type="text"
             input
-            v-model="form.card_number"
-            placeholder="4111 1111 1111 1234"
+            :model-value="secretDisplay('card_number')"
+            placeholder="No Value"
+            @update:model-value="(value) => (form.card_number = value)"
+            @focus="focusedSecret = 'card_number'"
+            @blur="focusedSecret = null"
           />
 
-          <!-- Security Code (secret, masked) -->
+          <!-- Security Code -->
           <AccountField
             label="security code"
-            :type="showSecurityCode ? 'text' : 'password'"
+            type="text"
             input
-            v-model="form.security_code"
-            placeholder="CVC"
-          >
-            <template #actions>
-              <Button
-                :disabled="!form.security_code.length"
-                aria-label="Toggle security code visibility"
-                icon-only
-                variant="outline"
-                size="small"
-                :icon-component="showSecurityCode ? EyeOff : Eye"
-                @click="showSecurityCode = !showSecurityCode"
-              />
-            </template>
-          </AccountField>
+            :model-value="secretDisplay('security_code')"
+            placeholder="No Value"
+            @update:model-value="(value) => (form.security_code = value)"
+            @focus="focusedSecret = 'security_code'"
+            @blur="focusedSecret = null"
+          />
 
-          <!-- PIN (secret, masked) -->
+          <!-- PIN -->
           <AccountField
             label="pin"
-            :type="showPin ? 'text' : 'password'"
+            type="text"
             input
-            v-model="form.pin"
-            placeholder="4-digit PIN"
-          >
-            <template #actions>
-              <Button
-                :disabled="!form.pin.length"
-                aria-label="Toggle PIN visibility"
-                icon-only
-                variant="outline"
-                size="small"
-                :icon-component="showPin ? EyeOff : Eye"
-                @click="showPin = !showPin"
-              />
-            </template>
-          </AccountField>
+            :model-value="secretDisplay('pin')"
+            placeholder="No Value"
+            @update:model-value="(value) => (form.pin = value)"
+            @focus="focusedSecret = 'pin'"
+            @blur="focusedSecret = null"
+          />
         </section>
       </main>
 

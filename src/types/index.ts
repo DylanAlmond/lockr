@@ -101,6 +101,9 @@ export interface CardItem {
 
   /** Backend-derived; the full number lives in the secret store */
   card_number_last4: string | null;
+
+  /** Which secret field keys have values (card_number, security_code, pin) */
+  secrets_present: string[];
 }
 
 /** Items sent to the UI, tagged by kind. Safe View: no secret fields. */

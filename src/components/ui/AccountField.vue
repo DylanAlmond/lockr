@@ -30,6 +30,8 @@ const props = withDefaults(defineProps<Props>(), {
 
 const emit = defineEmits<{
   (e: 'update:modelValue', value: string): void;
+  (e: 'focus'): void;
+  (e: 'blur'): void;
 }>();
 
 const copied = ref(false);
@@ -114,6 +116,8 @@ onUnmounted(() => {
         :placeholder="placeholder"
         :required="required"
         @input="emit('update:modelValue', ($event.target as HTMLInputElement).value)"
+        @focus="emit('focus')"
+        @blur="emit('blur')"
       />
 
       <!-- Display Mode -->

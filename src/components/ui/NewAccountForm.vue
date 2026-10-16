@@ -5,7 +5,6 @@ import Button from './Button.vue';
 import AccountField from './AccountField.vue';
 import { CreateAccountProps, useVault } from '../../composables/useVault.ts';
 import { PASSWORDSTRENGTHS } from '../../util/constants.ts';
-import { Eye, EyeOff } from '@lucide/vue';
 // import { fetchBrandLogoAsBase64 } from '../../util/imageUpload.ts';
 import Select from './Select.vue';
 import IconUpload from './IconUpload.vue';
@@ -24,7 +23,14 @@ const form = ref<CreateAccountProps>({
 const props = defineProps<{ defaultVaultId?: string | null }>();
 
 const passwordEntropy = ref<Entropy | null>(null);
-const showPassword = ref(false);
+
+// Secret fields reveal their value only while the field is focused;
+// on blur they re-mask as password dots.
+const focusedSecret = ref<string | null>(null);
+
+function secretType(key: string): 'text' | 'password' {
+  return focusedSecret.value === key ? 'text' : 'password';
+}
 
 const displayInitial = computed(() => {
   return (form.value.displayName || form.value.username || '')[0]?.toUpperCase() || '?';
@@ -127,25 +133,17 @@ onMounted(async () => {
           <!-- Password -->
           <AccountField
             label="password"
-            :type="showPassword ? 'text' : 'password'"
+            :type="secretType('password')"
             input
             v-model="form.password"
-            placeholder="Enter password"
+            placeholder="No Value"
+            @focus="focusedSecret = 'password'"
+            @blur="focusedSecret = null"
           >
             <template #actions>
               <span v-if="passwordEntropy !== null" class="password-strength">
                 {{ PASSWORDSTRENGTHS[passwordEntropy.score] }}
               </span>
-
-              <Button
-                :disabled="!form.password.length"
-                aria-label="Toggle password visibility"
-                icon-only
-                variant="outline"
-                size="small"
-                :icon-component="showPassword ? EyeOff : Eye"
-                @click="showPassword = !showPassword"
-              />
             </template>
           </AccountField>
         </section>

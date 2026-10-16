@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
-import { ChevronRight, Copy, Check, EllipsisVertical, Eye, EyeOff, Pencil, Star } from '@lucide/vue';
+import { ChevronRight, EllipsisVertical, Eye, EyeOff, Pencil, Star } from '@lucide/vue';
 import Button from '../ui/Button.vue';
 import TagList from '../ui/TagList.vue';
 import { formatTimestamp } from '../../util/timestamp.ts';
@@ -11,14 +11,8 @@ import Dropdown, { DropdownItem } from '../ui/Dropdown.vue';
 import AlertModal from '../ui/AlertModal.vue';
 import MoveAccountModal from '../ui/MoveAccountModal.vue';
 import { useModal } from '../../composables/useModal.ts';
-import {
-  useVault
-} from '../../composables/useVault.ts';
-import {
-  SECRET_FIELD_CARD_NUMBER,
-  SECRET_FIELD_PIN,
-  SECRET_FIELD_SECURITY_CODE
-} from '../../util/secrets.ts';
+import { useVault } from '../../composables/useVault.ts';
+import { cardSecretMask, SECRET_FIELD_CARD_NUMBER, SECRET_FIELD_PIN, SECRET_FIELD_SECURITY_CODE } from '../../util/secrets.ts';
 import { markRaw } from 'vue';
 import useAppStore from '../../stores/appStore.ts';
 import { Vault } from '../../types/index.ts';
@@ -44,59 +38,65 @@ interface SecretFieldView {
   shown: boolean;
   /** Fetched on demand; never prefetched, never sent elsewhere */
   value: string | null;
-  copied: boolean;
+  /** Stable per-field copy hook (AccountField resets on prop identity change) */
+  copyValue: () => Promise<string | null>;
 }
 
-let copiedTimer: ReturnType<typeof setTimeout> | null = null;
+function fetchSecretByKey(key: string): Promise<string | null> {
+  const field = secretFields.value.find((f) => f.key === key);
+  return field ? fetchSecret(field) : Promise.resolve(null);
+}
 
 function makeSecretFields(): SecretFieldView[] {
+  const make = (key: string, label: string): SecretFieldView => ({
+    key,
+    label,
+    shown: false,
+    value: null,
+    copyValue: () => fetchSecretByKey(key)
+  });
+
   return [
-    { key: SECRET_FIELD_CARD_NUMBER, label: 'card number', shown: false, value: null, copied: false },
-    { key: SECRET_FIELD_SECURITY_CODE, label: 'security code', shown: false, value: null, copied: false },
-    { key: SECRET_FIELD_PIN, label: 'pin', shown: false, value: null, copied: false }
+    make(SECRET_FIELD_CARD_NUMBER, 'card number'),
+    make(SECRET_FIELD_SECURITY_CODE, 'security code'),
+    make(SECRET_FIELD_PIN, 'pin')
   ];
 }
 
 const secretFields = ref<SecretFieldView[]>(makeSecretFields());
 
-async function toggleSecret(field: SecretFieldView) {
-  if (!card.value) return;
+// Copy/-eye affordances exist only for fields that have a value
+function secretPresent(key: string): boolean {
+  return !!card.value?.secrets_present.includes(key);
+}
 
+// Masked placeholder echoes the value's structure via the shared helper
+// (card number keeps the real last 4); absent fields resolve to null →
+// AccountField shows 'No Value'.
+function secretDisplay(field: SecretFieldView): string | null {
+  if (field.shown) return field.value ?? null; // failed fetch → 'No Value'
+  return cardSecretMask(field.key, secretPresent(field.key), card.value?.card_number_last4 ?? null);
+}
+
+async function fetchSecret(field: SecretFieldView): Promise<string | null> {
+  if (!card.value) return null;
+  if (field.value === null) {
+    field.value = await getItemSecret(card.value.vault_id, card.value.id, field.key);
+  }
+  return field.value;
+}
+
+async function toggleSecret(field: SecretFieldView) {
   if (field.shown) {
     field.shown = false;
     return;
   }
+  // Only fetch if the key is known to have a value
+  if (!secretPresent(field.key)) return;
 
-  if (field.value === null) {
-    field.value = await getItemSecret(card.value.vault_id, card.value.id, field.key);
-    if (field.value === null) return; // fetch failed — don't flip to a fake show
-  }
-  field.shown = true;
-}
-
-async function copySecret(field: SecretFieldView) {
-  if (!card.value) return;
-
-  if (field.value === null) {
-    field.value = await getItemSecret(card.value.vault_id, card.value.id, field.key);
-    if (field.value === null) return;
-  }
-
-  try {
-    await navigator.clipboard.writeText(field.value);
-    // Reset every other field's copied flag before starting this timer
-    if (copiedTimer) {
-      clearTimeout(copiedTimer);
-      copiedTimer = null;
-    }
-    secretFields.value.forEach((f) => (f.copied = false));
-    field.copied = true;
-    copiedTimer = setTimeout(() => {
-      field.copied = false;
-      copiedTimer = null;
-    }, 1500);
-  } catch {
-    // Clipboard API unavailable — copied flag simply stays false
+  await fetchSecret(field);
+  if (field.value !== null) {
+    field.shown = true;
   }
 }
 
@@ -160,8 +160,9 @@ const miscMenuItems = computed<DropdownItem[]>(() => [
 ]);
 
 // Clear parent vault and revealed secrets when the active card changes
+// (parity with AccountDetails' password reset on any mutation)
 watch(
-  () => [state.activeItem?.id, state.activeItem?.vault_id],
+  () => [state.activeItem?.id, state.activeItem?.vault_id, state.activeItem?.updated_at],
   async () => {
     if (card.value) {
       parentVault.value = await getVaultById(card.value.vault_id);
@@ -248,20 +249,19 @@ watch(
           />
         </div>
 
-        <!-- Secrets: one field per item, each shown and copied by its own key -->
+        <!-- Secrets: plaintext rows with account-password affordances -->
         <div class="secret-fields">
-          <div v-for="field in secretFields" :key="field.key" class="secret-field">
-            <div class="field-meta">
-              <h2>{{ field.label }}</h2>
-              <span v-if="field.shown" class="secret-value">
-                {{ field.value ?? 'Unavailable' }}
-              </span>
-              <span v-else class="secret-value masked">
-                •••• •••• ••••
-              </span>
-            </div>
-            <div class="field-actions">
+          <AccountField
+            v-for="field in secretFields"
+            :key="field.key"
+            :label="field.label"
+            :display-value="secretDisplay(field)"
+            :copy-value="field.copyValue"
+            :can-copy="secretPresent(field.key)"
+          >
+            <template #actions>
               <Button
+                v-if="secretPresent(field.key)"
                 :aria-label="`Toggle ${field.label} visibility`"
                 icon-only
                 variant="outline"
@@ -269,17 +269,8 @@ watch(
                 :icon-component="field.shown ? EyeOff : Eye"
                 @click="toggleSecret(field)"
               />
-              <Button
-                :aria-label="`Copy ${field.label}`"
-                icon-only
-                variant="outline"
-                size="small"
-                :icon-component="field.copied ? Check : Copy"
-                :disabled="!field.shown"
-                @click="copySecret(field)"
-              />
-            </div>
-          </div>
+            </template>
+          </AccountField>
         </div>
       </section>
 
@@ -426,54 +417,6 @@ main {
 
 .secret-fields {
   margin-top: 1rem;
-}
-
-.secret-field {
-  display: flex;
-  align-items: center;
-  gap: 1rem;
-  padding: 1rem 1.5rem;
-  overflow: hidden;
-  border: 1px solid var(--color-border);
-  transition:
-    box-shadow 0.2s ease,
-    border-color 0.2s ease;
-
-  &:focus-within {
-    box-shadow: inset 0 0 0 2px var(--color-accent);
-  }
-
-  @supports (corner-shape: squircle) {
-    corner-shape: squircle;
-  }
-}
-
-.field-meta {
-  flex: 1;
-  min-width: 0;
-
-  > h2 {
-    font-weight: 400;
-    font-size: 0.875rem;
-    color: var(--color-accent-muted);
-    margin-bottom: 0.25rem;
-  }
-}
-
-.secret-value {
-  font: inherit;
-  color: var(--color-text);
-  overflow-wrap: anywhere;
-}
-
-.secret-value.masked {
-  color: var(--color-text-muted);
-  letter-spacing: 2px;
-}
-
-.field-actions {
-  display: flex;
-  gap: 0.5rem;
 }
 
 .tags-section {
