@@ -44,6 +44,7 @@ const { openModal } = useModal();
 function itemLabel(item: SafeItem): string {
   if (item.display_name) return item.display_name;
   if (item.kind === 'account') return item.username;
+  if (item.kind === 'identity') return item.full_name;
   return item.title || 'Untitled';
 }
 
@@ -55,6 +56,7 @@ function noteSnippet(body: string): string {
 
 function itemSubtitle(item: SafeItem): string {
   if (item.kind === 'account') return item.email || item.username;
+  if (item.kind === 'identity') return item.email || item.phone || item.full_name;
   return noteSnippet(item.body) || item.title || '';
 }
 

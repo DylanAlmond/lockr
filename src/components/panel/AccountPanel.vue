@@ -3,6 +3,8 @@ import { useRoute } from 'vue-router';
 import { computed, watch } from 'vue';
 import AccountDetails from './AccountDetails.vue';
 import AccountEdit from './AccountEdit.vue';
+import IdentityDetails from './IdentityDetails.vue';
+import IdentityEdit from './IdentityEdit.vue';
 import NoteDetails from './NoteDetails.vue';
 import NoteEdit from './NoteEdit.vue';
 import useAppStore from '../../stores/appStore.ts';
@@ -16,8 +18,9 @@ const mode = computed(() => route.params.mode as string | undefined);
 const isCreate = computed(() => itemId.value === 'create' || mode.value === 'create');
 const isEdit = computed(() => mode.value === 'edit' && !isCreate.value);
 
-// True when the active item is a note kind (panel switches to note views)
+// True when the active item is another kind (panel switches to that view)
 const isNote = computed(() => state.activeItem?.kind === 'note');
+const isIdentity = computed(() => state.activeItem?.kind === 'identity');
 
 watch(
   itemId,
@@ -38,14 +41,18 @@ watch(
 
 <template>
   <!--
-    Per-kind panels: notes get their own display/edit components;
-    accounts keep the existing flow until the full rename.
+    Per-kind panels: notes and identities get their own display/edit
+    components; accounts keep the existing flow until the full rename.
   -->
   <NoteEdit v-if="isNote && (isCreate || isEdit)" />
 
   <NoteDetails v-else-if="isNote && itemId" />
 
-  <AccountEdit v-else-if="!isNote && (isCreate || isEdit)" />
+  <IdentityEdit v-else-if="isIdentity && (isCreate || isEdit)" />
+
+  <IdentityDetails v-else-if="isIdentity && itemId" />
+
+  <AccountEdit v-else-if="!isNote && !isIdentity && (isCreate || isEdit)" />
 
   <!-- Details view -->
   <AccountDetails v-else-if="!isNote && itemId" />

@@ -4,6 +4,7 @@ import { useRoute, useRouter } from 'vue-router';
 import { CreditCard, FileText, IdCard, KeyRound } from '@lucide/vue';
 import Button from './Button.vue';
 import NewAccountForm from './NewAccountForm.vue';
+import NewIdentityForm from './NewIdentityForm.vue';
 import NewNoteForm from './NewNoteForm.vue';
 import { CreateAccountProps, CreateItemProps } from '../../composables/useVault.ts';
 import useAppStore from '../../stores/appStore.ts';
@@ -33,8 +34,8 @@ function selectType(type: { disabled: boolean; value: ItemType }) {
 const types = computed(() => [
   { value: 'account' as ItemType, label: 'Account', description: 'Logins, emails, passwords', icon: KeyRound, disabled: false },
   { value: 'note' as ItemType, label: 'Note', description: 'Plain note with a body', icon: FileText, disabled: false },
-  { value: 'card' as ItemType, label: 'Card', description: 'Coming soon', icon: CreditCard, disabled: true },
-  { value: 'identity' as ItemType, label: 'Identity', description: 'Coming soon', icon: IdCard, disabled: true }
+  { value: 'identity' as ItemType, label: 'Identity', description: 'Names, addresses, contacts', icon: IdCard, disabled: false },
+  { value: 'card' as ItemType, label: 'Card', description: 'Coming soon', icon: CreditCard, disabled: true }
 ]);
 
 async function handleAccountSubmit(data: CreateAccountProps) {
@@ -49,6 +50,14 @@ async function handleNoteSubmit(data: CreateItemProps) {
   const note = await createNewItem(data);
   if (note) {
     navigateToCreated(note.vault_id, note.id);
+  }
+  emit('close');
+}
+
+async function handleIdentitySubmit(data: CreateItemProps) {
+  const identity = await createNewItem(data);
+  if (identity) {
+    navigateToCreated(identity.vault_id, identity.id);
   }
   emit('close');
 }
@@ -106,6 +115,13 @@ function navigateToCreated(vaultId: string, itemId: string) {
     v-else-if="selectedType === 'note'"
     :default-vault-id="props.defaultVaultId ?? (route.params.vaultId as string) ?? null"
     @submit="handleNoteSubmit"
+    @close="emit('close')"
+  />
+
+  <NewIdentityForm
+    v-else-if="selectedType === 'identity'"
+    :default-vault-id="props.defaultVaultId ?? (route.params.vaultId as string) ?? null"
+    @submit="handleIdentitySubmit"
     @close="emit('close')"
   />
 </template>

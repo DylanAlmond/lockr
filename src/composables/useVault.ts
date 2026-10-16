@@ -1,5 +1,5 @@
 import { ref } from 'vue';
-import { Account, AccountFilter, Entropy, SafeItem, Vault } from '../types';
+import { Account, AccountFilter, Entropy, NewItemData, SafeItem, Vault } from '../types';
 import { invoke } from '@tauri-apps/api/core';
 
 const isLoading = ref(false);
@@ -9,8 +9,8 @@ export interface CreateItemProps {
   vaultId: string;
   displayName?: string | null;
   icon?: string | null;
-  /** Note wire payload: internally tagged like the backend's NewItemData */
-  data: { kind: 'note'; title: string | null; body: string };
+  /** Kind wire payload: internally tagged like the backend's NewItemData */
+  data: NewItemData;
 }
 
 export interface UpdateItemProps {
@@ -19,7 +19,7 @@ export interface UpdateItemProps {
   favourite?: boolean | null;
   tags?: string[] | null;
   color?: string | null;
-  data?: { kind: 'note'; title: string | null; body: string };
+  data?: NewItemData;
 }
 
 export interface CreateAccountProps {

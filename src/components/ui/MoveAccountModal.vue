@@ -30,7 +30,9 @@ const itemLabel = computed(
       ? activeItem.value.username
       : activeItem.value?.kind === 'note'
         ? (activeItem.value.title || undefined)
-        : undefined)
+        : activeItem.value?.kind === 'identity'
+          ? activeItem.value.full_name
+          : undefined)
 );
 const activeVaultId = computed(() => activeItem.value?.vault_id);
 

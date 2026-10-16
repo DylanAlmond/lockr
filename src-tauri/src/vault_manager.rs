@@ -524,14 +524,10 @@ impl VaultManager {
     ) -> Result<SafeItem, VaultError> {
         let kind = match data {
             NewItemData::Note(note) => ItemKind::Note(note),
+            NewItemData::Identity(identity) => ItemKind::Identity(identity),
             NewItemData::Card(_) => {
                 return Err(VaultError::Validation(
                     "Card items are not yet supported".to_string(),
-                ))
-            }
-            NewItemData::Identity(_) => {
-                return Err(VaultError::Validation(
-                    "Identity items are not yet supported".to_string(),
                 ))
             }
         };
@@ -602,6 +598,9 @@ impl VaultManager {
             if let Some(data) = data {
                 match (&mut item.kind, data) {
                     (ItemKind::Note(current), NewItemData::Note(new)) => *current = new,
+                    (ItemKind::Identity(current), NewItemData::Identity(new)) => {
+                        *current = new
+                    }
                     (_, _) => {
                         return Err(VaultError::Validation(
                             "Changing an item's kind is not supported (accounts keep their \
@@ -743,6 +742,7 @@ impl VaultManager {
             let updated = |i: &SafeItem| match i {
                 SafeItem::Account(v) => v.updated_at,
                 SafeItem::Note(v) => v.updated_at,
+                SafeItem::Identity(v) => v.updated_at,
             };
             updated(b).cmp(&updated(a))
         });
@@ -1459,6 +1459,7 @@ mod tests {
             .map(|i| match i {
                 crate::SafeItem::Account(_) => "account",
                 crate::SafeItem::Note(_) => "note",
+                crate::SafeItem::Identity(_) => "identity",
             })
             .collect();
         assert!(kinds.contains(&"account"));
@@ -1669,6 +1670,178 @@ mod tests {
         let vault_ref = manager.get_vault(vault_a.id).unwrap();
         assert!(vault_ref.items.is_empty(), "source vault is emptied out");
         assert!(vault_ref.secrets.is_empty());
+    }
+
+    // ============ Identity items (second pipeline kind) ============
+
+    fn add_test_identity(manager: &mut VaultManager, vault_id: VaultId) -> SafeItem {
+        manager
+            .add_item(
+                vault_id,
+                Some("Me".to_string()),
+                None,
+                crate::NewItemData::Identity(crate::IdentityData {
+                    full_name: "Alex Doe".to_string(),
+                    email: Some("alex@example.com".to_string()),
+                    phone: Some("+1 555 0100".to_string()),
+                    address_line1: Some("1 Main St".to_string()),
+                    address_line2: None,
+                    city: Some("Springfield".to_string()),
+                    postal_code: Some("12345".to_string()),
+                    country: Some("US".to_string()),
+                }),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn test_add_identity_item() {
+        let temp_dir = setup();
+        let mut manager = VaultManager::new(temp_dir.clone()).unwrap();
+        let vault = manager
+            .create_vault("Test".to_string(), "#6240BF".to_string(), MASTER_PW, &KEY)
+            .unwrap();
+
+        let identity = add_test_identity(&mut manager, vault.id);
+
+        let json = serde_json::to_value(&identity).unwrap();
+        assert_eq!(json["kind"], "identity");
+        assert_eq!(json["full_name"], "Alex Doe");
+        assert_eq!(json["city"], "Springfield");
+        assert!(json.get("password").is_none(), "Items carry no secrets");
+
+        // Stored without a secret entry
+        let vault_ref = manager.get_vault(vault.id).unwrap();
+        assert_eq!(vault_ref.items.len(), 1);
+        assert!(vault_ref.secrets.is_empty());
+
+        // Tagged correctly when fetched by id
+        let by_id = match manager.get_item_by_id(
+            match &identity {
+                crate::SafeItem::Identity(i) => i.id,
+                _ => panic!("expected identity"),
+            },
+        ) {
+            Ok(crate::SafeItem::Identity(_)) => true,
+            _ => false,
+        };
+        assert!(by_id);
+    }
+
+    #[test]
+    fn test_update_identity_item_persists() {
+        let temp_dir = setup();
+        let mut manager = VaultManager::new(temp_dir.clone()).unwrap();
+        let vault = manager
+            .create_vault("Test".to_string(), "#6240BF".to_string(), MASTER_PW, &KEY)
+            .unwrap();
+
+        let identity = add_test_identity(&mut manager, vault.id);
+        let identity_id = match &identity {
+            crate::SafeItem::Identity(i) => i.id,
+            _ => panic!("expected identity"),
+        };
+
+        manager
+            .update_item(
+                vault.id,
+                identity_id,
+                Some("Emergency contact".to_string()),
+                None,
+                Some(true),
+                Some(vec!["family".to_string()]),
+                None,
+                Some(crate::NewItemData::Identity(crate::IdentityData {
+                    full_name: "Alex Doe Jr".to_string(),
+                    email: None,
+                    phone: Some("+1 555 0199".to_string()),
+                    address_line1: Some("2 Side St".to_string()),
+                    address_line2: Some("Apt 3".to_string()),
+                    city: None,
+                    postal_code: None,
+                    country: Some("US".to_string()),
+                })),
+            )
+            .unwrap();
+
+        manager.lock_vault(Some(vault.id));
+        manager.unlock_vault(vault.id, MASTER_PW, &KEY).unwrap();
+
+        let items = manager
+            .get_all_items(crate::AccountFilter::default())
+            .unwrap();
+        let crate::SafeItem::Identity(view) = &items[0] else {
+            panic!("expected identity view");
+        };
+        assert!(view.favourite);
+        assert_eq!(view.display_name.as_deref(), Some("Emergency contact"));
+        assert_eq!(view.full_name, "Alex Doe Jr");
+        assert_eq!(view.email, None);
+        assert_eq!(view.phone.as_deref(), Some("+1 555 0199"));
+        assert_eq!(view.address_line1.as_deref(), Some("2 Side St"));
+        assert_eq!(view.address_line2.as_deref(), Some("Apt 3"));
+        assert_eq!(view.city, None);
+        assert_eq!(view.tags, vec!["family".to_string()]);
+    }
+
+    #[test]
+    fn test_identity_search_matches_fields() {
+        let temp_dir = setup();
+        let mut manager = VaultManager::new(temp_dir.clone()).unwrap();
+        let vault = manager
+            .create_vault("Test".to_string(), "#6240BF".to_string(), MASTER_PW, &KEY)
+            .unwrap();
+
+        add_test_identity(&mut manager, vault.id);
+
+        for query in ["alex doe", "example.com", "555 0100", "1 main st", "US"] {
+            let matches = manager
+                .get_all_items(crate::AccountFilter {
+                    vault_id: Some(vault.id),
+                    search_query: Some(query.to_string()),
+                    ..Default::default()
+                })
+                .unwrap();
+            assert_eq!(matches.len(), 1, "query '{query}' must match identity");
+        }
+
+        let misses = manager
+            .get_all_items(crate::AccountFilter {
+                vault_id: Some(vault.id),
+                search_query: Some("unrelated".to_string()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(misses.is_empty());
+    }
+
+    #[test]
+    fn test_identity_move_and_delete() {
+        let temp_dir = setup();
+        let mut manager = VaultManager::new(temp_dir.clone()).unwrap();
+        let vault_a = manager
+            .create_vault("A".to_string(), "#6240BF".to_string(), MASTER_PW, &KEY)
+            .unwrap();
+        let vault_b = manager
+            .create_vault("B".to_string(), "#6240BF".to_string(), MASTER_PW, &KEY)
+            .unwrap();
+
+        let identity = add_test_identity(&mut manager, vault_a.id);
+        let identity_id = match &identity {
+            crate::SafeItem::Identity(i) => i.id,
+            _ => panic!("expected identity"),
+        };
+
+        let moved = manager.move_item(vault_a.id, identity_id, vault_b.id).unwrap();
+        assert!(matches!(moved, crate::SafeItem::Identity(_)));
+        assert_eq!(manager.get_vault(vault_a.id).unwrap().items.len(), 0);
+
+        let new_id = match &moved {
+            crate::SafeItem::Identity(i) => i.id,
+            _ => unreachable!(),
+        };
+        manager.delete_item(vault_b.id, new_id).unwrap();
+        assert!(manager.get_vault(vault_b.id).unwrap().items.is_empty());
     }
 
     #[test]

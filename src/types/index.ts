@@ -58,8 +58,49 @@ export interface NoteItem {
   body: string;
 }
 
+export interface IdentityItem {
+  id: string;
+  vault_id: string;
+
+  display_name: string | null;
+  favourite: boolean;
+  tags: string[];
+  icon: string | null;
+  color: string;
+
+  created_at: string;
+  updated_at: string;
+
+  full_name: string;
+  email: string | null;
+  phone: string | null;
+  address_line1: string | null;
+  address_line2: string | null;
+  city: string | null;
+  postal_code: string | null;
+  country: string | null;
+}
+
 /** Items sent to the UI, tagged by kind. Safe View: no secret fields. */
-export type SafeItem = ({ kind: 'account' } & Account) | ({ kind: 'note' } & NoteItem);
+export type SafeItem =
+  | ({ kind: 'account' } & Account)
+  | ({ kind: 'note' } & NoteItem)
+  | ({ kind: 'identity' } & IdentityItem);
+
+/** Kind payloads for creating/updating non-account items (wire format). */
+export type NewItemData =
+  | { kind: 'note'; title: string | null; body: string }
+  | {
+      kind: 'identity';
+      full_name: string;
+      email: string | null;
+      phone: string | null;
+      address_line1: string | null;
+      address_line2: string | null;
+      city: string | null;
+      postal_code: string | null;
+      country: string | null;
+    };
 
 export interface Entropy {
   /** Estimated guesses needed to crack the password */

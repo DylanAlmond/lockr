@@ -81,7 +81,7 @@ onMounted(async () => {
       <main>
         <section class="note-fields-section">
           <div class="select-field">
-            <h2 id="move-vault-label">vault</h2>
+            <h2>vault</h2>
             <Select
               v-model="form.vaultId"
               :options="vaults.map((v) => ({ value: v.id, label: v.name }))"

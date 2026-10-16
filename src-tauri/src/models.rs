@@ -172,7 +172,6 @@ pub struct NoteData {
     pub body: String,
 }
 
-#[allow(dead_code)] // Identity items are wired up in ticket #24
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IdentityData {
     pub full_name: String,
@@ -404,12 +403,39 @@ pub struct SafeNote {
     pub body: String,
 }
 
+/// The Safe View of an identity item: no secret-capable fields exist
+/// on identities.
+#[derive(Debug, Clone, Serialize)]
+pub struct SafeIdentity {
+    pub id: ItemId,
+    pub vault_id: VaultId,
+
+    pub display_name: Option<String>,
+    pub favourite: bool,
+    pub tags: Vec<String>,
+    pub icon: Option<String>,
+    pub color: String,
+
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+
+    pub full_name: String,
+    pub email: Option<String>,
+    pub phone: Option<String>,
+    pub address_line1: Option<String>,
+    pub address_line2: Option<String>,
+    pub city: Option<String>,
+    pub postal_code: Option<String>,
+    pub country: Option<String>,
+}
+
 /// The Safe View of any item, tagged by kind for the frontend.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SafeItem {
     Account(SafeAccount),
     Note(SafeNote),
+    Identity(SafeIdentity),
 }
 
 /// The Safe View of an item: only account-kind items have an account view.
@@ -434,8 +460,9 @@ pub fn account_from_item(item: &VaultItem) -> Option<SafeAccount> {
     })
 }
 
-/// The Safe View of an item of any sendable kind: `None` while a kind's safe
-/// view isn't wired up yet (items of those kinds can't exist in a vault yet).
+/// The Safe View of an item of any sendable kind: `None` for kinds whose
+/// safe view isn't wired up yet (card items can't exist in a vault yet —
+/// they are rejected at creation in ticket #25's seed).
 pub fn item_to_safe(item: &VaultItem) -> Option<SafeItem> {
     match &item.kind {
         ItemKind::Account(_) => account_from_item(item).map(SafeItem::Account),
@@ -451,6 +478,25 @@ pub fn item_to_safe(item: &VaultItem) -> Option<SafeItem> {
             updated_at: item.updated_at,
             title: data.title.clone(),
             body: data.body.clone(),
+        })),
+        ItemKind::Identity(data) => Some(SafeItem::Identity(SafeIdentity {
+            id: item.id,
+            vault_id: item.vault_id,
+            display_name: item.display_name.clone(),
+            favourite: item.favourite,
+            tags: item.tags.clone(),
+            icon: item.icon.clone(),
+            color: item.color.clone(),
+            created_at: item.created_at,
+            updated_at: item.updated_at,
+            full_name: data.full_name.clone(),
+            email: data.email.clone(),
+            phone: data.phone.clone(),
+            address_line1: data.address_line1.clone(),
+            address_line2: data.address_line2.clone(),
+            city: data.city.clone(),
+            postal_code: data.postal_code.clone(),
+            country: data.country.clone(),
         })),
         _ => None,
     }
