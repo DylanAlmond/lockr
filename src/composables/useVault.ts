@@ -1,5 +1,13 @@
 import { ref } from 'vue';
-import { Account, AccountFilter, Entropy, NewItemData, SafeItem, Vault } from '../types';
+import {
+  Account,
+  AccountFilter,
+  Entropy,
+  NewItemData,
+  SafeItem,
+  SecretInput,
+  Vault
+} from '../types';
 import { invoke } from '@tauri-apps/api/core';
 
 const isLoading = ref(false);
@@ -11,6 +19,8 @@ export interface CreateItemProps {
   icon?: string | null;
   /** Kind wire payload: internally tagged like the backend's NewItemData */
   data: NewItemData;
+  /** Initial secret fields (cards); keys are validated backend-side */
+  secrets?: SecretInput[];
 }
 
 export interface UpdateItemProps {
@@ -142,11 +152,42 @@ export function useVault() {
         vaultId: props.vaultId,
         displayName: props.displayName || null,
         icon: props.icon || null,
-        data: props.data
+        data: props.data,
+        secrets: props.secrets ?? null
       });
     } catch (e) {
       error.value = String(e);
       return null;
+    }
+  }
+
+  // ============ Per-field secrets ============
+
+  async function getItemSecret(
+    vaultId: string,
+    itemId: string,
+    fieldKey: string
+  ): Promise<string | null> {
+    try {
+      return await invoke<string>('get_item_secret', { vaultId, itemId, fieldKey });
+    } catch (e) {
+      error.value = String(e);
+      return null;
+    }
+  }
+
+  async function updateItemSecret(
+    vaultId: string,
+    itemId: string,
+    fieldKey: string,
+    value: string | null
+  ): Promise<boolean> {
+    try {
+      await invoke('update_item_secret', { vaultId, itemId, fieldKey, value });
+      return true;
+    } catch (e) {
+      error.value = String(e);
+      return false;
     }
   }
 
@@ -361,6 +402,10 @@ export function useVault() {
     updateItem,
     deleteItem,
     moveItem,
+
+    // Per-field secrets
+    getItemSecret,
+    updateItemSecret,
 
     // Util
     getPasswordStrength,

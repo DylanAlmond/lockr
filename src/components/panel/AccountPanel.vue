@@ -3,6 +3,8 @@ import { useRoute } from 'vue-router';
 import { computed, watch } from 'vue';
 import AccountDetails from './AccountDetails.vue';
 import AccountEdit from './AccountEdit.vue';
+import CardDetails from './CardDetails.vue';
+import CardEdit from './CardEdit.vue';
 import IdentityDetails from './IdentityDetails.vue';
 import IdentityEdit from './IdentityEdit.vue';
 import NoteDetails from './NoteDetails.vue';
@@ -21,6 +23,7 @@ const isEdit = computed(() => mode.value === 'edit' && !isCreate.value);
 // True when the active item is another kind (panel switches to that view)
 const isNote = computed(() => state.activeItem?.kind === 'note');
 const isIdentity = computed(() => state.activeItem?.kind === 'identity');
+const isCard = computed(() => state.activeItem?.kind === 'card');
 
 watch(
   itemId,
@@ -52,7 +55,11 @@ watch(
 
   <IdentityDetails v-else-if="isIdentity && itemId" />
 
-  <AccountEdit v-else-if="!isNote && !isIdentity && (isCreate || isEdit)" />
+  <CardEdit v-else-if="isCard && (isCreate || isEdit)" />
+
+  <CardDetails v-else-if="isCard && itemId" />
+
+  <AccountEdit v-else-if="!isNote && !isIdentity && !isCard && (isCreate || isEdit)" />
 
   <!-- Details view -->
   <AccountDetails v-else-if="!isNote && itemId" />

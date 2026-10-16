@@ -9,8 +9,9 @@ use crate::crypto::{
 };
 use crate::{
     AccountData, AccountFilter, AccountId, CURRENT_SCHEMA_VERSION, IntoSafe, ItemKind, ItemId,
-    ItemSecrets, LegacyVault, NewItemData, SECRET_FIELD_PASSWORD, SafeAccount, SafeItem, SafeVault,
-    Vault, VaultError, VaultId, VaultItem, account_from_item, item_to_safe,
+    ItemSecrets, LegacyVault, NewItemData, SecretInput, SECRET_FIELD_PASSWORD, SafeAccount,
+    SafeItem, SafeVault, Vault, VaultError, VaultId, VaultItem, account_from_item,
+    allowed_secret_keys, item_to_safe,
 };
 
 /// Normalizes an optional text field: empty strings mean "not set".
@@ -514,21 +515,59 @@ impl VaultManager {
         Ok(())
     }
 
-    /// Create a new item of a non-account kind.
+    /// Create a new item of a non-account kind, together with its secret
+    /// fields, if the kind stores any. Secret keys are validated against the
+    /// kind: unknown keys and secret-less kinds are rejected.
     pub fn add_item(
         &mut self,
         vault_id: VaultId,
         display_name: Option<String>,
         icon: Option<String>,
         data: NewItemData,
+        secrets: Option<Vec<SecretInput>>,
     ) -> Result<SafeItem, VaultError> {
         let kind = match data {
             NewItemData::Note(note) => ItemKind::Note(note),
+            NewItemData::Card(card) => {
+                if !(1..=12).contains(&card.expiry_month) {
+                    return Err(VaultError::Validation(format!(
+                        "Card expiry month must be between 1 and 12, got {}",
+                        card.expiry_month
+                    )));
+                }
+                ItemKind::Card(card)
+            }
             NewItemData::Identity(identity) => ItemKind::Identity(identity),
-            NewItemData::Card(_) => {
-                return Err(VaultError::Validation(
-                    "Card items are not yet supported".to_string(),
-                ))
+        };
+
+        // Validate the secret inputs against the kind before mutating anything
+        let secret_fields: Vec<crate::SecretField> = {
+            let allowed = allowed_secret_keys(&kind);
+            match &secrets {
+                Some(inputs) if !inputs.is_empty() => {
+                    if allowed.is_empty() {
+                        return Err(VaultError::Validation(
+                            "This kind of item has no secret fields".to_string(),
+                        ));
+                    }
+
+                    let mut fields = Vec::with_capacity(inputs.len());
+                    for input in inputs {
+                        if !allowed.contains(&input.key.as_str()) {
+                            return Err(VaultError::Validation(format!(
+                                "Unknown secret field '{}' for this kind of item",
+                                input.key
+                            )));
+                        }
+                        fields.push(crate::SecretField {
+                            key: input.key.clone(),
+                            value: input.value.clone(),
+                        });
+                    }
+                    fields
+                }
+                // Secret-less kinds (and omitted input) store no entry
+                _ => Vec::new(),
             }
         };
 
@@ -549,11 +588,29 @@ impl VaultManager {
         {
             let vault = self.get_vault_mut(vault_id)?;
             vault.items.push(item.clone());
+            if !secret_fields.is_empty() {
+                vault.secrets.push(ItemSecrets {
+                    item_id: item.id,
+                    fields: secret_fields,
+                });
+            }
         }
 
         self.maybe_save(vault_id)?;
-        item_to_safe(&item)
-            .ok_or_else(|| VaultError::Validation("This kind has no safe view yet".to_string()))
+
+        self.safe_view_of(vault_id, item.id)
+    }
+
+    /// Builds the safe view of an item against its vault's current state
+    /// (card items derive last4 from the vault's secret store).
+    fn safe_view_of(&self, vault_id: VaultId, item_id: ItemId) -> Result<SafeItem, VaultError> {
+        let vault = self.get_vault(vault_id)?;
+        let item = vault
+            .items
+            .iter()
+            .find(|i| i.id == item_id)
+            .ok_or(VaultError::AccountNotFound(item_id.to_string()))?;
+        Ok(item_to_safe(item, &vault.secrets))
     }
 
     /// Update an item's metadata, and for supported kinds its kind data.
@@ -570,7 +627,7 @@ impl VaultManager {
         color: Option<String>,
         data: Option<NewItemData>,
     ) -> Result<SafeItem, VaultError> {
-        let updated = {
+        {
             let vault = self.get_vault_mut(vault_id)?;
 
             let item = vault
@@ -601,6 +658,7 @@ impl VaultManager {
                     (ItemKind::Identity(current), NewItemData::Identity(new)) => {
                         *current = new
                     }
+                    (ItemKind::Card(current), NewItemData::Card(new)) => *current = new,
                     (_, _) => {
                         return Err(VaultError::Validation(
                             "Changing an item's kind is not supported (accounts keep their \
@@ -612,11 +670,11 @@ impl VaultManager {
             }
 
             item.updated_at = Utc::now();
-            let item_imm = &*item;
-            item_to_safe(item_imm).ok_or_else(|| {
-                VaultError::Validation("This kind has no safe view yet".to_string())
-            })?
         };
+
+        // Card items pull their last4 from the secret store, so the safe
+        // view is built after the mutable section against fresh vault state
+        let updated = self.safe_view_of(vault_id, item_id)?;
 
         self.maybe_save(vault_id)?;
         Ok(updated)
@@ -626,9 +684,7 @@ impl VaultManager {
     pub fn get_item_by_id(&self, item_id: ItemId) -> Result<SafeItem, VaultError> {
         for uv in self.unlocked_vaults.values() {
             if let Some(item) = uv.vault.items.iter().find(|i| i.id == item_id) {
-                if let Some(safe) = item_to_safe(item) {
-                    return Ok(safe);
-                }
+                return Ok(item_to_safe(item, &uv.vault.secrets));
             }
         }
 
@@ -654,7 +710,7 @@ impl VaultManager {
         self.get_vault(target_vault_id)?;
 
         // Remove the item and its secret entry from the source vault
-        let (mut item, mut secret) = {
+        let (item, mut secret) = {
             let source = self.get_vault_mut(vault_id)?;
             let idx = source
                 .items
@@ -688,8 +744,9 @@ impl VaultManager {
 
         self.maybe_save(vault_id)?;
         self.maybe_save(target_vault_id)?;
-        item_to_safe(&item)
-            .ok_or_else(|| VaultError::Validation("This kind has no safe view yet".to_string()))
+
+        // Card items pull their last4 from the (remapped) secret entry
+        self.safe_view_of(target_vault_id, item.id)
     }
 
     /// Retrieves items of all kinds across one or all vaults, applying filters.
@@ -706,10 +763,7 @@ impl VaultManager {
 
         for vault in vaults_to_scan {
             for item in &vault.items {
-                let Some(view) = item_to_safe(item) else {
-                    // Kinds without a safe view are never sent to the UI
-                    continue;
-                };
+                let view = item_to_safe(item, &vault.secrets);
 
                 if let Some(true) = filter.favourite_only {
                     if !item.favourite {
@@ -741,6 +795,7 @@ impl VaultManager {
         results.sort_by(|a, b| {
             let updated = |i: &SafeItem| match i {
                 SafeItem::Account(v) => v.updated_at,
+                SafeItem::Card(v) => v.updated_at,
                 SafeItem::Note(v) => v.updated_at,
                 SafeItem::Identity(v) => v.updated_at,
             };
@@ -750,7 +805,8 @@ impl VaultManager {
         Ok(results)
     }
 
-    /// Returns a specific secret field value for an item.
+    /// Returns a specific secret field value for an item. Unknown field keys
+    /// and secret-less kinds are rejected with clear validation errors.
     pub fn get_item_secret(
         &self,
         vault_id: VaultId,
@@ -758,6 +814,18 @@ impl VaultManager {
         field_key: &str,
     ) -> Result<String, VaultError> {
         let vault = self.get_vault(vault_id)?;
+
+        let item = vault
+            .items
+            .iter()
+            .find(|i| i.id == item_id)
+            .ok_or(VaultError::AccountNotFound(item_id.to_string()))?;
+
+        if allowed_secret_keys(&item.kind).is_empty() {
+            return Err(VaultError::Validation(
+                "This kind of item has no secret fields".to_string(),
+            ));
+        }
 
         let entry = vault
             .secrets
@@ -773,6 +841,79 @@ impl VaultManager {
                 ))
             })
             .map(str::to_string)
+    }
+
+    /// Sets or clears a specific secret field of an item. Clearing (a `None`
+    /// value) removes the field, and an entry left with no fields is dropped.
+    pub fn update_item_secret(
+        &mut self,
+        vault_id: VaultId,
+        item_id: ItemId,
+        field_key: &str,
+        value: Option<String>,
+    ) -> Result<(), VaultError> {
+        // Validate the item's kind and field key before touching the store
+        let is_noop = {
+            let vault = self.get_vault_mut(vault_id)?;
+            let item = vault
+                .items
+                .iter()
+                .find(|i| i.id == item_id)
+                .ok_or(VaultError::AccountNotFound(item_id.to_string()))?;
+
+            let allowed = allowed_secret_keys(&item.kind);
+            if allowed.is_empty() {
+                return Err(VaultError::Validation(
+                    "This kind of item has no secret fields".to_string(),
+                ));
+            }
+            if !allowed.contains(&field_key) {
+                return Err(VaultError::Validation(format!(
+                    "Unknown secret field '{field_key}' for this kind of item",
+                )));
+            }
+
+            // Clearing a field the item doesn't even have is a no-op
+            value.is_none()
+                && !vault
+                    .secrets
+                    .iter()
+                    .any(|s| s.item_id == item_id && s.get(field_key).is_some())
+        };
+
+        if is_noop {
+            return Ok(());
+        }
+
+        {
+            let vault = self.get_vault_mut(vault_id)?;
+            let item = vault
+                .items
+                .iter_mut()
+                .find(|i| i.id == item_id)
+                .expect("the item was just validated");
+            item.updated_at = Utc::now();
+
+            let entry_pos = vault.secrets.iter().position(|s| s.item_id == item_id);
+
+            match (entry_pos, value) {
+                (Some(pos), Some(value)) => vault.secrets[pos].set(field_key, value),
+                (Some(pos), None) => {
+                    vault.secrets[pos].remove(field_key);
+                    // Drop emptied entries to keep the store tidy
+                    if vault.secrets[pos].fields.is_empty() {
+                        vault.secrets.remove(pos);
+                    }
+                }
+                (None, Some(value)) => vault
+                    .secrets
+                    .push(ItemSecrets::new(item_id, field_key, value)),
+                (None, None) => unreachable!("no-op clears return above"),
+            }
+        }
+
+        self.maybe_save(vault_id)?;
+        Ok(())
     }
 
     /// Returns only the password string for a specific account
@@ -888,6 +1029,10 @@ impl VaultManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        SECRET_FIELD_CARD_NUMBER, SECRET_FIELD_PIN, SECRET_FIELD_SECURITY_CODE,
+        card_number_last4,
+    };
 
     fn setup() -> PathBuf {
         let unique_id = Uuid::new_v4();
@@ -1394,6 +1539,7 @@ mod tests {
                     title: Some(title.to_string()),
                     body: body.to_string(),
                 }),
+                None,
             )
             .unwrap()
     }
@@ -1459,6 +1605,7 @@ mod tests {
             .map(|i| match i {
                 crate::SafeItem::Account(_) => "account",
                 crate::SafeItem::Note(_) => "note",
+                crate::SafeItem::Card(_) => "card",
                 crate::SafeItem::Identity(_) => "identity",
             })
             .collect();
@@ -1690,6 +1837,7 @@ mod tests {
                     postal_code: Some("12345".to_string()),
                     country: Some("US".to_string()),
                 }),
+                None,
             )
             .unwrap()
     }
@@ -1893,8 +2041,273 @@ mod tests {
         assert!(matches!(matches_account[0], crate::SafeItem::Account(_)));
     }
 
+    // ============ Card items (per-field secrets) ============
+
+    fn add_test_card(manager: &mut VaultManager, vault_id: VaultId) -> SafeItem {
+        manager
+            .add_item(
+                vault_id,
+                Some("Travel card".to_string()),
+                None,
+                crate::NewItemData::Card(crate::CardData {
+                    cardholder_name: "Alex Doe".to_string(),
+                    expiry_month: 11,
+                    expiry_year: 2030,
+                    brand: Some("Visa".to_string()),
+                }),
+                Some(vec![
+                    crate::SecretInput::new(
+                        crate::SECRET_FIELD_CARD_NUMBER,
+                        "4111 1111 1111 1234".to_string(),
+                    ),
+                    crate::SecretInput::new(
+                        crate::SECRET_FIELD_SECURITY_CODE,
+                        "123".to_string(),
+                    ),
+                    crate::SecretInput::new(crate::SECRET_FIELD_PIN, "4321".to_string()),
+                ]),
+            )
+            .unwrap()
+    }
+
     #[test]
-    fn test_future_kinds_are_rejected_not_half_working() {
+    fn test_add_card_item_with_secrets() {
+        let temp_dir = setup();
+        let mut manager = VaultManager::new(temp_dir.clone()).unwrap();
+        let vault = manager
+            .create_vault("Test".to_string(), "#6240BF".to_string(), MASTER_PW, &KEY)
+            .unwrap();
+
+        let card = add_test_card(&mut manager, vault.id);
+
+        // Safe view: tagged "card", kind fields present, secrets absent
+        let json = serde_json::to_value(&card).unwrap();
+        assert_eq!(json["kind"], "card");
+        assert_eq!(json["cardholder_name"], "Alex Doe");
+        assert_eq!(json["brand"], "Visa");
+        assert_eq!(json["expiry_year"], 2030);
+        assert_eq!(json["card_number_last4"], "1234");
+
+        for secret_key in ["card_number", "security_code", "pin"] {
+            assert!(
+                json.get(secret_key).is_none(),
+                "safe view must never embed the '{secret_key}' secret"
+            );
+        }
+
+        // Stored with a single per-field secret entry
+        let vault_ref = manager.get_vault(vault.id).unwrap();
+        assert_eq!(vault_ref.items.len(), 1);
+        assert_eq!(vault_ref.secrets.len(), 1);
+        assert_eq!(vault_ref.secrets[0].fields.len(), 3);
+
+        // Each secret is retrievable individually by its field key
+        let card_id = match &card {
+            SafeItem::Card(c) => c.id,
+            _ => panic!("expected card view"),
+        };
+        assert_eq!(
+            manager.get_item_secret(vault.id, card_id, SECRET_FIELD_CARD_NUMBER).unwrap(),
+            "4111 1111 1111 1234"
+        );
+        assert_eq!(
+            manager
+                .get_item_secret(vault.id, card_id, SECRET_FIELD_SECURITY_CODE)
+                .unwrap(),
+            "123"
+        );
+        assert_eq!(
+            manager.get_item_secret(vault.id, card_id, SECRET_FIELD_PIN).unwrap(),
+            "4321"
+        );
+    }
+
+    #[test]
+    fn test_card_number_last4_derivation() {
+        assert_eq!(card_number_last4("4111 1111 1111 1234"), Some("1234".into()));
+        assert_eq!(card_number_last4("4111-1111-1111-1234"), Some("1234".into()));
+        assert_eq!(card_number_last4("4111111111111234"), Some("1234".into()));
+        assert_eq!(card_number_last4("123"), None, "too short");
+        assert_eq!(card_number_last4(""), None);
+        assert_eq!(card_number_last4("4111abcd"), None, "not digits");
+    }
+
+    #[test]
+    fn test_get_item_secret_errors() {
+        let temp_dir = setup();
+        let mut manager = VaultManager::new(temp_dir.clone()).unwrap();
+        let vault = manager
+            .create_vault("Test".to_string(), "#6240BF".to_string(), MASTER_PW, &KEY)
+            .unwrap();
+
+        let card = add_test_card(&mut manager, vault.id);
+        let card_id = match &card {
+            SafeItem::Card(c) => c.id,
+            _ => panic!("expected card view"),
+        };
+
+        // Unknown key on a card
+        let unknown = manager.get_item_secret(vault.id, card_id, "cvv2");
+        match unknown {
+            Err(VaultError::Validation(msg)) => assert!(msg.contains("No secret field 'cvv2'")),
+            other => panic!("expected validation error, got {other:?}"),
+        }
+
+        // Secret-less kind (note) must error with a clear message
+        let note = manager
+            .add_item(
+                vault.id,
+                None,
+                None,
+                crate::NewItemData::Note(crate::NoteData {
+                    title: None,
+                    body: "body".to_string(),
+                }),
+                None,
+            )
+            .unwrap();
+        let note_id = match &note {
+            SafeItem::Note(n) => n.id,
+            _ => panic!("expected note view"),
+        };
+        let secretless = manager
+            .get_item_secret(vault.id, note_id, SECRET_FIELD_CARD_NUMBER)
+            .unwrap_err();
+        assert!(
+            matches!(secretless, VaultError::Validation(ref msg) if msg.contains("no secret fields")),
+            "got {secretless:?}"
+        );
+
+        // Nonexistent item
+        let missing = manager.get_item_secret(vault.id, Uuid::new_v4(), SECRET_FIELD_PIN);
+        assert!(matches!(missing, Err(VaultError::AccountNotFound(_))));
+    }
+
+    #[test]
+    fn test_update_item_secret_updates_and_clears() {
+        let temp_dir = setup();
+        let mut manager = VaultManager::new(temp_dir.clone()).unwrap();
+        let vault = manager
+            .create_vault("Test".to_string(), "#6240BF".to_string(), MASTER_PW, &KEY)
+            .unwrap();
+
+        let card = add_test_card(&mut manager, vault.id);
+        let card_id = match &card {
+            SafeItem::Card(c) => c.id,
+            _ => panic!("expected card view"),
+        };
+
+        // Set replaces the value...
+        manager
+            .update_item_secret(vault.id, card_id, SECRET_FIELD_PIN, Some("9999".to_string()))
+            .unwrap();
+        assert_eq!(manager.get_item_secret(vault.id, card_id, SECRET_FIELD_PIN).unwrap(), "9999");
+
+        // ...and None clears the field entirely
+        manager
+            .update_item_secret(vault.id, card_id, SECRET_FIELD_SECURITY_CODE, None)
+            .unwrap();
+        assert!(matches!(
+            manager.get_item_secret(vault.id, card_id, SECRET_FIELD_SECURITY_CODE),
+            Err(VaultError::Validation(_))
+        ));
+        // Other fields of the entry survive the clear
+        assert_eq!(
+            manager.get_item_secret(vault.id, card_id, SECRET_FIELD_CARD_NUMBER).unwrap(),
+            "4111 1111 1111 1234"
+        );
+
+        // Unknown key rejected on update too
+        assert!(manager
+            .update_item_secret(vault.id, card_id, "cvv2", Some("x".to_string()))
+            .is_err());
+
+        // Persisted across unlock
+        manager.lock_vault(Some(vault.id));
+        manager.unlock_vault(vault.id, MASTER_PW, &KEY).unwrap();
+        assert_eq!(manager.get_item_secret(vault.id, card_id, SECRET_FIELD_PIN).unwrap(), "9999");
+    }
+
+    #[test]
+    fn test_card_move_carries_secrets() {
+        let temp_dir = setup();
+        let mut manager = VaultManager::new(temp_dir.clone()).unwrap();
+        let vault_a = manager
+            .create_vault("A".to_string(), "#6240BF".to_string(), MASTER_PW, &KEY)
+            .unwrap();
+        let vault_b = manager
+            .create_vault("B".to_string(), "#6240BF".to_string(), MASTER_PW, &KEY)
+            .unwrap();
+
+        let card = add_test_card(&mut manager, vault_a.id);
+        let card_id = match &card {
+            SafeItem::Card(c) => c.id,
+            _ => panic!("expected card view"),
+        };
+
+        let moved = manager.move_item(vault_a.id, card_id, vault_b.id).unwrap();
+        assert!(matches!(moved, SafeItem::Card(_)));
+        assert_eq!(manager.get_vault(vault_a.id).unwrap().secrets.len(), 0);
+
+        let moved_id = match &moved {
+            SafeItem::Card(c) => c.id,
+            _ => unreachable!(),
+        };
+        assert_eq!(
+            manager
+                .get_item_secret(vault_b.id, moved_id, SECRET_FIELD_CARD_NUMBER)
+                .unwrap(),
+            "4111 1111 1111 1234"
+        );
+        assert_eq!(
+            match &moved {
+                SafeItem::Card(c) => c.card_number_last4.clone(),
+                _ => unreachable!(),
+            },
+            Some("1234".to_string())
+        );
+    }
+
+    #[test]
+    fn test_card_search_finds_cardholder_and_brand() {
+        let temp_dir = setup();
+        let mut manager = VaultManager::new(temp_dir.clone()).unwrap();
+        let vault = manager
+            .create_vault("Test".to_string(), "#6240BF".to_string(), MASTER_PW, &KEY)
+            .unwrap();
+
+        add_test_card(&mut manager, vault.id);
+
+        // By cardholder name
+        let by_name = manager
+            .get_all_items(AccountFilter {
+                search_query: Some("alex doe".to_string()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(by_name.len(), 1);
+
+        // By brand
+        let by_brand = manager
+            .get_all_items(AccountFilter {
+                search_query: Some("visa".to_string()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(by_brand.len(), 1);
+
+        // No false positives
+        let no_match = manager
+            .get_all_items(AccountFilter {
+                search_query: Some("mastercard".to_string()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(no_match.is_empty());
+    }
+
+    #[test]
+    fn test_card_expiry_month_is_validated_backend_side() {
         let temp_dir = setup();
         let mut manager = VaultManager::new(temp_dir.clone()).unwrap();
         let vault = manager
@@ -1907,21 +2320,62 @@ mod tests {
             None,
             crate::NewItemData::Card(crate::CardData {
                 cardholder_name: "Alex".to_string(),
-                expiry_month: 11,
+                expiry_month: 13,
                 expiry_year: 2030,
-                brand: Some("Visa".to_string()),
+                brand: None,
             }),
+            None,
         );
 
-        match result {
-            Err(VaultError::Validation(msg)) => assert!(
-                msg.contains("not yet supported"),
-                "got: {msg}"
-            ),
-            other => panic!("expected validation error, got {:?}", other.map(|v| {
-                serde_json::to_value(v).unwrap()
-            })),
-        }
+        assert!(matches!(
+            result,
+            Err(VaultError::Validation(ref msg)) if msg.contains("between 1 and 12")
+        ));
+        assert_eq!(manager.get_vault(vault.id).unwrap().items.len(), 0);
+    }
+
+    #[test]
+    fn test_secret_input_validation_per_kind() {
+        let temp_dir = setup();
+        let mut manager = VaultManager::new(temp_dir.clone()).unwrap();
+        let vault = manager
+            .create_vault("Test".to_string(), "#6240BF".to_string(), MASTER_PW, &KEY)
+            .unwrap();
+
+        // Unknown secret key on a card
+        let bad_key = manager.add_item(
+            vault.id,
+            None,
+            None,
+            crate::NewItemData::Card(crate::CardData {
+                cardholder_name: "Alex".to_string(),
+                expiry_month: 1,
+                expiry_year: 2030,
+                brand: None,
+            }),
+            Some(vec![crate::SecretInput::new("cvv2", "123".to_string())]),
+        );
+        assert!(matches!(bad_key, Err(VaultError::Validation(msg)) if msg.contains("Unknown secret field")));
+
+        // Secrets sent for a secret-less kind
+        let secretless = manager.add_item(
+            vault.id,
+            None,
+            None,
+            crate::NewItemData::Note(crate::NoteData {
+                title: None,
+                body: "body".to_string(),
+            }),
+            Some(vec![crate::SecretInput::new(
+                SECRET_FIELD_CARD_NUMBER,
+                "4111".to_string(),
+            )]),
+        );
+        assert!(
+            matches!(secretless, Err(VaultError::Validation(ref msg)) if msg.contains("no secret fields")),
+            "got {secretless:?}"
+        );
+
         assert_eq!(manager.get_vault(vault.id).unwrap().items.len(), 0);
     }
 }

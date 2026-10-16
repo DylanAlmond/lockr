@@ -24,6 +24,67 @@ fn legacy_schema_version() -> u32 {
 /// Key of the account password secret field.
 pub const SECRET_FIELD_PASSWORD: &str = "password";
 
+/// Secret field keys of card items (per-field secrets).
+pub const SECRET_FIELD_CARD_NUMBER: &str = "card_number";
+pub const SECRET_FIELD_SECURITY_CODE: &str = "security_code";
+pub const SECRET_FIELD_PIN: &str = "pin";
+
+/// The secret field keys an item kind is allowed to store, in the order the
+/// UI presents them. Secret-less kinds return an empty slice.
+pub fn allowed_secret_keys(kind: &ItemKind) -> &'static [&'static str] {
+    match kind {
+        ItemKind::Account(_) => &[SECRET_FIELD_PASSWORD],
+        ItemKind::Card(_) => &[
+            SECRET_FIELD_CARD_NUMBER,
+            SECRET_FIELD_SECURITY_CODE,
+            SECRET_FIELD_PIN,
+        ],
+        ItemKind::Note(_) | ItemKind::Identity(_) => &[],
+    }
+}
+
+/// A secret field to be stored with a newly created item, sent by the UI.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SecretInput {
+    pub key: String,
+    pub value: String,
+}
+
+impl SecretInput {
+    #[cfg(test)] // Test-only convenience; deserialization is the production path
+    pub fn new(key: &str, value: String) -> Self {
+        Self {
+            key: key.to_string(),
+            value,
+        }
+    }
+}
+
+/// Backend-derived last four digits of a card number, for list subtitles.
+/// Only digits, whitespace and dashes are accepted: anything else yields
+/// `None`, as does a total of fewer than four digits.
+pub fn card_number_last4(card_number: &str) -> Option<String> {
+    if card_number.is_empty() {
+        return None;
+    }
+
+    let is_separator = |c: char| c.is_ascii_whitespace() && c != '\n' || c == '-';
+    if card_number
+        .chars()
+        .any(|c| !c.is_ascii_digit() && !is_separator(c))
+    {
+        return None;
+    }
+
+    let digits: String = card_number.chars().filter(|c| c.is_ascii_digit()).collect();
+
+    if digits.len() < 4 {
+        return None;
+    }
+
+    Some(digits[digits.len() - 4..].to_string())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct User {
     pub id: UserId,
@@ -97,6 +158,9 @@ impl VaultItem {
             }
             ItemKind::Card(data) => {
                 texts.push(data.cardholder_name.to_lowercase());
+                if let Some(brand) = &data.brand {
+                    texts.push(brand.to_lowercase());
+                }
             }
             ItemKind::Identity(data) => {
                 texts.push(data.full_name.to_lowercase());
@@ -157,7 +221,7 @@ pub struct AccountData {
     pub email: Option<String>,
 }
 
-#[allow(dead_code)] // Card items are wired up in ticket #25; the variant exists to keep the v2 schema stable
+#[allow(dead_code)] // Brand display is wired up with card details in ticket #25
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CardData {
     pub cardholder_name: String,
@@ -230,6 +294,13 @@ impl ItemSecrets {
                 value,
             });
         }
+    }
+
+    /// Removes the given secret field. Returns whether the key existed.
+    pub fn remove(&mut self, key: &str) -> bool {
+        let existed = self.fields.iter().any(|f| f.key == key);
+        self.fields.retain(|f| f.key != key);
+        existed
     }
 }
 
@@ -429,11 +500,37 @@ pub struct SafeIdentity {
     pub country: Option<String>,
 }
 
+/// The Safe View of a card item. Card secrets (card number, security code,
+/// PIN) are never part of this view: only the backend-derived last four
+/// digits of the card number are, for list subtitles.
+#[derive(Debug, Clone, Serialize)]
+pub struct SafeCard {
+    pub id: ItemId,
+    pub vault_id: VaultId,
+
+    pub display_name: Option<String>,
+    pub favourite: bool,
+    pub tags: Vec<String>,
+    pub icon: Option<String>,
+    pub color: String,
+
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+
+    pub cardholder_name: String,
+    pub brand: Option<String>,
+    pub expiry_month: u8,
+    pub expiry_year: u16,
+
+    pub card_number_last4: Option<String>,
+}
+
 /// The Safe View of any item, tagged by kind for the frontend.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SafeItem {
     Account(SafeAccount),
+    Card(SafeCard),
     Note(SafeNote),
     Identity(SafeIdentity),
 }
@@ -460,13 +557,47 @@ pub fn account_from_item(item: &VaultItem) -> Option<SafeAccount> {
     })
 }
 
-/// The Safe View of an item of any sendable kind: `None` for kinds whose
-/// safe view isn't wired up yet (card items can't exist in a vault yet —
-/// they are rejected at creation in ticket #25's seed).
-pub fn item_to_safe(item: &VaultItem) -> Option<SafeItem> {
+/// The Safe View of a card item, derived from the item plus its vault's
+/// secret entries (the card number lives in the secret store).
+pub fn card_from_item(item: &VaultItem, secrets: &[ItemSecrets]) -> SafeCard {
+    let ItemKind::Card(data) = &item.kind else {
+        unreachable!("card_from_item on a non-card item");
+    };
+
+    let card_number = secrets
+        .iter()
+        .find(|s| s.item_id == item.id)
+        .and_then(|s| s.get(SECRET_FIELD_CARD_NUMBER))
+        .and_then(card_number_last4);
+
+    SafeCard {
+        id: item.id,
+        vault_id: item.vault_id,
+        display_name: item.display_name.clone(),
+        favourite: item.favourite,
+        tags: item.tags.clone(),
+        icon: item.icon.clone(),
+        color: item.color.clone(),
+        created_at: item.created_at,
+        updated_at: item.updated_at,
+        cardholder_name: data.cardholder_name.clone(),
+        brand: data.brand.clone(),
+        expiry_month: data.expiry_month,
+        expiry_year: data.expiry_year,
+        card_number_last4: card_number,
+    }
+}
+
+/// The Safe View of an item of any kind. Every kind has a safe view; note
+/// and identity items carry no secret fields, account and card items keep
+/// theirs out of the payload (card cards only via `card_number_last4`).
+pub fn item_to_safe(item: &VaultItem, secrets: &[ItemSecrets]) -> SafeItem {
     match &item.kind {
-        ItemKind::Account(_) => account_from_item(item).map(SafeItem::Account),
-        ItemKind::Note(data) => Some(SafeItem::Note(SafeNote {
+        ItemKind::Account(_) => {
+            SafeItem::Account(account_from_item(item).expect("matched account kind"))
+        }
+        ItemKind::Card(_) => SafeItem::Card(card_from_item(item, secrets)),
+        ItemKind::Note(data) => SafeItem::Note(SafeNote {
             id: item.id,
             vault_id: item.vault_id,
             display_name: item.display_name.clone(),
@@ -478,8 +609,8 @@ pub fn item_to_safe(item: &VaultItem) -> Option<SafeItem> {
             updated_at: item.updated_at,
             title: data.title.clone(),
             body: data.body.clone(),
-        })),
-        ItemKind::Identity(data) => Some(SafeItem::Identity(SafeIdentity {
+        }),
+        ItemKind::Identity(data) => SafeItem::Identity(SafeIdentity {
             id: item.id,
             vault_id: item.vault_id,
             display_name: item.display_name.clone(),
@@ -497,8 +628,7 @@ pub fn item_to_safe(item: &VaultItem) -> Option<SafeItem> {
             city: data.city.clone(),
             postal_code: data.postal_code.clone(),
             country: data.country.clone(),
-        })),
-        _ => None,
+        }),
     }
 }
 

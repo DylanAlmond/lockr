@@ -76,6 +76,8 @@ pub fn run() {
             commands::move_item,
             commands::get_item_by_id,
             commands::get_all_items,
+            commands::get_item_secret,
+            commands::update_item_secret,
             // Util
             commands::get_password_strength,
             commands::flush_vault,

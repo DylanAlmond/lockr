@@ -81,15 +81,51 @@ export interface IdentityItem {
   country: string | null;
 }
 
+export interface CardItem {
+  id: string;
+  vault_id: string;
+
+  display_name: string | null;
+  favourite: boolean;
+  tags: string[];
+  icon: string | null;
+  color: string;
+
+  created_at: string;
+  updated_at: string;
+
+  cardholder_name: string;
+  brand: string | null;
+  expiry_month: number;
+  expiry_year: number;
+
+  /** Backend-derived; the full number lives in the secret store */
+  card_number_last4: string | null;
+}
+
 /** Items sent to the UI, tagged by kind. Safe View: no secret fields. */
 export type SafeItem =
   | ({ kind: 'account' } & Account)
+  | ({ kind: 'card' } & CardItem)
   | ({ kind: 'note' } & NoteItem)
   | ({ kind: 'identity' } & IdentityItem);
+
+/** One secret field offered at item creation (cards; keys like card_number). */
+export interface SecretInput {
+  key: string;
+  value: string;
+}
 
 /** Kind payloads for creating/updating non-account items (wire format). */
 export type NewItemData =
   | { kind: 'note'; title: string | null; body: string }
+  | {
+      kind: 'card';
+      cardholder_name: string;
+      brand: string | null;
+      expiry_month: number;
+      expiry_year: number;
+    }
   | {
       kind: 'identity';
       full_name: string;

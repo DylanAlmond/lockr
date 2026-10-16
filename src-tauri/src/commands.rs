@@ -8,7 +8,10 @@ use zxcvbn::{zxcvbn, Entropy};
 
 use crate::user_manager::UserManager;
 use crate::vault_manager::VaultManager;
-use crate::{AccountFilter, IntoSafe, NewItemData, SafeAccount, SafeItem, SafeVault, User, UserId};
+use crate::{
+    AccountFilter, IntoSafe, NewItemData, SafeAccount, SafeItem, SafeVault, SecretInput, User,
+    UserId,
+};
 
 pub struct ManagerState {
     pub vault_manager: VaultManager,
@@ -478,13 +481,14 @@ pub fn add_item(
     display_name: Option<String>,
     icon: Option<String>,
     data: NewItemData,
+    secrets: Option<Vec<SecretInput>>,
 ) -> Result<SafeItem, String> {
     let mut state = state.lock().map_err(|e| e.to_string())?;
     let id = Uuid::parse_str(&vault_id).map_err(|e| e.to_string())?;
 
     state
         .vault_manager
-        .add_item(id, display_name, icon, data)
+        .add_item(id, display_name, icon, data, secrets)
         .map_err(|e| e.to_string())
 }
 
@@ -558,5 +562,42 @@ pub fn get_all_items(state: AppState, filter: AccountFilter) -> Result<Vec<SafeI
     state
         .vault_manager
         .get_all_items(filter)
+        .map_err(|e| e.to_string())
+}
+
+// ============ Per-field secrets ============
+
+#[tauri::command]
+pub fn get_item_secret(
+    state: AppState,
+    vault_id: String,
+    item_id: String,
+    field_key: String,
+) -> Result<String, String> {
+    let state = state.lock().map_err(|e| e.to_string())?;
+    let vid = Uuid::parse_str(&vault_id).map_err(|e| e.to_string())?;
+    let iid = Uuid::parse_str(&item_id).map_err(|e| e.to_string())?;
+
+    state
+        .vault_manager
+        .get_item_secret(vid, iid, &field_key)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn update_item_secret(
+    state: AppState,
+    vault_id: String,
+    item_id: String,
+    field_key: String,
+    value: Option<String>,
+) -> Result<(), String> {
+    let mut state = state.lock().map_err(|e| e.to_string())?;
+    let vid = Uuid::parse_str(&vault_id).map_err(|e| e.to_string())?;
+    let iid = Uuid::parse_str(&item_id).map_err(|e| e.to_string())?;
+
+    state
+        .vault_manager
+        .update_item_secret(vid, iid, &field_key, value)
         .map_err(|e| e.to_string())
 }
