@@ -324,7 +324,6 @@ pub fn add_account(
     state
         .vault_manager
         .add_account(id, display_name, username, email, icon, password)
-        .map(|a| a.into_safe())
         .map_err(|e| e.to_string())
 }
 
@@ -384,7 +383,6 @@ pub fn update_account(
             color,
             password,
         )
-        .map(|a| a.into_safe())
         .map_err(|e| e.to_string())
 }
 

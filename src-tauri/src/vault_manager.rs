@@ -4,13 +4,19 @@ use chrono::Utc;
 use uuid::Uuid;
 use zxcvbn::{zxcvbn, Entropy};
 
-use crate::{
-    crypto::{
-        decrypt_with_key, derive_master_key, encrypt_with_key, generate_salt, MasterKey, SALT_LEN,
-    },
-    Account, AccountFilter, AccountId, IntoSafe, SafeAccount, SafeVault, Vault, VaultError,
-    VaultId,
+use crate::crypto::{
+    decrypt_with_key, derive_master_key, encrypt_with_key, generate_salt, MasterKey, SALT_LEN,
 };
+use crate::{
+    AccountData, AccountFilter, AccountId, CURRENT_SCHEMA_VERSION, IntoSafe, ItemKind, ItemId,
+    ItemSecrets, LegacyVault, SECRET_FIELD_PASSWORD, SafeAccount, SafeVault, Vault, VaultError,
+    VaultId, VaultItem, account_from_item,
+};
+
+/// Normalizes an optional text field: empty strings mean "not set".
+fn normalize(value: Option<String>) -> Option<String> {
+    value.filter(|s| !s.is_empty())
+}
 
 /// An unlocked vault held in RAM, along with its cached encryption key,
 /// salt, and dirty flag.
@@ -60,6 +66,12 @@ impl VaultManager {
     /// Get path to a vault file
     fn vault_path(&self, vault_id: VaultId) -> PathBuf {
         self.vaults_dir.join(format!("{}.vault", vault_id))
+    }
+
+    /// Get path to the backup a vault migration writes. Backups are only
+    /// ever written at migration time, never on plain unlocks.
+    fn vault_backup_path(&self, vault_id: VaultId) -> PathBuf {
+        self.vaults_dir.join(format!("{}.vault.OLD", vault_id))
     }
 
     /// Check if a SPECIFIC vault is unlocked
@@ -135,10 +147,12 @@ impl VaultManager {
         }
 
         let vault = Vault {
+            schema_version: CURRENT_SCHEMA_VERSION,
             id: Uuid::new_v4(),
             name: name,
             color,
-            accounts: Vec::new(),
+            items: Vec::new(),
+            secrets: Vec::new(),
         };
 
         let salt = generate_salt();
@@ -174,6 +188,11 @@ impl VaultManager {
 
     /// Load vault file from disk, derive master key (Argon2id — expensive),
     /// cache it, and decrypt the vault contents.
+    ///
+    /// Pre-versioning (v1) accounts-only files are migrated here: the raw
+    /// file is backed up to `<id>.vault.OLD`, the accounts are transformed
+    /// into items, and the vault is marked dirty so the next save persists
+    /// the versioned format.
     pub fn unlock_vault(
         &mut self,
         vault_id: VaultId,
@@ -199,7 +218,35 @@ impl VaultManager {
         let (json_bytes, salt_from_payload) = decrypt_with_key(&master_key, &encrypted_string)?;
         debug_assert_eq!(salt, salt_from_payload);
 
-        let vault: Vault = serde_json::from_slice(&json_bytes)?;
+        // Parse — new format first, legacy accounts-only fallback for
+        // anything written before schema versioning.
+        let (vault, migrated) = match serde_json::from_slice::<Vault>(&json_bytes) {
+            Ok(mut vault) => {
+                // Versioned shape, but an outdated stamp (or no stamp at
+                // all): re-stamp so the save brings it to the current format.
+                let migrated = vault.schema_version < CURRENT_SCHEMA_VERSION;
+                if migrated {
+                    vault.schema_version = CURRENT_SCHEMA_VERSION;
+                }
+                (vault, migrated)
+            }
+            Err(_) => {
+                // Either a pre-versioning accounts-only file or corrupt
+                // content. When neither parse succeeds we surface the
+                // legacy parse error; both describe the same corrupted
+                // payload, and the original file is left untouched.
+                let legacy: LegacyVault = serde_json::from_slice(&json_bytes)?;
+                (legacy.into_versioned(), true)
+            }
+        };
+
+        if migrated {
+            // Back up the unmodified encrypted file before any save can
+            // persist the transformed format. The on-disk file itself is
+            // untouched until then, so the backup is the rollback path.
+            // Any previous backup is overwritten; nothing deletes it.
+            self.backup_vault_file(vault_id)?;
+        }
 
         self.unlocked_vaults.insert(
             vault.id,
@@ -207,11 +254,20 @@ impl VaultManager {
                 vault: vault.clone(),
                 master_key,
                 salt,
-                dirty: false,
+                dirty: migrated,
             },
         );
 
         Ok(vault)
+    }
+
+    /// Copy the current encrypted vault file to its `.vault.OLD` backup,
+    /// overwriting any previous backup.
+    fn backup_vault_file(&self, vault_id: VaultId) -> Result<(), VaultError> {
+        let path = self.vault_path(vault_id);
+        let backup = self.vault_backup_path(vault_id);
+        std::fs::copy(&path, backup)?;
+        Ok(())
     }
 
     /// Save a specific vault to disk using its cached master key.
@@ -317,7 +373,7 @@ impl VaultManager {
         Ok(())
     }
 
-    /// Create a new service account
+    /// Create a new account item in the vault.
     pub fn add_account(
         &mut self,
         vault_id: VaultId,
@@ -326,36 +382,39 @@ impl VaultManager {
         email: Option<String>,
         icon: Option<String>,
         password: String,
-    ) -> Result<Account, VaultError> {
+    ) -> Result<SafeAccount, VaultError> {
         let now = Utc::now();
-        let account = Account {
+        let item = VaultItem {
             id: Uuid::new_v4(),
             vault_id,
-            display_name: display_name.filter(|s| !s.is_empty()),
-            username,
-            email: email.filter(|s| !s.is_empty()),
+            display_name: normalize(display_name),
             favourite: false,
             tags: Vec::new(),
-            icon: icon,
+            icon,
             color: String::new(),
-            secret: crate::AccountSecret {
-                id: Uuid::new_v4(),
-                password,
-            },
             created_at: now,
             updated_at: now,
+            kind: ItemKind::Account(AccountData {
+                username,
+                email: normalize(email),
+            }),
         };
 
         {
             let vault = self.get_vault_mut(vault_id)?;
-            vault.accounts.push(account.clone());
+            vault.items.push(item.clone());
+            vault.secrets.push(ItemSecrets::new(
+                item.id,
+                SECRET_FIELD_PASSWORD,
+                password,
+            ));
         }
 
         self.maybe_save(vault_id)?;
-        Ok(account)
+        Ok(account_from_item(&item).expect("newly created item is an account"))
     }
 
-    /// Update a service account
+    /// Update an account item.
     pub fn update_account(
         &mut self,
         vault_id: VaultId,
@@ -368,49 +427,69 @@ impl VaultManager {
         icon: Option<String>,
         color: Option<String>,
         password: Option<String>,
-    ) -> Result<Account, VaultError> {
+    ) -> Result<SafeAccount, VaultError> {
         let updated = {
             let vault = self.get_vault_mut(vault_id)?;
-            let account = vault
-                .accounts
+            let Vault { items, secrets, .. } = vault;
+
+            let item = items
                 .iter_mut()
-                .find(|a| a.id == account_id)
+                .find(|i| i.id == account_id)
                 .ok_or(VaultError::AccountNotFound(account_id.to_string()))?;
+            let data = match &mut item.kind {
+                ItemKind::Account(data) => data,
+                _ => {
+                    return Err(VaultError::Validation(format!(
+                        "Item {account_id} is not an account"
+                    )))
+                }
+            };
 
             if let Some(un) = username {
-                account.username = un;
-            }
-            if let Some(pw) = password {
-                account.secret.password = pw;
+                data.username = un;
             }
             if let Some(fav) = favourite {
-                account.favourite = fav;
+                item.favourite = fav;
             }
             if let Some(t) = tags {
-                account.tags = t;
+                item.tags = t;
             }
             if let Some(c) = color {
-                account.color = c;
+                item.color = c;
             }
             if let Some(name) = display_name {
-                account.display_name = if name.is_empty() { None } else { Some(name) };
+                item.display_name = normalize(Some(name));
             }
             if let Some(email) = email {
-                account.email = if email.is_empty() { None } else { Some(email) };
+                data.email = normalize(Some(email));
             }
             if let Some(icon) = icon {
-                account.icon = if icon.is_empty() { None } else { Some(icon) };
+                item.icon = normalize(Some(icon));
             }
 
-            account.updated_at = Utc::now();
-            account.clone()
+            item.updated_at = Utc::now();
+            let view = account_from_item(item).expect("matched account kind");
+
+            if let Some(pw) = password {
+                let entry = secrets
+                    .iter_mut()
+                    .find(|s| s.item_id == account_id)
+                    .ok_or_else(|| {
+                        VaultError::Validation(format!(
+                            "Missing secret entry for item {account_id}"
+                        ))
+                    })?;
+                entry.set(SECRET_FIELD_PASSWORD, pw);
+            }
+
+            view
         };
 
         self.maybe_save(vault_id)?;
         Ok(updated)
     }
 
-    /// Delete a service account
+    /// Delete an account item (removes its secret entry too).
     pub fn delete_account(
         &mut self,
         vault_id: VaultId,
@@ -418,15 +497,41 @@ impl VaultManager {
     ) -> Result<(), VaultError> {
         {
             let vault = self.get_vault_mut(vault_id)?;
-            let exists = vault.accounts.iter().any(|a| a.id == account_id);
+            let exists = vault.items.iter().any(|i| i.id == account_id);
             if !exists {
                 return Err(VaultError::AccountNotFound(account_id.to_string()));
             }
-            vault.accounts.retain(|a| a.id != account_id);
+            vault.items.retain(|i| i.id != account_id);
+            vault.secrets.retain(|s| s.item_id != account_id);
         }
 
         self.maybe_save(vault_id)?;
         Ok(())
+    }
+
+    /// Returns a specific secret field value for an item.
+    pub fn get_item_secret(
+        &self,
+        vault_id: VaultId,
+        item_id: ItemId,
+        field_key: &str,
+    ) -> Result<String, VaultError> {
+        let vault = self.get_vault(vault_id)?;
+
+        let entry = vault
+            .secrets
+            .iter()
+            .find(|s| s.item_id == item_id)
+            .ok_or(VaultError::AccountNotFound(item_id.to_string()))?;
+
+        entry
+            .get(field_key)
+            .ok_or_else(|| {
+                VaultError::Validation(format!(
+                    "No secret field '{field_key}' on item {item_id}"
+                ))
+            })
+            .map(str::to_string)
     }
 
     /// Returns only the password string for a specific account
@@ -435,15 +540,7 @@ impl VaultManager {
         vault_id: VaultId,
         account_id: AccountId,
     ) -> Result<String, VaultError> {
-        let vault = self.get_vault(vault_id)?;
-
-        let account = vault
-            .accounts
-            .iter()
-            .find(|a| a.id == account_id)
-            .ok_or(VaultError::AccountNotFound(account_id.to_string()))?;
-
-        Ok(account.secret.password.clone())
+        self.get_item_secret(vault_id, account_id, SECRET_FIELD_PASSWORD)
     }
 
     /// Get the strength of a given accounts password
@@ -452,29 +549,24 @@ impl VaultManager {
         vault_id: VaultId,
         account_id: AccountId,
     ) -> Result<Entropy, VaultError> {
-        let vault = self.get_vault(vault_id)?;
-
-        let account = vault
-            .accounts
-            .iter()
-            .find(|a| a.id == account_id)
-            .ok_or(VaultError::AccountNotFound(account_id.to_string()))?;
-
-        Ok(zxcvbn(&account.secret.password, &[]))
+        let pw = self.get_secret(vault_id, account_id)?;
+        Ok(zxcvbn(&pw, &[]))
     }
 
-    /// Retrieve a specific account by id (searches all unlocked vaults)
+    /// Retrieve a specific account item by id (searches all unlocked vaults)
     pub fn get_account_by_id(&self, account_id: AccountId) -> Result<SafeAccount, VaultError> {
-        let account = self
-            .unlocked_vaults
-            .values()
-            .find_map(|uv| uv.vault.accounts.iter().find(|a| a.id == account_id))
-            .ok_or_else(|| VaultError::AccountNotFound(account_id.to_string()))?;
+        for uv in self.unlocked_vaults.values() {
+            if let Some(item) = uv.vault.items.iter().find(|i| i.id == account_id) {
+                if let Some(account) = crate::account_from_item(item) {
+                    return Ok(account);
+                }
+            }
+        }
 
-        Ok(account.into_safe())
+        Err(VaultError::AccountNotFound(account_id.to_string()))
     }
 
-    /// Retrieves accounts across one or all vaults, applying filters.
+    /// Retrieves account items across one or all vaults, applying filters.
     pub fn get_all_accounts(&self, filter: AccountFilter) -> Result<Vec<SafeAccount>, VaultError> {
         let mut results: Vec<SafeAccount> = Vec::new();
 
@@ -492,18 +584,23 @@ impl VaultManager {
 
         // Iterate and filter
         for vault in vaults_to_scan {
-            for account in &vault.accounts {
+            for item in &vault.items {
+                let Some(view) = crate::account_from_item(item) else {
+                    // Non-account items are not part of the account surface
+                    continue;
+                };
+
                 // Favourite Filter
                 if let Some(true) = filter.favourite_only {
-                    if !account.favourite {
+                    if !item.favourite {
                         continue;
                     }
                 }
 
-                // Tag Filter (Account must have AT LEAST ONE matching tag)
+                // Tag Filter (Item must have AT LEAST ONE matching tag)
                 if let Some(ref filter_tags) = filter.tags {
                     if !filter_tags.is_empty() {
-                        let has_match = filter_tags.iter().any(|ft| account.tags.contains(ft));
+                        let has_match = filter_tags.iter().any(|ft| item.tags.contains(ft));
                         if !has_match {
                             continue;
                         }
@@ -512,12 +609,12 @@ impl VaultManager {
 
                 // Search Query Filter
                 if let Some(ref q) = query {
-                    let matches_username = account.username.to_lowercase().contains(q);
-                    let matches_display = account
+                    let matches_username = view.username.to_lowercase().contains(q);
+                    let matches_display = view
                         .display_name
                         .as_ref()
                         .map_or(false, |dn| dn.to_lowercase().contains(q));
-                    let matches_email = account
+                    let matches_email = view
                         .email
                         .as_ref()
                         .map_or(false, |em| em.to_lowercase().contains(q));
@@ -527,7 +624,7 @@ impl VaultManager {
                     }
                 }
 
-                results.push(account.into_safe());
+                results.push(view);
             }
         }
 
@@ -562,6 +659,207 @@ mod tests {
     const MASTER_PW: &str = "SuperSecret123";
     const KEY: [u8; 32] = [0u8; 32];
 
+    // ============ Legacy (v1) vault file fixtures ============
+
+    use chrono::{DateTime, Utc};
+
+    fn fixture_time(secs: i64) -> DateTime<Utc> {
+        DateTime::from_timestamp(secs, 0).unwrap()
+    }
+
+    /// A full-featured and a minimal legacy account, as the pre-versioning
+    /// app would have written them.
+    fn legacy_accounts() -> (Vec<crate::Account>, Uuid, Uuid) {
+        let vault_id = Uuid::new_v4();
+        let full_id = Uuid::new_v4();
+        let minimal_id = Uuid::new_v4();
+
+        let accounts = vec![
+            crate::Account {
+                id: full_id,
+                vault_id,
+                display_name: Some("Old Account".to_string()),
+                username: "legacy_user".to_string(),
+                email: Some("legacy@example.com".to_string()),
+                favourite: true,
+                tags: vec!["legacy".to_string()],
+                icon: Some("github".to_string()),
+                color: "#6240BF".to_string(),
+                created_at: fixture_time(1_700_000_000),
+                updated_at: fixture_time(1_701_000_000),
+                secret: crate::AccountSecret {
+                    id: Uuid::new_v4(),
+                    password: "legacy_pw_full".to_string(),
+                },
+            },
+            crate::Account {
+                id: minimal_id,
+                vault_id,
+                display_name: None,
+                username: "second".to_string(),
+                email: None,
+                favourite: false,
+                tags: Vec::new(),
+                icon: None,
+                color: String::new(),
+                created_at: fixture_time(1_700_000_500),
+                updated_at: fixture_time(1_700_000_500),
+                secret: crate::AccountSecret {
+                    id: Uuid::new_v4(),
+                    password: "legacy_pw_minimal".to_string(),
+                },
+            },
+        ];
+
+        (accounts, vault_id, full_id)
+    }
+
+    /// Writes a legacy (v1, accounts-only) vault file, exactly as versions
+    /// before schema versioning did.
+    fn write_legacy_vault_file(temp_dir: &PathBuf, vault_id: Uuid, accounts: &[crate::Account]) {
+        let legacy = crate::LegacyVault {
+            id: vault_id,
+            name: "Legacy Vault".to_string(),
+            color: "#6240BF".to_string(),
+            accounts: accounts.to_vec(),
+        };
+
+        let json = serde_json::to_vec(&legacy).unwrap();
+        let salt = [7u8; 32];
+        let master_key = derive_master_key(MASTER_PW, &KEY, &salt).unwrap();
+        let encrypted = encrypt_with_key(&master_key, &salt, &json).unwrap();
+
+        let vaults_dir = temp_dir.join("vaults");
+        std::fs::create_dir_all(&vaults_dir).unwrap();
+        std::fs::write(vaults_dir.join(format!("{}.vault", vault_id)), encrypted).unwrap();
+    }
+
+    #[test]
+    fn test_migrates_legacy_vault_on_unlock() {
+        let temp_dir = setup();
+        let (accounts, vault_id, full_id) = legacy_accounts();
+        write_legacy_vault_file(&temp_dir, vault_id, &accounts);
+
+        let backup_path = temp_dir
+            .join("vaults")
+            .join(format!("{}.vault.OLD", vault_id));
+
+        let mut manager = VaultManager::new(temp_dir.clone()).unwrap();
+        let migrated = manager.unlock_vault(vault_id, MASTER_PW, &KEY).unwrap();
+
+        // Vault is stamped with the current schema version
+        assert_eq!(migrated.schema_version, CURRENT_SCHEMA_VERSION);
+        assert!(manager.is_dirty(vault_id), "Migrated vault must be flagged dirty");
+
+        // Every account migrated with identical metadata
+        let all = manager.get_all_accounts(AccountFilter::default()).unwrap();
+        assert_eq!(all.len(), 2);
+        for legacy in &accounts {
+            let view = all.iter().find(|a| a.id == legacy.id).unwrap();
+            assert_eq!(view.username, legacy.username);
+            assert_eq!(view.email, legacy.email);
+            assert_eq!(view.display_name, legacy.display_name);
+            assert_eq!(view.favourite, legacy.favourite);
+            assert_eq!(view.tags, legacy.tags);
+            assert_eq!(view.icon, legacy.icon);
+            assert_eq!(view.color, legacy.color);
+            assert_eq!(view.created_at, legacy.created_at);
+            assert_eq!(view.updated_at, legacy.updated_at);
+        }
+
+        // Passwords come through the existing secret-fetch path
+        assert_eq!(
+            manager.get_secret(vault_id, full_id).unwrap(),
+            "legacy_pw_full"
+        );
+
+        // Raw unmodified file is backed up beside the vault
+        assert!(backup_path.exists());
+        let raw = std::fs::read(temp_dir.join("vaults").join(format!("{}.vault", vault_id))).unwrap();
+        assert_eq!(
+            std::fs::read(&backup_path).unwrap(),
+            raw,
+            "Backup must capture the pre-migration file"
+        );
+
+        // Persist the migrated format, then re-unlock: no second migration
+        manager.flush_vault(vault_id).unwrap();
+        assert!(!manager.is_dirty(vault_id));
+        let backup_before = std::fs::read(&backup_path).unwrap();
+
+        manager.lock_vault(Some(vault_id));
+        let re_unlocked = manager.unlock_vault(vault_id, MASTER_PW, &KEY).unwrap();
+
+        assert_eq!(re_unlocked.schema_version, CURRENT_SCHEMA_VERSION);
+        assert!(!manager.is_dirty(vault_id), "v2 unlock must not re-migrate");
+        assert_eq!(
+            std::fs::read(&backup_path).unwrap(),
+            backup_before,
+            "Backup must not be rewritten on plain unlocks"
+        );
+        assert_eq!(
+            manager.get_secret(vault_id, full_id).unwrap(),
+            "legacy_pw_full"
+        );
+    }
+
+    #[test]
+    fn test_migration_overwrites_existing_backup() {
+        let temp_dir = setup();
+        let (accounts, vault_id, _) = legacy_accounts();
+        write_legacy_vault_file(&temp_dir, vault_id, &accounts);
+
+        let vault_path = temp_dir.join("vaults").join(format!("{}.vault", vault_id));
+        let backup_path = temp_dir
+            .join("vaults")
+            .join(format!("{}.vault.OLD", vault_id));
+
+        // A stale backup from an earlier migration must be overwritten
+        std::fs::write(&backup_path, b"stale-backup").unwrap();
+        let raw_before = std::fs::read(&vault_path).unwrap();
+
+        let mut manager = VaultManager::new(temp_dir.clone()).unwrap();
+        manager.unlock_vault(vault_id, MASTER_PW, &KEY).unwrap();
+
+        assert_eq!(
+            std::fs::read(&backup_path).unwrap(),
+            raw_before,
+            "Backup must hold the pre-migration file, not a stale copy"
+        );
+    }
+
+    #[test]
+    fn test_corrupt_vault_fails_unlock_without_modification() {
+        let temp_dir = setup();
+        let vault_id = Uuid::new_v4();
+
+        // Write an encrypted file whose plaintext is neither vault format
+        let json = b"definitely not a vault schema";
+        let salt = [7u8; 32];
+        let master_key = derive_master_key(MASTER_PW, &KEY, &salt).unwrap();
+        let encrypted = encrypt_with_key(&master_key, &salt, json).unwrap();
+        let vaults_dir = temp_dir.join("vaults");
+        std::fs::create_dir_all(&vaults_dir).unwrap();
+        let vault_path = vaults_dir.join(format!("{}.vault", vault_id));
+        std::fs::write(&vault_path, &encrypted).unwrap();
+        let original = std::fs::read(&vault_path).unwrap();
+
+        let mut manager = VaultManager::new(temp_dir.clone()).unwrap();
+        let result = manager.unlock_vault(vault_id, MASTER_PW, &KEY);
+
+        match result {
+            Err(VaultError::Serialization(_)) => {}
+            other => panic!("Expected serialization error, got: {:?}", other.map(|v| v.id)),
+        }
+
+        // Original file untouched, no backup created
+        assert_eq!(std::fs::read(&vault_path).unwrap(), original);
+        assert!(!temp_dir
+            .join("vaults")
+            .join(format!("{}.vault.OLD", vault_id))
+            .exists());
+    }
+
     #[test]
     fn test_create_and_unlock() {
         let temp_dir = setup();
@@ -577,6 +875,7 @@ mod tests {
             .unwrap();
         assert_eq!(created.name, "My Vault");
         assert_eq!(created.color, "#6240BF");
+        assert_eq!(created.schema_version, CURRENT_SCHEMA_VERSION);
 
         manager.lock_vault(Some(created.id));
         assert!(!manager.is_vault_unlocked(created.id));
@@ -584,6 +883,10 @@ mod tests {
         let unlocked = manager.unlock_vault(created.id, MASTER_PW, &KEY).unwrap();
         assert_eq!(unlocked.id, created.id);
         assert!(manager.is_vault_unlocked(created.id));
+
+        // A fresh vault must contain no items and should not need migration
+        assert_eq!(unlocked.items.len(), 0);
+        assert_eq!(unlocked.secrets.len(), 0);
     }
 
     #[test]
@@ -609,12 +912,13 @@ mod tests {
         assert_eq!(account.display_name, Some("octocat pass".to_string()));
         assert_eq!(account.username, "octocat");
         assert_eq!(account.email, None);
-        assert_eq!(account.secret.password, "secret123");
+        assert_eq!(manager.get_secret(vault.id, account.id).unwrap(), "secret123");
         assert_eq!(account.favourite, false);
         assert_eq!(account.tags.len(), 0);
 
         let vault = manager.get_vault(vault.id).unwrap();
-        assert_eq!(vault.accounts.len(), 1);
+        assert_eq!(vault.items.len(), 1);
+        assert_eq!(vault.secrets.len(), 1);
     }
 
     #[test]
@@ -654,7 +958,7 @@ mod tests {
 
         assert_eq!(updated.username, "octocat");
         assert_eq!(updated.email, Some("hello@example.com".to_string()));
-        assert_eq!(updated.secret.password, "new_pass");
+        assert_eq!(manager.get_secret(vault.id, updated.id).unwrap(), "new_pass");
         assert_eq!(updated.favourite, true);
         assert_eq!(updated.tags, vec!["social".to_string(), "work".to_string()]);
     }
@@ -682,7 +986,8 @@ mod tests {
         manager.delete_account(vault.id, account.id).unwrap();
 
         let vault = manager.get_vault(vault.id).unwrap();
-        assert_eq!(vault.accounts.len(), 0);
+        assert_eq!(vault.items.len(), 0);
+        assert_eq!(vault.secrets.len(), 0);
     }
 
     #[test]
@@ -716,7 +1021,7 @@ mod tests {
         manager.lock_vault(Some(vault.id));
         let re_unlocked = manager.unlock_vault(vault.id, MASTER_PW, &KEY).unwrap();
         assert_eq!(
-            re_unlocked.accounts.len(),
+            re_unlocked.items.len(),
             0,
             "Batch changes were not flushed"
         );
@@ -748,7 +1053,7 @@ mod tests {
         manager.lock_vault(Some(vault.id));
         let re_unlocked = manager.unlock_vault(vault.id, MASTER_PW, &KEY).unwrap();
         assert_eq!(
-            re_unlocked.accounts.len(),
+            re_unlocked.items.len(),
             3,
             "Flushed changes were not persisted"
         );
@@ -801,8 +1106,8 @@ mod tests {
         manager.lock_vault(None);
         let v1 = manager.unlock_vault(vault1.id, MASTER_PW, &KEY).unwrap();
         let v2 = manager.unlock_vault(vault2.id, MASTER_PW, &KEY).unwrap();
-        assert_eq!(v1.accounts.len(), 1);
-        assert_eq!(v2.accounts.len(), 1);
+        assert_eq!(v1.items.len(), 1);
+        assert_eq!(v2.items.len(), 1);
     }
 
     #[test]
@@ -833,6 +1138,6 @@ mod tests {
         // Lock and re-unlock to verify persistence
         manager.lock_vault(Some(vault.id));
         let re_unlocked = manager.unlock_vault(vault.id, MASTER_PW, &KEY).unwrap();
-        assert_eq!(re_unlocked.accounts.len(), 1);
+        assert_eq!(re_unlocked.items.len(), 1);
     }
 }
