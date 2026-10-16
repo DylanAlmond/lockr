@@ -8,7 +8,7 @@ use zxcvbn::{zxcvbn, Entropy};
 
 use crate::user_manager::UserManager;
 use crate::vault_manager::VaultManager;
-use crate::{AccountFilter, IntoSafe, SafeAccount, SafeVault, User, UserId};
+use crate::{AccountFilter, IntoSafe, NewItemData, SafeAccount, SafeItem, SafeVault, User, UserId};
 
 pub struct ManagerState {
     pub vault_manager: VaultManager,
@@ -467,4 +467,96 @@ pub fn is_vault_dirty(state: AppState, vault_id: String) -> Result<bool, String>
     let state = state.lock().map_err(|e| e.to_string())?;
     let id = Uuid::parse_str(&vault_id).map_err(|e| e.to_string())?;
     Ok(state.vault_manager.is_dirty(id))
+}
+
+// ============ Items (generic surface, kinds other than account) ============
+
+#[tauri::command]
+pub fn add_item(
+    state: AppState,
+    vault_id: String,
+    display_name: Option<String>,
+    icon: Option<String>,
+    data: NewItemData,
+) -> Result<SafeItem, String> {
+    let mut state = state.lock().map_err(|e| e.to_string())?;
+    let id = Uuid::parse_str(&vault_id).map_err(|e| e.to_string())?;
+
+    state
+        .vault_manager
+        .add_item(id, display_name, icon, data)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn update_item(
+    state: AppState,
+    vault_id: String,
+    item_id: String,
+    display_name: Option<String>,
+    icon: Option<String>,
+    favourite: Option<bool>,
+    tags: Option<Vec<String>>,
+    color: Option<String>,
+    data: Option<NewItemData>,
+) -> Result<SafeItem, String> {
+    let mut state = state.lock().map_err(|e| e.to_string())?;
+    let vid = Uuid::parse_str(&vault_id).map_err(|e| e.to_string())?;
+    let iid = Uuid::parse_str(&item_id).map_err(|e| e.to_string())?;
+
+    state
+        .vault_manager
+        .update_item(vid, iid, display_name, icon, favourite, tags, color, data)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn delete_item(state: AppState, vault_id: String, item_id: String) -> Result<(), String> {
+    let mut state = state.lock().map_err(|e| e.to_string())?;
+    let vid = Uuid::parse_str(&vault_id).map_err(|e| e.to_string())?;
+    let iid = Uuid::parse_str(&item_id).map_err(|e| e.to_string())?;
+
+    state
+        .vault_manager
+        .delete_item(vid, iid)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn move_item(
+    state: AppState,
+    vault_id: String,
+    item_id: String,
+    target_vault_id: String,
+) -> Result<SafeItem, String> {
+    let mut state = state.lock().map_err(|e| e.to_string())?;
+    let vid = Uuid::parse_str(&vault_id).map_err(|e| e.to_string())?;
+    let iid = Uuid::parse_str(&item_id).map_err(|e| e.to_string())?;
+    let tid = Uuid::parse_str(&target_vault_id).map_err(|e| e.to_string())?;
+
+    state
+        .vault_manager
+        .move_item(vid, iid, tid)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn get_item_by_id(state: AppState, item_id: String) -> Result<SafeItem, String> {
+    let state = state.lock().map_err(|e| e.to_string())?;
+    let id = Uuid::parse_str(&item_id).map_err(|e| e.to_string())?;
+
+    state
+        .vault_manager
+        .get_item_by_id(id)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn get_all_items(state: AppState, filter: AccountFilter) -> Result<Vec<SafeItem>, String> {
+    let state = state.lock().map_err(|e| e.to_string())?;
+
+    state
+        .vault_manager
+        .get_all_items(filter)
+        .map_err(|e| e.to_string())
 }

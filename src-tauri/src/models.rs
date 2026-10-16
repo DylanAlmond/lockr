@@ -78,6 +78,49 @@ pub struct VaultItem {
     pub kind: ItemKind,
 }
 
+impl VaultItem {
+    /// Lowercased text of the kind's searchable fields, used by list search.
+    pub fn search_text(&self) -> Vec<String> {
+        let mut texts = vec![self.display_name.clone().unwrap_or_default().to_lowercase()];
+        match &self.kind {
+            ItemKind::Account(data) => {
+                texts.push(data.username.to_lowercase());
+                if let Some(email) = &data.email {
+                    texts.push(email.to_lowercase());
+                }
+            }
+            ItemKind::Note(data) => {
+                if let Some(title) = &data.title {
+                    texts.push(title.to_lowercase());
+                }
+                texts.push(data.body.to_lowercase());
+            }
+            ItemKind::Card(data) => {
+                texts.push(data.cardholder_name.to_lowercase());
+            }
+            ItemKind::Identity(data) => {
+                texts.push(data.full_name.to_lowercase());
+                for field in [
+                    &data.email,
+                    &data.phone,
+                    &data.address_line1,
+                    &data.address_line2,
+                    &data.city,
+                    &data.postal_code,
+                    &data.country,
+                ] {
+                    if let Some(value) = field {
+                        texts.push(value.to_lowercase());
+                    }
+                }
+            }
+        }
+
+        texts.retain(|text| !text.is_empty());
+        texts
+    }
+}
+
 /// The kind of a [`VaultItem`] and its item-specific data.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -98,6 +141,16 @@ impl ItemKind {
     }
 }
 
+/// Kind-specific payload for creating or updating a non-account item.
+/// Account items keep their dedicated (password-carrying) command surface.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum NewItemData {
+    Note(NoteData),
+    Card(CardData),
+    Identity(IdentityData),
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AccountData {
     pub username: String,
@@ -113,7 +166,6 @@ pub struct CardData {
     pub brand: Option<String>,
 }
 
-#[allow(dead_code)] // Note items are wired up in ticket #23
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NoteData {
     pub title: Option<String>,
@@ -141,7 +193,8 @@ pub struct SecretField {
 }
 
 /// All secret fields of an item. Stored in the vault blob but never sent to
-/// the UI except through the on-demand secret command.
+/// the UI except through the on-demand secret command. `Debug` is implemented
+/// manually (keys only, never values).
 #[derive(Clone, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
 pub struct ItemSecrets {
     #[zeroize(skip)]
@@ -332,6 +385,33 @@ pub struct SafeAccount {
     pub updated_at: DateTime<Utc>,
 }
 
+/// The Safe View of a note item: no secret-capable fields exist on notes.
+#[derive(Debug, Clone, Serialize)]
+pub struct SafeNote {
+    pub id: ItemId,
+    pub vault_id: VaultId,
+
+    pub display_name: Option<String>,
+    pub favourite: bool,
+    pub tags: Vec<String>,
+    pub icon: Option<String>,
+    pub color: String,
+
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+
+    pub title: Option<String>,
+    pub body: String,
+}
+
+/// The Safe View of any item, tagged by kind for the frontend.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SafeItem {
+    Account(SafeAccount),
+    Note(SafeNote),
+}
+
 /// The Safe View of an item: only account-kind items have an account view.
 /// Returns `None` for every other kind.
 pub fn account_from_item(item: &VaultItem) -> Option<SafeAccount> {
@@ -352,6 +432,28 @@ pub fn account_from_item(item: &VaultItem) -> Option<SafeAccount> {
         created_at: item.created_at,
         updated_at: item.updated_at,
     })
+}
+
+/// The Safe View of an item of any sendable kind: `None` while a kind's safe
+/// view isn't wired up yet (items of those kinds can't exist in a vault yet).
+pub fn item_to_safe(item: &VaultItem) -> Option<SafeItem> {
+    match &item.kind {
+        ItemKind::Account(_) => account_from_item(item).map(SafeItem::Account),
+        ItemKind::Note(data) => Some(SafeItem::Note(SafeNote {
+            id: item.id,
+            vault_id: item.vault_id,
+            display_name: item.display_name.clone(),
+            favourite: item.favourite,
+            tags: item.tags.clone(),
+            icon: item.icon.clone(),
+            color: item.color.clone(),
+            created_at: item.created_at,
+            updated_at: item.updated_at,
+            title: data.title.clone(),
+            body: data.body.clone(),
+        })),
+        _ => None,
+    }
 }
 
 /// Converts our internal DB models to safe frontend models

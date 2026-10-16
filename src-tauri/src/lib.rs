@@ -69,6 +69,13 @@ pub fn run() {
             commands::delete_account,
             commands::get_secret,
             commands::get_account_password_strength,
+            // Items (generic surface)
+            commands::add_item,
+            commands::update_item,
+            commands::delete_item,
+            commands::move_item,
+            commands::get_item_by_id,
+            commands::get_all_items,
             // Util
             commands::get_password_strength,
             commands::flush_vault,

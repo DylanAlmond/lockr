@@ -1,9 +1,26 @@
 import { ref } from 'vue';
-import { Account, AccountFilter, Entropy, Vault } from '../types';
+import { Account, AccountFilter, Entropy, SafeItem, Vault } from '../types';
 import { invoke } from '@tauri-apps/api/core';
 
 const isLoading = ref(false);
 const error = ref<string | null>(null);
+
+export interface CreateItemProps {
+  vaultId: string;
+  displayName?: string | null;
+  icon?: string | null;
+  /** Note wire payload: internally tagged like the backend's NewItemData */
+  data: { kind: 'note'; title: string | null; body: string };
+}
+
+export interface UpdateItemProps {
+  displayName?: string | null;
+  icon?: string | null;
+  favourite?: boolean | null;
+  tags?: string[] | null;
+  color?: string | null;
+  data?: { kind: 'note'; title: string | null; body: string };
+}
 
 export interface CreateAccountProps {
   vaultId: string;
@@ -96,6 +113,85 @@ export function useVault() {
     } catch (e) {
       error.value = String(e);
       return [];
+    }
+  }
+
+  // ============ Items (generic surface) ============
+
+  async function getItembyId(itemId: string): Promise<SafeItem | null> {
+    try {
+      return await invoke<SafeItem>('get_item_by_id', { itemId });
+    } catch (e) {
+      error.value = String(e);
+      return null;
+    }
+  }
+
+  async function getAllItems(filter?: AccountFilter): Promise<SafeItem[]> {
+    try {
+      return await invoke<SafeItem[]>('get_all_items', { filter: filter || {} });
+    } catch (e) {
+      error.value = String(e);
+      return [];
+    }
+  }
+
+  async function addItem(props: CreateItemProps): Promise<SafeItem | null> {
+    try {
+      return await invoke<SafeItem>('add_item', {
+        vaultId: props.vaultId,
+        displayName: props.displayName || null,
+        icon: props.icon || null,
+        data: props.data
+      });
+    } catch (e) {
+      error.value = String(e);
+      return null;
+    }
+  }
+
+  async function updateItem(
+    vaultId: string,
+    itemId: string,
+    data: UpdateItemProps
+  ): Promise<SafeItem | null> {
+    try {
+      return await invoke<SafeItem>('update_item', {
+        vaultId,
+        itemId,
+        displayName: data.displayName ?? undefined,
+        icon: data.icon ?? undefined,
+        favourite: data.favourite ?? undefined,
+        tags: data.tags ?? undefined,
+        color: data.color ?? undefined,
+        data: data.data ?? undefined
+      });
+    } catch (e) {
+      error.value = String(e);
+      return null;
+    }
+  }
+
+  async function deleteItem(vaultId: string, itemId: string): Promise<boolean> {
+    try {
+      await invoke('delete_item', { vaultId, itemId });
+      return true;
+    } catch (e) {
+      error.value = String(e);
+      return false;
+    }
+  }
+
+  async function moveItem(
+    vaultId: string,
+    itemId: string,
+    targetVaultId: string
+  ): Promise<SafeItem | null> {
+    try {
+      return await invoke<SafeItem>('move_item', { vaultId, itemId, targetVaultId });
+    } catch (e) {
+      error.value = String(e);
+      return null;
     }
   }
 
@@ -257,6 +353,14 @@ export function useVault() {
     getSecret,
     getAccountPasswordStrength,
     updateAccountPassword,
+
+    // Items (generic surface)
+    getItembyId,
+    getAllItems,
+    addItem,
+    updateItem,
+    deleteItem,
+    moveItem,
 
     // Util
     getPasswordStrength,

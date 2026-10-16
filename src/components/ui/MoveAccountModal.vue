@@ -8,7 +8,7 @@ import useAppStore from '../../stores/appStore.ts';
 import Select from './Select.vue';
 
 const { getUnlockedVaults } = useVault();
-const { state, moveActiveAccount } = useAppStore();
+const { state, moveActiveItem } = useAppStore();
 const route = useRoute();
 const router = useRouter();
 
@@ -21,8 +21,21 @@ const vaults = ref<Vault[]>([]);
 const selectedVaultId = ref('');
 const isLoading = ref(false);
 
+// Works for the active item of any kind (accounts and notes)
+const activeItem = computed(() => state.activeItem);
+const itemLabel = computed(
+  () =>
+    activeItem.value?.display_name ||
+    (activeItem.value?.kind === 'account'
+      ? activeItem.value.username
+      : activeItem.value?.kind === 'note'
+        ? (activeItem.value.title || undefined)
+        : undefined)
+);
+const activeVaultId = computed(() => activeItem.value?.vault_id);
+
 const otherVaults = computed(() =>
-  vaults.value.filter((v) => v.id !== state.activeAccount?.vault_id)
+  vaults.value.filter((v) => v.id !== activeVaultId.value)
 );
 
 async function handleConfirm() {
@@ -30,15 +43,15 @@ async function handleConfirm() {
 
   isLoading.value = true;
   try {
-    const movedAccount = await moveActiveAccount(selectedVaultId.value);
+    const moved = await moveActiveItem(selectedVaultId.value);
 
-    if (movedAccount) {
+    if (moved) {
       await router.replace({
         name: route.name as string,
         params: {
           ...route.params,
-          vaultId: movedAccount.vault_id,
-          accountId: movedAccount.id,
+          vaultId: moved.vault_id,
+          accountId: moved.id,
           mode: undefined
         },
         query: route.query
@@ -66,11 +79,7 @@ onMounted(async () => {
       <main>
         <p class="description">
           Choose a vault to move
-          {{
-            state.activeAccount?.display_name
-              ? `"${state.activeAccount.display_name}"`
-              : 'this account'
-          }}
+          {{ itemLabel ? `"${itemLabel}"` : 'this item' }}
           to.
         </p>
 
@@ -87,7 +96,7 @@ onMounted(async () => {
         </div>
 
         <p v-if="!otherVaults.length" class="empty-hint">
-          No other unlocked vaults available to move this account to.
+          No other unlocked vaults available to move this item to.
         </p>
       </main>
 

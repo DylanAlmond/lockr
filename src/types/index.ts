@@ -41,6 +41,26 @@ export interface AccountFilter {
   search_query?: string | null;
 }
 
+export interface NoteItem {
+  id: string;
+  vault_id: string;
+
+  display_name: string | null;
+  favourite: boolean;
+  tags: string[];
+  icon: string | null;
+  color: string;
+
+  created_at: string;
+  updated_at: string;
+
+  title: string | null;
+  body: string;
+}
+
+/** Items sent to the UI, tagged by kind. Safe View: no secret fields. */
+export type SafeItem = ({ kind: 'account' } & Account) | ({ kind: 'note' } & NoteItem);
+
 export interface Entropy {
   /** Estimated guesses needed to crack the password */
   guesses: number;

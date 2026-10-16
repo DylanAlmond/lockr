@@ -18,7 +18,7 @@ import { useSearch } from '../../composables/useSearch.ts';
 import Dropdown, { DropdownItem } from '../ui/Dropdown.vue';
 import { ref, computed, markRaw, watch } from 'vue';
 import { useModal } from '../../composables/useModal.ts';
-import NewAccountModal from '../ui/NewAccountModal.vue';
+import NewItemModal from '../ui/NewItemModal.vue';
 import VaultModal from '../ui/VaultModal.vue';
 
 const route = useRoute();
@@ -60,12 +60,11 @@ const createMenuItems = ref<DropdownItem[]>([
     }
   },
   {
-    label: 'New Account',
+    label: 'New Item',
     icon: KeyRound,
     onSelect: () => {
-      openModal(NewAccountModal, {
-        onClose: () => {},
-        onConfirm: () => {}
+      openModal(NewItemModal, {
+        onClose: () => {}
       });
     }
   }

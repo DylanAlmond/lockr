@@ -3,25 +3,32 @@ import { useRoute } from 'vue-router';
 import { computed, watch } from 'vue';
 import AccountDetails from './AccountDetails.vue';
 import AccountEdit from './AccountEdit.vue';
+import NoteDetails from './NoteDetails.vue';
+import NoteEdit from './NoteEdit.vue';
 import useAppStore from '../../stores/appStore.ts';
 
 const route = useRoute();
-const { setActiveAccount } = useAppStore();
+const { state, setActiveAccount, setActiveItem } = useAppStore();
 
-const accountId = computed(() => route.params.accountId as string | undefined);
+const itemId = computed(() => route.params.accountId as string | undefined);
 const mode = computed(() => route.params.mode as string | undefined);
 
-const isCreate = computed(() => accountId.value === 'create' || mode.value === 'create');
+const isCreate = computed(() => itemId.value === 'create' || mode.value === 'create');
 const isEdit = computed(() => mode.value === 'edit' && !isCreate.value);
 
+// True when the active item is a note kind (panel switches to note views)
+const isNote = computed(() => state.activeItem?.kind === 'note');
+
 watch(
-  accountId,
+  itemId,
   (id) => {
-    // Only fetch the account if we are viewing or editing an existing one
+    // Fetch both surfaces for the id: the generic item view and (for
+    // accounts) the account view. Whichever kind matches is used.
     if (id && !isCreate.value) {
+      setActiveItem(id);
       setActiveAccount(id);
     } else {
-      // Clear active account if we are in "create" mode or no account is selected
+      setActiveItem(null);
       setActiveAccount(null);
     }
   },
@@ -30,18 +37,22 @@ watch(
 </script>
 
 <template>
-  <!-- 
-    AccountEdit handles both Create and Edit natively. 
-    It can check `isCreate` or if `state.activeAccount` is null to know it's creating a new item.
+  <!--
+    Per-kind panels: notes get their own display/edit components;
+    accounts keep the existing flow until the full rename.
   -->
-  <AccountEdit v-if="isCreate || isEdit" />
+  <NoteEdit v-if="isNote && (isCreate || isEdit)" />
+
+  <NoteDetails v-else-if="isNote && itemId" />
+
+  <AccountEdit v-else-if="!isNote && (isCreate || isEdit)" />
 
   <!-- Details view -->
-  <AccountDetails v-else-if="accountId" />
+  <AccountDetails v-else-if="!isNote && itemId" />
 
-  <!-- Empty state when no account is clicked -->
+  <!-- Empty state when no item is clicked -->
   <div v-else class="empty-panel">
-    <p>Select an account to view details</p>
+    <p>Select an item to view details</p>
   </div>
 </template>
 

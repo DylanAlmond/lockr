@@ -1,33 +1,27 @@
 <script setup lang="ts">
-import { onMounted, ref, watch, computed } from 'vue';
+import { onMounted, ref, computed, watch } from 'vue';
 import { Entropy, Vault } from '../../types/index.ts';
 import Button from './Button.vue';
 import AccountField from './AccountField.vue';
 import { CreateAccountProps, useVault } from '../../composables/useVault.ts';
 import { PASSWORDSTRENGTHS } from '../../util/constants.ts';
-import { useRoute, useRouter } from 'vue-router';
 import { Eye, EyeOff } from '@lucide/vue';
-import useAppStore from '../../stores/appStore.ts';
 // import { fetchBrandLogoAsBase64 } from '../../util/imageUpload.ts';
 import Select from './Select.vue';
 import IconUpload from './IconUpload.vue';
 
-const route = useRoute();
-const router = useRouter();
-
 const { getPasswordStrength, getUnlockedVaults } = useVault();
-const { createNewAccount } = useAppStore();
 
 const vaults = ref<Vault[]>([]);
-// const isFetchingLogo = ref(false);
 const manuallySetIcon = ref(false);
-// let displayNameDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 
 const form = ref<CreateAccountProps>({
-  vaultId: (route.params.vaultId as string) || '',
+  vaultId: '',
   username: '',
   password: ''
 });
+
+const props = defineProps<{ defaultVaultId?: string | null }>();
 
 const passwordEntropy = ref<Entropy | null>(null);
 const showPassword = ref(false);
@@ -37,55 +31,24 @@ const displayInitial = computed(() => {
 });
 
 const emit = defineEmits<{
+  (e: 'submit', data: CreateAccountProps): void;
   (e: 'close'): void;
-  (e: 'confirm'): void;
 }>();
 
-// Auto-fetch logo when display name changes (if icon wasn't manually set)
-// watch(
-//   () => form.value.displayName,
-//   (displayName) => {
-//     if (!displayName || manuallySetIcon.value) {
-//       return;
-//     }
+// Pre-fill the in-context vault once vaults are known
+watch(
+  () => [vaults.value, props.defaultVaultId],
+  () => {
+    if (!form.value.vaultId && props.defaultVaultId) {
+      form.value.vaultId = props.defaultVaultId;
+    }
+  },
+  { immediate: true }
+);
 
-//     // Debounce the logo fetch to avoid too many requests
-//     if (displayNameDebounceTimer) {
-//       clearTimeout(displayNameDebounceTimer);
-//     }
-
-//     displayNameDebounceTimer = setTimeout(async () => {
-//       try {
-//         isFetchingLogo.value = true;
-//         const logo = await fetchBrandLogoAsBase64(displayName);
-//         if (logo) {
-//           form.value.icon = logo;
-//         }
-//       } catch (error) {
-//         console.error('Logo fetch error:', error);
-//       } finally {
-//         isFetchingLogo.value = false;
-//       }
-//     }, 500);
-//   }
-// );
-
-async function handleConfirm() {
-  if (!form.value) return;
-
-  const account = await createNewAccount(form.value);
-
-  if (account) {
-    router.push({
-      name: 'vault',
-      params: {
-        vaultId: account.vault_id,
-        accountId: account.id
-      }
-    });
-  }
-
-  emit('close');
+function handleSubmit() {
+  if (!form.value.vaultId || !form.value.username) return;
+  emit('submit', { ...form.value });
 }
 
 // Calculate password strength in real-time as the user types
@@ -107,7 +70,7 @@ onMounted(async () => {
 </script>
 
 <template>
-  <form @submit.prevent="handleConfirm">
+  <form @submit.prevent="handleSubmit">
     <article class="container">
       <header>
         <h2>New Account</h2>
@@ -285,4 +248,3 @@ footer {
   }
 }
 </style>
-
