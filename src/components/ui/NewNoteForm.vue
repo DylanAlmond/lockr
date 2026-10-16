@@ -105,8 +105,8 @@ onMounted(async () => {
               <h2>body</h2>
               <textarea
                 v-model="form.body"
-                class="field-input body-input"
-                rows="8"
+                class="body-input"
+                rows="10"
                 placeholder="Start typing…"
                 required
               ></textarea>
@@ -237,10 +237,17 @@ footer {
 }
 
 .body-input {
-  resize: vertical;
-  min-height: 8rem;
+  display: block;
+  width: 100%;
   font: inherit;
   color: var(--color-text);
+  background: transparent;
+  border: none;
+  outline: none;
+  padding: 0;
+  margin: 0;
+  resize: vertical;
+  min-height: 10rem;
   white-space: pre-wrap;
 }
 
