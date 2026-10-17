@@ -2,6 +2,7 @@
 import { ref, computed, onUnmounted, watch } from 'vue';
 import { Copy, Check } from '@lucide/vue';
 import Button from './Button.vue';
+import { ACCOUNT_PASSWORD_MASK } from '../../util/secrets.ts';
 
 type CopyableValue = string | null | (() => string | null | Promise<string | null>);
 
@@ -41,7 +42,7 @@ const hasCopyValue = computed(() => {
   if (props.input) return !!props.modelValue;
   if (typeof props.copyValue === 'function') return true;
   if (props.copyValue !== undefined && props.copyValue !== null) return !!props.copyValue;
-  return !!props.displayValue && props.displayValue !== '••••••••••••••••';
+  return !!props.displayValue && props.displayValue !== ACCOUNT_PASSWORD_MASK;
 });
 
 async function handleCopy() {
@@ -57,7 +58,7 @@ async function handleCopy() {
     valueToCopy = props.displayValue;
   }
 
-  if (!valueToCopy || valueToCopy === '••••••••••••••••') return;
+  if (!valueToCopy || valueToCopy === ACCOUNT_PASSWORD_MASK) return;
 
   try {
     await navigator.clipboard.writeText(valueToCopy);

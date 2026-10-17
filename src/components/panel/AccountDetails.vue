@@ -31,7 +31,12 @@ const parentVault = ref<Vault | null>(null);
 async function fetchPassword() {
   if (!state.activeAccount) return null;
   if (!password.value) {
-    password.value = await getSecret(state.activeAccount.vault_id, state.activeAccount.id);
+    try {
+      password.value = await getSecret(state.activeAccount.vault_id, state.activeAccount.id);
+    } catch {
+      // Fetch failed: leave the password unset so the masked field just
+      // shows 'No Value' — same soft behaviour as the pre-throwing lookup
+    }
   }
   return password.value;
 }

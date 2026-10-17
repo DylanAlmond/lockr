@@ -172,7 +172,9 @@ export function useVault() {
       return await invoke<string>('get_item_secret', { vaultId, itemId, fieldKey });
     } catch (e) {
       error.value = String(e);
-      return null;
+      // Errors propagate: null must mean 'no value exists' only, so
+      // callers can never mistake a failed fetch for an empty secret
+      throw e;
     }
   }
 
@@ -290,7 +292,9 @@ export function useVault() {
       return await invoke<string>('get_secret', { vaultId, accountId });
     } catch (e) {
       error.value = String(e);
-      return null;
+      // Errors propagate: null must mean 'no value exists' only, so
+      // callers can never mistake a failed fetch for an empty password
+      throw e;
     }
   }
 

@@ -12,7 +12,7 @@ import AlertModal from '../ui/AlertModal.vue';
 import MoveAccountModal from '../ui/MoveAccountModal.vue';
 import { useModal } from '../../composables/useModal.ts';
 import { useVault } from '../../composables/useVault.ts';
-import { cardSecretMask, SECRET_FIELD_CARD_NUMBER, SECRET_FIELD_PIN, SECRET_FIELD_SECURITY_CODE } from '../../util/secrets.ts';
+import { cardSecretMask, type CardSecretKey, SECRET_FIELD_CARD_NUMBER, SECRET_FIELD_PIN, SECRET_FIELD_SECURITY_CODE } from '../../util/secrets.ts';
 import { markRaw } from 'vue';
 import useAppStore from '../../stores/appStore.ts';
 import { Vault } from '../../types/index.ts';
@@ -33,7 +33,7 @@ const displayLabel = computed(
 const displayInitial = computed(() => displayLabel.value[0].toUpperCase());
 
 interface SecretFieldView {
-  key: string;
+  key: CardSecretKey;
   label: string;
   shown: boolean;
   /** Fetched on demand; never prefetched, never sent elsewhere */
@@ -48,7 +48,7 @@ function fetchSecretByKey(key: string): Promise<string | null> {
 }
 
 function makeSecretFields(): SecretFieldView[] {
-  const make = (key: string, label: string): SecretFieldView => ({
+  const make = (key: CardSecretKey, label: string): SecretFieldView => ({
     key,
     label,
     shown: false,
@@ -81,7 +81,12 @@ function secretDisplay(field: SecretFieldView): string | null {
 async function fetchSecret(field: SecretFieldView): Promise<string | null> {
   if (!card.value) return null;
   if (field.value === null) {
-    field.value = await getItemSecret(card.value.vault_id, card.value.id, field.key);
+    try {
+      field.value = await getItemSecret(card.value.vault_id, card.value.id, field.key);
+    } catch {
+      // Fetch failed: keep the value unset so the field stays masked /
+      // 'No Value' — same soft behaviour as the pre-throwing lookup
+    }
   }
   return field.value;
 }
@@ -159,8 +164,12 @@ const miscMenuItems = computed<DropdownItem[]>(() => [
   }
 ]);
 
-// Clear parent vault and revealed secrets when the active card changes
-// (parity with AccountDetails' password reset on any mutation)
+// Clear parent vault and revealed secrets when the active card changes —
+// keying on updated_at means metadata-only saves collapse reveals too.
+// Intended: this watch is the shared "item mutated" signal (same shape as
+// AccountDetails' password reset), and a post-save refresh is expected to
+// re-collapse. Cross-panel watch-signal unification is part of #27's
+// item-contract consolidation.
 watch(
   () => [state.activeItem?.id, state.activeItem?.vault_id, state.activeItem?.updated_at],
   async () => {

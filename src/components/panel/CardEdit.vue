@@ -9,7 +9,7 @@ import AccountField from '../ui/AccountField.vue';
 import IconUpload from '../ui/IconUpload.vue';
 import useAppStore from '../../stores/appStore.ts';
 import { useVault } from '../../composables/useVault.ts';
-import { cardSecretMask, cardNumberLast4, SECRET_FIELD_CARD_NUMBER } from '../../util/secrets.ts';
+import { cardNumberLast4, cardSecretMask, type CardSecretKey } from '../../util/secrets.ts';
 
 const route = useRoute();
 const router = useRouter();
@@ -45,7 +45,7 @@ const form = ref<CardForm>({
 // value's structural mask as its displayed content (card numbers keep
 // their real last 4), while focusing reveals the real value and blurring
 // re-masks. Input type is always text so the mask structure is visible.
-type SecretKey = 'card_number' | 'security_code' | 'pin';
+type SecretKey = CardSecretKey;
 
 const SECRET_KEYS: SecretKey[] = ['card_number', 'security_code', 'pin'];
 
@@ -69,17 +69,31 @@ const focusedSecret = ref<SecretKey | null>(null);
 
 async function onSecretFocus(key: SecretKey) {
   focusedSecret.value = key;
-  const state = secretStates.value[key];
-  if (state.fetched || !card.value) return;
+  const snap = secretStates.value[key];
+  if (snap.fetched || !card.value) return;
 
   // The fetch may outlive this card's context; discard if it changed
   const targetId = card.value.id;
-  const stored = await getItemSecret(card.value.vault_id, card.value.id, key);
+  // A failed fetch leaves the state unfetched (re-focusing retries it),
+  // which stays visually correct: placeholders and masks derive from the
+  // payload's secrets_present, never from the fetch result. Null hence
+  // means only 'no stored value', per the throwing lookups.
+  let stored: string | null;
+  try {
+    stored = await getItemSecret(card.value.vault_id, card.value.id, key);
+  } catch {
+    return;
+  }
   if (!card.value || card.value.id !== targetId) return;
 
   const fresh = secretStates.value[key];
   fresh.original = stored ?? ''; // '' == this key has no stored value
-  fresh.input = stored ?? '';
+  // Stamp the input only if the user hasn't typed while the fetch was in
+  // flight: typed values win over the (just-learned) stored value, and the
+  // save diff then holds against the now-known original
+  if (!fresh.input) {
+    fresh.input = stored ?? '';
+  }
   fresh.fetched = true;
 }
 
@@ -89,25 +103,19 @@ function onSecretBlur(key: SecretKey) {
   }
 }
 
-/** Structural mask derived from typed/stored content */
-function secretMask(key: SecretKey, content: string): string {
-  if (key === 'card_number') {
-    return cardSecretMask(SECRET_FIELD_CARD_NUMBER, true, cardNumberLast4(content)) ?? '';
-  }
-  return cardSecretMask(key, true, null) ?? '';
+/** Structural mask for a known-present card key. Card numbers keep the
+ * real last 4 digits when known; other keys mask fully (the last 4
+ * argument is ignored) — shorter-sourced callers pass their own last 4:
+ * typed content for the input mask, the stored payload's derived last 4
+ * before the field is fetched. */
+function cardMask(key: SecretKey, last4: string | null): string {
+  return cardSecretMask(key, true, last4) ?? '';
 }
 
-/** Structural mask from payload-only knowledge (before the field is
- * fetched): the card number keeps the derived last 4, others mask fully. */
-function payloadMask(key: SecretKey): string {
-  if (key === 'card_number') {
-    return cardSecretMask(
-      SECRET_FIELD_CARD_NUMBER,
-      true,
-      card.value?.card_number_last4 ?? null
-    ) ?? '';
-  }
-  return cardSecretMask(key, true, null) ?? '';
+/** Last 4 for the input mask: real digits derived from typed content for
+ * the card number, null (full mask) for every other key. */
+function inputLast4(key: SecretKey, content: string): string | null {
+  return key === 'card_number' ? cardNumberLast4(content) : null;
 }
 
 function secretPresent(key: SecretKey): boolean {
@@ -120,8 +128,8 @@ function secretPresent(key: SecretKey): boolean {
 function secretDisplay(key: SecretKey): string {
   const s = secretStates.value[key];
   if (focusedSecret.value === key) return s.input;
-  if (s.fetched) return s.input ? secretMask(key, s.input) : '';
-  return secretPresent(key) ? payloadMask(key) : '';
+  if (s.fetched) return s.input ? cardMask(key, inputLast4(key, s.input)) : '';
+  return secretPresent(key) ? cardMask(key, card.value?.card_number_last4 ?? null) : '';
 }
 
 // Placeholder only surfaces when the displayed content is empty: a stored
@@ -130,7 +138,7 @@ function secretDisplay(key: SecretKey): string {
 function secretPlaceholder(key: SecretKey): string {
   const s = secretStates.value[key];
   if (s.fetched && !s.input) return 'No Value';
-  return secretPresent(key) ? payloadMask(key) : 'No Value';
+  return secretPresent(key) ? cardMask(key, card.value?.card_number_last4 ?? null) : 'No Value';
 }
 
 // Sync local form state whenever the globally active card changes
