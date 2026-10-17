@@ -79,5 +79,11 @@ footer {
   justify-content: flex-end;
   width: 100%;
   gap: 0.75rem;
+
+  /* Pinned inside the modal's scrollport so the button stays visible while
+     content scrolls underneath; the opaque background masks passing content */
+  position: sticky;
+  bottom: 0;
+  background-color: var(--color-bg);
 }
 </style>

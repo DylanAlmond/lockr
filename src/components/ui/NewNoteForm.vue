@@ -158,6 +158,12 @@ footer {
   justify-content: flex-end;
   gap: 0.75rem;
   width: 100%;
+
+  /* Pinned inside the modal's scrollport so the buttons stay visible while
+     content scrolls underneath; the opaque background masks passing fields */
+  position: sticky;
+  bottom: 0;
+  background-color: var(--color-bg);
 }
 
 .note-fields-section {

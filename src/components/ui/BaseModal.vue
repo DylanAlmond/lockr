@@ -101,6 +101,10 @@ onUnmounted(() => {
 }
 
 .modal-container {
-  overflow: hidden;
+  /* `clip` rather than `hidden`: `hidden` makes this a (non-scrolling) scroll
+     container, so sticky-footered modals would pin their footer here instead
+     of to this element's scrolling ancestor (`.modal`). `clip` clips without
+     creating a scrollport. */
+  overflow: clip;
 }
 </style>
