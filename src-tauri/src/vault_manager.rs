@@ -8,10 +8,9 @@ use crate::crypto::{
     decrypt_with_key, derive_master_key, encrypt_with_key, generate_salt, MasterKey, SALT_LEN,
 };
 use crate::{
-    AccountData, AccountFilter, AccountId, CURRENT_SCHEMA_VERSION, IntoSafe, ItemKind, ItemId,
-    ItemSecrets, LegacyVault, NewItemData, SecretInput, SECRET_FIELD_PASSWORD, SafeAccount,
-    SafeItem, SafeVault, Vault, VaultError, VaultId, VaultItem, account_from_item,
-    allowed_secret_keys, item_to_safe,
+    ItemFilter, CURRENT_SCHEMA_VERSION, IntoSafe, ItemId, ItemKind, ItemSecrets,
+    LegacyVault, NewItemData, SecretInput, SECRET_FIELD_PASSWORD, SafeItem, SafeVault, Vault,
+    VaultError, VaultId, VaultItem, allowed_secret_keys, item_to_safe,
 };
 
 /// Normalizes an optional text field: empty strings mean "not set".
@@ -374,138 +373,13 @@ impl VaultManager {
         Ok(())
     }
 
-    /// Create a new account item in the vault.
-    pub fn add_account(
-        &mut self,
-        vault_id: VaultId,
-        display_name: Option<String>,
-        username: String,
-        email: Option<String>,
-        icon: Option<String>,
-        password: String,
-    ) -> Result<SafeAccount, VaultError> {
-        let now = Utc::now();
-        let item = VaultItem {
-            id: Uuid::new_v4(),
-            vault_id,
-            display_name: normalize(display_name),
-            favourite: false,
-            tags: Vec::new(),
-            icon,
-            color: String::new(),
-            created_at: now,
-            updated_at: now,
-            kind: ItemKind::Account(AccountData {
-                username,
-                email: normalize(email),
-            }),
-        };
-
-        {
-            let vault = self.get_vault_mut(vault_id)?;
-            vault.items.push(item.clone());
-            vault.secrets.push(ItemSecrets::new(
-                item.id,
-                SECRET_FIELD_PASSWORD,
-                password,
-            ));
-        }
-
-        self.maybe_save(vault_id)?;
-        Ok(account_from_item(&item).expect("newly created item is an account"))
-    }
-
-    /// Update an account item.
-    pub fn update_account(
-        &mut self,
-        vault_id: VaultId,
-        account_id: AccountId,
-        display_name: Option<String>,
-        username: Option<String>,
-        email: Option<String>,
-        favourite: Option<bool>,
-        tags: Option<Vec<String>>,
-        icon: Option<String>,
-        color: Option<String>,
-        password: Option<String>,
-    ) -> Result<SafeAccount, VaultError> {
-        let updated = {
-            let vault = self.get_vault_mut(vault_id)?;
-            let Vault { items, secrets, .. } = vault;
-
-            let item = items
-                .iter_mut()
-                .find(|i| i.id == account_id)
-                .ok_or(VaultError::AccountNotFound(account_id.to_string()))?;
-            let data = match &mut item.kind {
-                ItemKind::Account(data) => data,
-                _ => {
-                    return Err(VaultError::Validation(format!(
-                        "Item {account_id} is not an account"
-                    )))
-                }
-            };
-
-            if let Some(un) = username {
-                data.username = un;
-            }
-            if let Some(fav) = favourite {
-                item.favourite = fav;
-            }
-            if let Some(t) = tags {
-                item.tags = t;
-            }
-            if let Some(c) = color {
-                item.color = c;
-            }
-            if let Some(name) = display_name {
-                item.display_name = normalize(Some(name));
-            }
-            if let Some(email) = email {
-                data.email = normalize(Some(email));
-            }
-            if let Some(icon) = icon {
-                item.icon = normalize(Some(icon));
-            }
-
-            item.updated_at = Utc::now();
-            let view = account_from_item(item).expect("matched account kind");
-
-            if let Some(pw) = password {
-                let entry = secrets
-                    .iter_mut()
-                    .find(|s| s.item_id == account_id)
-                    .ok_or_else(|| {
-                        VaultError::Validation(format!(
-                            "Missing secret entry for item {account_id}"
-                        ))
-                    })?;
-                entry.set(SECRET_FIELD_PASSWORD, pw);
-            }
-
-            view
-        };
-
-        self.maybe_save(vault_id)?;
-        Ok(updated)
-    }
-
-    /// Delete an account item (removes its secret entry too).
-    pub fn delete_account(
-        &mut self,
-        vault_id: VaultId,
-        account_id: AccountId,
-    ) -> Result<(), VaultError> {
-        self.delete_item(vault_id, account_id)
-    }
-
     /// Delete an item of any kind and its secret entry, if any.
     pub fn delete_item(&mut self, vault_id: VaultId, item_id: ItemId) -> Result<(), VaultError> {
         {
             let vault = self.get_vault_mut(vault_id)?;
             let exists = vault.items.iter().any(|i| i.id == item_id);
             if !exists {
-                return Err(VaultError::AccountNotFound(item_id.to_string()));
+                return Err(VaultError::ItemNotFound(item_id.to_string()));
             }
             vault.items.retain(|i| i.id != item_id);
             vault.secrets.retain(|s| s.item_id != item_id);
@@ -515,8 +389,9 @@ impl VaultManager {
         Ok(())
     }
 
-    /// Create a new item of a non-account kind, together with its secret
-    /// fields, if the kind stores any. Secret keys are validated against the
+    /// Create a new item of any kind, together with its secret fields, if
+    /// the kind stores any (account items carry their initial password as
+    /// the `password` field key). Secret keys are validated against the
     /// kind: unknown keys and secret-less kinds are rejected.
     pub fn add_item(
         &mut self,
@@ -527,6 +402,7 @@ impl VaultManager {
         secrets: Option<Vec<SecretInput>>,
     ) -> Result<SafeItem, VaultError> {
         let kind = match data {
+            NewItemData::Account(account) => ItemKind::Account(account),
             NewItemData::Note(note) => ItemKind::Note(note),
             NewItemData::Card(card) => {
                 if !(1..=12).contains(&card.expiry_month) {
@@ -609,7 +485,7 @@ impl VaultManager {
             .items
             .iter()
             .find(|i| i.id == item_id)
-            .ok_or(VaultError::AccountNotFound(item_id.to_string()))?;
+            .ok_or(VaultError::ItemNotFound(item_id.to_string()))?;
         Ok(item_to_safe(item, &vault.secrets))
     }
 
@@ -634,7 +510,7 @@ impl VaultManager {
                 .items
                 .iter_mut()
                 .find(|i| i.id == item_id)
-                .ok_or(VaultError::AccountNotFound(item_id.to_string()))?;
+                .ok_or(VaultError::ItemNotFound(item_id.to_string()))?;
 
             if let Some(fav) = favourite {
                 item.favourite = fav;
@@ -654,6 +530,7 @@ impl VaultManager {
 
             if let Some(data) = data {
                 match (&mut item.kind, data) {
+                    (ItemKind::Account(current), NewItemData::Account(new)) => *current = new,
                     (ItemKind::Note(current), NewItemData::Note(new)) => *current = new,
                     (ItemKind::Identity(current), NewItemData::Identity(new)) => {
                         *current = new
@@ -661,9 +538,7 @@ impl VaultManager {
                     (ItemKind::Card(current), NewItemData::Card(new)) => *current = new,
                     (_, _) => {
                         return Err(VaultError::Validation(
-                            "Changing an item's kind is not supported (accounts keep their \
-                             dedicated password command)"
-                                .to_string(),
+                            "Changing an item's kind is not supported".to_string(),
                         ))
                     }
                 }
@@ -688,7 +563,7 @@ impl VaultManager {
             }
         }
 
-        Err(VaultError::AccountNotFound(item_id.to_string()))
+        Err(VaultError::ItemNotFound(item_id.to_string()))
     }
 
     /// Move an item of any kind (and its secret entry, if any) to another
@@ -716,7 +591,7 @@ impl VaultManager {
                 .items
                 .iter()
                 .position(|i| i.id == item_id)
-                .ok_or(VaultError::AccountNotFound(item_id.to_string()))?;
+                .ok_or(VaultError::ItemNotFound(item_id.to_string()))?;
             let mut item = source.items.remove(idx);
 
             let secret = source
@@ -750,7 +625,7 @@ impl VaultManager {
     }
 
     /// Retrieves items of all kinds across one or all vaults, applying filters.
-    pub fn get_all_items(&self, filter: AccountFilter) -> Result<Vec<SafeItem>, VaultError> {
+    pub fn get_all_items(&self, filter: ItemFilter) -> Result<Vec<SafeItem>, VaultError> {
         let mut results: Vec<SafeItem> = Vec::new();
 
         let vaults_to_scan: Vec<&Vault> = if let Some(id) = filter.vault_id {
@@ -821,7 +696,7 @@ impl VaultManager {
             .items
             .iter()
             .find(|i| i.id == item_id)
-            .ok_or(VaultError::AccountNotFound(item_id.to_string()))?;
+            .ok_or(VaultError::ItemNotFound(item_id.to_string()))?;
 
         let allowed = allowed_secret_keys(&item.kind);
         if allowed.is_empty() {
@@ -857,7 +732,7 @@ impl VaultManager {
                 .items
                 .iter()
                 .find(|i| i.id == item_id)
-                .ok_or(VaultError::AccountNotFound(item_id.to_string()))?;
+                .ok_or(VaultError::ItemNotFound(item_id.to_string()))?;
 
             let allowed = allowed_secret_keys(&item.kind);
             if allowed.is_empty() {
@@ -914,110 +789,20 @@ impl VaultManager {
         Ok(())
     }
 
-    /// Returns only the password string (None when unset) for a specific
-    /// account
-    pub fn get_secret(
+    /// Get the strength of an item's password-style secret (the `password`
+    /// field key; kind-aware through the single per-field fetch surface)
+    pub fn get_item_password_strength(
         &self,
         vault_id: VaultId,
-        account_id: AccountId,
-    ) -> Result<Option<String>, VaultError> {
-        self.get_item_secret(vault_id, account_id, SECRET_FIELD_PASSWORD)
-    }
-
-    /// Get the strength of a given accounts password
-    pub fn get_account_password_strength(
-        &self,
-        vault_id: VaultId,
-        account_id: AccountId,
+        item_id: ItemId,
     ) -> Result<Entropy, VaultError> {
-        match self.get_secret(vault_id, account_id)? {
-            // Passwordless accounts surface as a failed lookup (the
-            // frontend wrapper turns that into 'no strength'), matching
-            // the pre-Option behaviour
+        match self.get_item_secret(vault_id, item_id, SECRET_FIELD_PASSWORD)? {
+            // Passwordless items surface as a failed lookup (the frontend
+            // wrapper turns that into 'no strength'), matching the
+            // pre-rename behaviour
             Some(pw) => Ok(zxcvbn(&pw, &[])),
-            None => Err(VaultError::Validation("Account has no password".to_string())),
+            None => Err(VaultError::Validation("Item has no password".to_string())),
         }
-    }
-
-    /// Retrieve a specific account item by id (searches all unlocked vaults)
-    pub fn get_account_by_id(&self, account_id: AccountId) -> Result<SafeAccount, VaultError> {
-        for uv in self.unlocked_vaults.values() {
-            if let Some(item) = uv.vault.items.iter().find(|i| i.id == account_id) {
-                if let Some(account) = crate::account_from_item(item) {
-                    return Ok(account);
-                }
-            }
-        }
-
-        Err(VaultError::AccountNotFound(account_id.to_string()))
-    }
-
-    /// Retrieves account items across one or all vaults, applying filters.
-    pub fn get_all_accounts(&self, filter: AccountFilter) -> Result<Vec<SafeAccount>, VaultError> {
-        let mut results: Vec<SafeAccount> = Vec::new();
-
-        // Determine which vaults to scan
-        let vaults_to_scan: Vec<&Vault> = if let Some(id) = filter.vault_id {
-            // Scan specific vault
-            vec![self.get_vault(id)?]
-        } else {
-            // Scan all unlocked vaults
-            self.unlocked_vaults.values().map(|uv| &uv.vault).collect()
-        };
-
-        // Prepare optional lowercase search query once for performance
-        let query = filter.search_query.map(|q| q.to_lowercase());
-
-        // Iterate and filter
-        for vault in vaults_to_scan {
-            for item in &vault.items {
-                let Some(view) = crate::account_from_item(item) else {
-                    // Non-account items are not part of the account surface
-                    continue;
-                };
-
-                // Favourite Filter
-                if let Some(true) = filter.favourite_only {
-                    if !item.favourite {
-                        continue;
-                    }
-                }
-
-                // Tag Filter (Item must have AT LEAST ONE matching tag)
-                if let Some(ref filter_tags) = filter.tags {
-                    if !filter_tags.is_empty() {
-                        let has_match = filter_tags.iter().any(|ft| item.tags.contains(ft));
-                        if !has_match {
-                            continue;
-                        }
-                    }
-                }
-
-                // Search Query Filter
-                if let Some(ref q) = query {
-                    let matches_username = view.username.to_lowercase().contains(q);
-                    let matches_display = view
-                        .display_name
-                        .as_ref()
-                        .map_or(false, |dn| dn.to_lowercase().contains(q));
-                    let matches_email = view
-                        .email
-                        .as_ref()
-                        .map_or(false, |em| em.to_lowercase().contains(q));
-
-                    if !matches_username && !matches_display && !matches_email {
-                        continue;
-                    }
-                }
-
-                results.push(view);
-            }
-        }
-
-        // Sort by most recently updated first
-        results.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-
-        Ok(results)
     }
 
     /// Save immediately if autosave is on. Otherwise just leave the dirty
@@ -1142,10 +927,19 @@ mod tests {
         assert!(manager.is_dirty(vault_id), "Migrated vault must be flagged dirty");
 
         // Every account migrated with identical metadata
-        let all = manager.get_all_accounts(AccountFilter::default()).unwrap();
+        let all = manager
+            .get_all_items(ItemFilter::default())
+            .unwrap();
         assert_eq!(all.len(), 2);
         for legacy in &accounts {
-            let view = all.iter().find(|a| a.id == legacy.id).unwrap();
+            let view = match all
+                .iter()
+                .find(|s| matches!(s, SafeItem::Account(a) if a.id == legacy.id))
+                .unwrap()
+            {
+                SafeItem::Account(a) => a.clone(),
+                other => panic!("expected migrated account view, got {other:?}"),
+            };
             assert_eq!(view.username, legacy.username);
             assert_eq!(view.email, legacy.email);
             assert_eq!(view.display_name, legacy.display_name);
@@ -1159,7 +953,10 @@ mod tests {
 
         // Passwords come through the existing secret-fetch path
         assert_eq!(
-            manager.get_secret(vault_id, full_id).unwrap().as_deref(),
+            manager
+                .get_item_secret(vault_id, full_id, SECRET_FIELD_PASSWORD)
+                .unwrap()
+                .as_deref(),
             Some("legacy_pw_full")
         );
 
@@ -1188,7 +985,10 @@ mod tests {
             "Backup must not be rewritten on plain unlocks"
         );
         assert_eq!(
-            manager.get_secret(vault_id, full_id).unwrap().as_deref(),
+            manager
+                .get_item_secret(vault_id, full_id, SECRET_FIELD_PASSWORD)
+                .unwrap()
+                .as_deref(),
             Some("legacy_pw_full")
         );
     }
@@ -1280,110 +1080,137 @@ mod tests {
     }
 
     #[test]
-    fn test_add_account() {
+    fn test_add_account_item_through_item_surface() {
         let temp_dir = setup();
         let mut manager = VaultManager::new(temp_dir.clone()).unwrap();
         let vault = manager
             .create_vault("Test".to_string(), "#6240BF".to_string(), MASTER_PW, &KEY)
             .unwrap();
 
-        // Note: no more mp/sk arguments needed!
-        let account = manager
-            .add_account(
+        // The account kind is created through the plain item command, its
+        // initial password riding the shared SecretInput mechanism
+        let item = manager
+            .add_item(
                 vault.id,
                 Some("octocat pass".to_string()),
-                "octocat".to_string(),
                 None,
-                None,
-                "secret123".to_string(),
+                crate::NewItemData::Account(crate::AccountData {
+                    username: "octocat".to_string(),
+                    email: None,
+                }),
+                Some(vec![crate::SecretInput::new(
+                    SECRET_FIELD_PASSWORD,
+                    "secret123".to_string(),
+                )]),
             )
             .unwrap();
+        let account = match &item {
+            SafeItem::Account(v) => v,
+            other => panic!("expected account safe view, got {other:?}"),
+        };
 
         assert_eq!(account.display_name, Some("octocat pass".to_string()));
         assert_eq!(account.username, "octocat");
-        assert_eq!(account.email, None);
         assert_eq!(
-            manager.get_secret(vault.id, account.id).unwrap().as_deref(),
+            manager
+                .get_item_secret(vault.id, account.id, SECRET_FIELD_PASSWORD)
+                .unwrap()
+                .as_deref(),
             Some("secret123")
         );
-        assert_eq!(account.favourite, false);
-        assert_eq!(account.tags.len(), 0);
-
-        let vault = manager.get_vault(vault.id).unwrap();
-        assert_eq!(vault.items.len(), 1);
-        assert_eq!(vault.secrets.len(), 1);
+        // ...and unknown keys are rejected for the account kind too
+        assert!(manager
+            .get_item_secret(vault.id, account.id, SECRET_FIELD_CARD_NUMBER)
+            .is_err());
     }
 
     #[test]
-    fn test_update_account() {
+    fn test_update_account_item_through_item_surface() {
         let temp_dir = setup();
         let mut manager = VaultManager::new(temp_dir.clone()).unwrap();
         let vault = manager
             .create_vault("Test".to_string(), "#6240BF".to_string(), MASTER_PW, &KEY)
             .unwrap();
 
-        let account = manager
-            .add_account(
-                vault.id,
-                None,
-                "octocat".to_string(),
-                None,
-                None,
-                "secret123".to_string(),
-            )
-            .unwrap();
+        let item = add_test_account_item(&mut manager, vault.id, "rspencil", "hunter2");
+        let id = match &item {
+            SafeItem::Account(v) => v.id,
+            _ => unreachable!(),
+        };
 
-        // No more mp/sk arguments!
-        let updated = manager
-            .update_account(
+        let updated = match manager
+            .update_item(
                 vault.id,
-                account.id,
+                id,
+                Some("Octo renamed".to_string()),
                 None,
-                Some("octocat".to_string()),
-                Some("hello@example.com".to_string()),
                 Some(true),
-                Some(vec!["social".to_string(), "work".to_string()]),
                 None,
                 None,
-                Some("new_pass".to_string()),
+                Some(crate::NewItemData::Account(crate::AccountData {
+                    username: "newcat".to_string(),
+                    email: Some("octo@example.com".to_string()),
+                })),
             )
-            .unwrap();
+            .unwrap()
+        {
+            SafeItem::Account(a) => a,
+            other => panic!("expected account safe view, got {other:?}"),
+        };
 
-        assert_eq!(updated.username, "octocat");
-        assert_eq!(updated.email, Some("hello@example.com".to_string()));
-        assert_eq!(
-            manager.get_secret(vault.id, updated.id).unwrap().as_deref(),
-            Some("new_pass")
-        );
+        assert_eq!(updated.username, "newcat");
+        assert_eq!(updated.email, Some("octo@example.com".to_string()));
+        assert_eq!(updated.display_name, Some("Octo renamed".to_string()));
         assert_eq!(updated.favourite, true);
-        assert_eq!(updated.tags, vec!["social".to_string(), "work".to_string()]);
+
+        // The password did not change (it rides update_item_secret only)
+        assert_eq!(
+            manager
+                .get_item_secret(vault.id, id, SECRET_FIELD_PASSWORD)
+                .unwrap()
+                .as_deref(),
+            Some("hunter2")
+        );
     }
 
     #[test]
-    fn test_delete_account() {
+    fn test_item_password_strength_surface() {
         let temp_dir = setup();
         let mut manager = VaultManager::new(temp_dir.clone()).unwrap();
         let vault = manager
             .create_vault("Test".to_string(), "#6240BF".to_string(), MASTER_PW, &KEY)
             .unwrap();
 
-        let account = manager
-            .add_account(
+        // With a stored password: strength derives
+        let item = add_test_account_item(&mut manager, vault.id, "rspencil", "hunter2");
+        let id = match &item {
+            SafeItem::Account(v) => v.id,
+            _ => unreachable!(),
+        };
+        assert!(manager.get_item_password_strength(vault.id, id).is_ok());
+
+        // Passwordless account: a failed lookup, surfaced to the UI as
+        // 'no strength' (the frontend wrapper catches it)
+        let empty = manager
+            .add_item(
                 vault.id,
                 None,
-                "octocat".to_string(),
                 None,
+                crate::NewItemData::Account(crate::AccountData {
+                    username: "no-pass".to_string(),
+                    email: None,
+                }),
                 None,
-                "pass".to_string(),
             )
             .unwrap();
-
-        // No more mp/sk arguments!
-        manager.delete_account(vault.id, account.id).unwrap();
-
-        let vault = manager.get_vault(vault.id).unwrap();
-        assert_eq!(vault.items.len(), 0);
-        assert_eq!(vault.secrets.len(), 0);
+        let no_password_id = match &empty {
+            SafeItem::Account(v) => v.id,
+            _ => unreachable!(),
+        };
+        assert!(matches!(
+            manager.get_item_password_strength(vault.id, no_password_id),
+            Err(VaultError::Validation(ref msg)) if msg.contains("no password")
+        ));
     }
 
     #[test]
@@ -1399,16 +1226,12 @@ mod tests {
 
         // Add 3 accounts — none should be persisted yet
         for i in 0..3 {
-            manager
-                .add_account(
-                    vault.id,
-                    None,
-                    format!("user{}", i),
-                    None,
-                    None,
-                    format!("pass{}", i),
-                )
-                .unwrap();
+            add_test_account_item(
+                &mut manager,
+                vault.id,
+                &format!("user{}", i),
+                &format!("pass{}", i),
+            );
         }
 
         assert!(manager.is_dirty(vault.id));
@@ -1425,16 +1248,12 @@ mod tests {
         // Re-add in batch mode
         manager.set_autosave(false);
         for i in 0..3 {
-            manager
-                .add_account(
-                    vault.id,
-                    None,
-                    format!("user{}", i),
-                    None,
-                    None,
-                    format!("pass{}", i),
-                )
-                .unwrap();
+            add_test_account_item(
+                &mut manager,
+                vault.id,
+                &format!("user{}", i),
+                &format!("pass{}", i),
+            );
         }
         assert!(manager.is_dirty(vault.id));
 
@@ -1469,26 +1288,8 @@ mod tests {
 
         manager.set_autosave(false);
 
-        manager
-            .add_account(
-                vault1.id,
-                None,
-                "u1".to_string(),
-                None,
-                None,
-                "p1".to_string(),
-            )
-            .unwrap();
-        manager
-            .add_account(
-                vault2.id,
-                None,
-                "u2".to_string(),
-                None,
-                None,
-                "p2".to_string(),
-            )
-            .unwrap();
+        add_test_account_item(&mut manager, vault1.id, "u1", "p1");
+        add_test_account_item(&mut manager, vault2.id, "u2", "p2");
 
         assert!(manager.is_dirty(vault1.id));
         assert!(manager.is_dirty(vault2.id));
@@ -1515,16 +1316,7 @@ mod tests {
             .unwrap();
 
         // Autosave is on by default — add account and verify it persists
-        manager
-            .add_account(
-                vault.id,
-                None,
-                "octocat".to_string(),
-                None,
-                None,
-                "pass".to_string(),
-            )
-            .unwrap();
+        add_test_account_item(&mut manager, vault.id, "octocat", "pass");
 
         assert!(
             !manager.is_dirty(vault.id),
@@ -1594,20 +1386,12 @@ mod tests {
             .create_vault("Test".to_string(), "#6240BF".to_string(), MASTER_PW, &KEY)
             .unwrap();
 
-        manager
-            .add_account(
-                vault.id,
-                Some("Old trusted".to_string()),
-                "octocat".to_string(),
-                Some("octo@example.com".to_string()),
-                None,
-                "pw".to_string(),
-            )
-            .unwrap();
+        // The item surface carries the account kind: search/list over all kinds
+        add_test_account_item(&mut manager, vault.id, "octocat", "pw");
         add_test_note(&mut manager, vault.id, "Recipe", "Pasta carbonara for two");
 
         let items = manager
-            .get_all_items(crate::AccountFilter::default())
+            .get_all_items(crate::ItemFilter::default())
             .unwrap();
         assert_eq!(items.len(), 2);
         let kinds: Vec<&str> = items
@@ -1622,12 +1406,18 @@ mod tests {
         assert!(kinds.contains(&"account"));
         assert!(kinds.contains(&"note"));
 
-        // The account surface is unchanged: only accounts there
-        let accounts = manager
-            .get_all_accounts(crate::AccountFilter::default())
+        // Search reaches the account's own kind fields
+        let by_username = manager
+            .get_all_items(crate::ItemFilter {
+                search_query: Some("octocat".to_string()),
+                ..Default::default()
+            })
             .unwrap();
-        assert_eq!(accounts.len(), 1);
-        assert_eq!(accounts[0].username, "octocat");
+        assert_eq!(by_username.len(), 1);
+        assert!(matches!(
+            &by_username[0],
+            crate::SafeItem::Account(a) if a.username == "octocat"
+        ));
     }
 
     #[test]
@@ -1672,7 +1462,7 @@ mod tests {
         manager.lock_vault(Some(vault.id));
         manager.unlock_vault(vault.id, MASTER_PW, &KEY).unwrap();
         let items = manager
-            .get_all_items(crate::AccountFilter::default())
+            .get_all_items(crate::ItemFilter::default())
             .unwrap();
         let crate::SafeItem::Note(view) = &items[0] else {
             panic!("expected note view");
@@ -1690,19 +1480,14 @@ mod tests {
             .create_vault("Test".to_string(), "#6240BF".to_string(), MASTER_PW, &KEY)
             .unwrap();
 
-        let account = manager
-            .add_account(
-                vault.id,
-                None,
-                "octocat".to_string(),
-                None,
-                None,
-                "pw".to_string(),
-            )
-            .unwrap();
+        let account = add_test_account_item(&mut manager, vault.id, "octocat", "pw");
+        let account_id = match &account {
+            crate::SafeItem::Account(a) => a.id,
+            _ => unreachable!(),
+        };
         let note = add_test_note(&mut manager, vault.id, "Recipe", "Body");
 
-        let by_id = manager.get_item_by_id(account.id).unwrap();
+        let by_id = manager.get_item_by_id(account_id).unwrap();
         assert!(matches!(by_id, crate::SafeItem::Account(_)));
 
         let note_id = match &note {
@@ -1713,7 +1498,7 @@ mod tests {
         assert!(matches!(by_id, crate::SafeItem::Note(_)));
 
         let missing = manager.get_item_by_id(Uuid::new_v4());
-        assert!(matches!(missing, Err(VaultError::AccountNotFound(_))));
+        assert!(matches!(missing, Err(VaultError::ItemNotFound(_))));
     }
 
     #[test]
@@ -1734,17 +1519,12 @@ mod tests {
         assert!(manager.get_item_by_id(note_id).is_err());
 
         // delete_item is kind-generic: works on accounts too
-        let account = manager
-            .add_account(
-                vault.id,
-                None,
-                "octocat".to_string(),
-                None,
-                None,
-                "pw".to_string(),
-            )
-            .unwrap();
-        manager.delete_item(vault.id, account.id).unwrap();
+        let account = add_test_account_item(&mut manager, vault.id, "octocat", "pw");
+        let account_id = match &account {
+            SafeItem::Account(a) => a.id,
+            _ => unreachable!(),
+        };
+        manager.delete_item(vault.id, account_id).unwrap();
         let vault_ref = manager.get_vault(vault.id).unwrap();
         assert!(vault_ref.items.is_empty());
         assert!(vault_ref.secrets.is_empty(), "Deleting must drop secrets too");
@@ -1780,22 +1560,17 @@ mod tests {
             )
             .unwrap();
 
-        let account = manager
-            .add_account(
-                vault_a.id,
-                None,
-                "octocat".to_string(),
-                None,
-                None,
-                "hunter2".to_string(),
-            )
-            .unwrap();
+        let account = add_test_account_item(&mut manager, vault_a.id, "octocat", "hunter2");
+        let account_id = match &account {
+            crate::SafeItem::Account(a) => a.id,
+            _ => panic!("expected account view"),
+        };
 
         // Same-vault and missing-item moves are rejected
         let same = manager.move_item(vault_a.id, note_id, vault_a.id);
         assert!(matches!(same, Err(VaultError::Validation(_))));
         let missing = manager.move_item(vault_a.id, Uuid::new_v4(), vault_b.id);
-        assert!(matches!(missing, Err(VaultError::AccountNotFound(_))));
+        assert!(matches!(missing, Err(VaultError::ItemNotFound(_))));
 
         // Move the note
         let moved_note = manager.move_item(vault_a.id, note_id, vault_b.id).unwrap();
@@ -1814,14 +1589,16 @@ mod tests {
             .all(|i| i.id != note_id));
 
         // Move the account: its secret must be remapped, not dropped
-        let moved_account = manager.move_item(vault_a.id, account.id, vault_b.id).unwrap();
+        let moved_account = manager.move_item(vault_a.id, account_id, vault_b.id).unwrap();
         let account_view = match &moved_account {
             crate::SafeItem::Account(view) => view.clone(),
             _ => panic!("expected account view"),
         };
         assert_eq!(account_view.vault_id, vault_b.id);
 
-        let secret = manager.get_secret(vault_b.id, account_view.id).unwrap();
+        let secret = manager
+            .get_item_secret(vault_b.id, account_view.id, SECRET_FIELD_PASSWORD)
+            .unwrap();
         assert_eq!(secret.as_deref(), Some("hunter2"), "secret entry must move with the item");
 
         let vault_ref = manager.get_vault(vault_a.id).unwrap();
@@ -1926,7 +1703,7 @@ mod tests {
         manager.unlock_vault(vault.id, MASTER_PW, &KEY).unwrap();
 
         let items = manager
-            .get_all_items(crate::AccountFilter::default())
+            .get_all_items(crate::ItemFilter::default())
             .unwrap();
         let crate::SafeItem::Identity(view) = &items[0] else {
             panic!("expected identity view");
@@ -1954,7 +1731,7 @@ mod tests {
 
         for query in ["alex doe", "example.com", "555 0100", "1 main st", "US"] {
             let matches = manager
-                .get_all_items(crate::AccountFilter {
+                .get_all_items(crate::ItemFilter {
                     vault_id: Some(vault.id),
                     search_query: Some(query.to_string()),
                     ..Default::default()
@@ -1964,7 +1741,7 @@ mod tests {
         }
 
         let misses = manager
-            .get_all_items(crate::AccountFilter {
+            .get_all_items(crate::ItemFilter {
                 vault_id: Some(vault.id),
                 search_query: Some("unrelated".to_string()),
                 ..Default::default()
@@ -2010,20 +1787,26 @@ mod tests {
             .create_vault("Test".to_string(), "#6240BF".to_string(), MASTER_PW, &KEY)
             .unwrap();
 
-        manager
-            .add_account(
+        // An account with an email, so the account-arm search is covered
+        let _account = manager
+            .add_item(
                 vault.id,
                 Some("Old trusted".to_string()),
-                "octocat".to_string(),
-                Some("octo@example.com".to_string()),
                 None,
-                "pw".to_string(),
+                crate::NewItemData::Account(crate::AccountData {
+                    username: "octocat".to_string(),
+                    email: Some("octo@example.com".to_string()),
+                }),
+                Some(vec![crate::SecretInput::new(
+                    SECRET_FIELD_PASSWORD,
+                    "pw".to_string(),
+                )]),
             )
             .unwrap();
         add_test_note(&mut manager, vault.id, "Recipe", "Pasta carbonara for two");
 
         let matches_body = manager
-            .get_all_items(crate::AccountFilter {
+            .get_all_items(crate::ItemFilter {
                 vault_id: Some(vault.id),
                 search_query: Some("CARBONARA".to_string()),
                 ..Default::default()
@@ -2032,7 +1815,7 @@ mod tests {
         assert_eq!(matches_body.len(), 1, "body text must be searchable");
 
         let matches_title = manager
-            .get_all_items(crate::AccountFilter {
+            .get_all_items(crate::ItemFilter {
                 vault_id: Some(vault.id),
                 search_query: Some("recipe".to_string()),
                 ..Default::default()
@@ -2041,7 +1824,7 @@ mod tests {
         assert_eq!(matches_title.len(), 1, "title must be searchable");
 
         let matches_account = manager
-            .get_all_items(crate::AccountFilter {
+            .get_all_items(crate::ItemFilter {
                 vault_id: Some(vault.id),
                 search_query: Some("octo@example.com".to_string()),
                 ..Default::default()
@@ -2076,6 +1859,29 @@ mod tests {
                     ),
                     crate::SecretInput::new(crate::SECRET_FIELD_PIN, "4321".to_string()),
                 ]),
+            )
+            .unwrap()
+    }
+
+    fn add_test_account_item(
+        manager: &mut VaultManager,
+        vault_id: VaultId,
+        username: &str,
+        password: &str,
+    ) -> SafeItem {
+        manager
+            .add_item(
+                vault_id,
+                None,
+                None,
+                crate::NewItemData::Account(crate::AccountData {
+                    username: username.to_string(),
+                    email: None,
+                }),
+                Some(vec![crate::SecretInput::new(
+                    SECRET_FIELD_PASSWORD,
+                    password.to_string(),
+                )]),
             )
             .unwrap()
     }
@@ -2248,7 +2054,7 @@ mod tests {
 
         // Nonexistent item
         let missing = manager.get_item_secret(vault.id, Uuid::new_v4(), SECRET_FIELD_PIN);
-        assert!(matches!(missing, Err(VaultError::AccountNotFound(_))));
+        assert!(matches!(missing, Err(VaultError::ItemNotFound(_))));
     }
 
     #[test]
@@ -2371,7 +2177,7 @@ mod tests {
 
         // By cardholder name
         let by_name = manager
-            .get_all_items(AccountFilter {
+            .get_all_items(ItemFilter {
                 search_query: Some("alex doe".to_string()),
                 ..Default::default()
             })
@@ -2380,7 +2186,7 @@ mod tests {
 
         // By brand
         let by_brand = manager
-            .get_all_items(AccountFilter {
+            .get_all_items(ItemFilter {
                 search_query: Some("visa".to_string()),
                 ..Default::default()
             })
@@ -2389,7 +2195,7 @@ mod tests {
 
         // No false positives
         let no_match = manager
-            .get_all_items(AccountFilter {
+            .get_all_items(ItemFilter {
                 search_query: Some("mastercard".to_string()),
                 ..Default::default()
             })

@@ -9,8 +9,7 @@ use zxcvbn::{zxcvbn, Entropy};
 use crate::user_manager::UserManager;
 use crate::vault_manager::VaultManager;
 use crate::{
-    AccountFilter, IntoSafe, NewItemData, SafeAccount, SafeItem, SafeVault, SecretInput, User,
-    UserId,
+    ItemFilter, IntoSafe, NewItemData, SafeItem, SafeVault, SecretInput, User, UserId,
 };
 
 pub struct ManagerState {
@@ -312,124 +311,18 @@ pub fn delete_vault(state: AppState, vault_id: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn add_account(
+pub fn get_item_password_strength(
     state: AppState,
     vault_id: String,
-    display_name: Option<String>,
-    username: String,
-    email: Option<String>,
-    icon: Option<String>,
-    password: String,
-) -> Result<SafeAccount, String> {
-    let mut state = state.lock().map_err(|e| e.to_string())?;
-    let id = Uuid::parse_str(&vault_id).map_err(|e| e.to_string())?;
-
-    state
-        .vault_manager
-        .add_account(id, display_name, username, email, icon, password)
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub fn get_account_by_id(state: AppState, account_id: String) -> Result<SafeAccount, String> {
-    let state = state.lock().map_err(|e| e.to_string())?;
-    let id = Uuid::parse_str(&account_id).map_err(|e| e.to_string())?;
-
-    state
-        .vault_manager
-        .get_account_by_id(id)
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub fn get_all_accounts(
-    state: AppState,
-    filter: AccountFilter,
-) -> Result<Vec<SafeAccount>, String> {
-    let state = state.lock().map_err(|e| e.to_string())?;
-
-    state
-        .vault_manager
-        .get_all_accounts(filter)
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub fn update_account(
-    state: AppState,
-    vault_id: String,
-    account_id: String,
-    display_name: Option<String>,
-    username: Option<String>,
-    email: Option<String>,
-    favourite: Option<bool>,
-    tags: Option<Vec<String>>,
-    icon: Option<String>,
-    color: Option<String>,
-    password: Option<String>,
-) -> Result<SafeAccount, String> {
-    let mut state = state.lock().map_err(|e| e.to_string())?;
-    let vid = Uuid::parse_str(&vault_id).map_err(|e| e.to_string())?;
-    let aid = Uuid::parse_str(&account_id).map_err(|e| e.to_string())?;
-
-    state
-        .vault_manager
-        .update_account(
-            vid,
-            aid,
-            display_name,
-            username,
-            email,
-            favourite,
-            tags,
-            icon,
-            color,
-            password,
-        )
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub fn delete_account(state: AppState, vault_id: String, account_id: String) -> Result<(), String> {
-    let mut state = state.lock().map_err(|e| e.to_string())?;
-    let vid = Uuid::parse_str(&vault_id).map_err(|e| e.to_string())?;
-    let aid = Uuid::parse_str(&account_id).map_err(|e| e.to_string())?;
-
-    state
-        .vault_manager
-        .delete_account(vid, aid)
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub fn get_secret(
-    state: AppState,
-    vault_id: String,
-    account_id: String,
-) -> Result<Option<String>, String> {
-    let state = state.lock().map_err(|e| e.to_string())?;
-    let vid = Uuid::parse_str(&vault_id).map_err(|e| e.to_string())?;
-    let aid = Uuid::parse_str(&account_id).map_err(|e| e.to_string())?;
-
-    state
-        .vault_manager
-        .get_secret(vid, aid)
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub fn get_account_password_strength(
-    state: AppState,
-    vault_id: String,
-    account_id: String,
+    item_id: String,
 ) -> Result<Entropy, String> {
     let state = state.lock().map_err(|e| e.to_string())?;
     let vid = Uuid::parse_str(&vault_id).map_err(|e| e.to_string())?;
-    let aid = Uuid::parse_str(&account_id).map_err(|e| e.to_string())?;
+    let iid = Uuid::parse_str(&item_id).map_err(|e| e.to_string())?;
 
     state
         .vault_manager
-        .get_account_password_strength(vid, aid)
+        .get_item_password_strength(vid, iid)
         .map_err(|e| e.to_string())
 }
 
@@ -476,7 +369,7 @@ pub fn is_vault_dirty(state: AppState, vault_id: String) -> Result<bool, String>
     Ok(state.vault_manager.is_dirty(id))
 }
 
-// ============ Items (generic surface, kinds other than account) ============
+// ============ Items (the generic mutation/query surface, all kinds) ============
 
 #[tauri::command]
 pub fn add_item(
@@ -560,7 +453,7 @@ pub fn get_item_by_id(state: AppState, item_id: String) -> Result<SafeItem, Stri
 }
 
 #[tauri::command]
-pub fn get_all_items(state: AppState, filter: AccountFilter) -> Result<Vec<SafeItem>, String> {
+pub fn get_all_items(state: AppState, filter: ItemFilter) -> Result<Vec<SafeItem>, String> {
     let state = state.lock().map_err(|e| e.to_string())?;
 
     state

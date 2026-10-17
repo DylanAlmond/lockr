@@ -8,8 +8,6 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 pub type UserId = Uuid;
 pub type VaultId = Uuid;
 pub type ItemId = Uuid;
-/// Alias for [`ItemId`]; kept until the account→item rename (ticket #27).
-pub type AccountId = ItemId;
 pub type SecretId = Uuid;
 
 /// The current on-disk vault schema version.
@@ -205,11 +203,13 @@ impl ItemKind {
     }
 }
 
-/// Kind-specific payload for creating or updating a non-account item.
-/// Account items keep their dedicated (password-carrying) command surface.
+/// Kind-specific payload for creating or updating an item, alongside the
+/// separate initial secret fields (accounts carry their password as the
+/// `password` field key).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum NewItemData {
+    Account(AccountData),
     Note(NoteData),
     Card(CardData),
     Identity(IdentityData),
@@ -317,7 +317,7 @@ impl fmt::Debug for ItemSecrets {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct AccountFilter {
+pub struct ItemFilter {
     /// If provided, only search this specific vault. If None, search all unlocked vaults.
     pub vault_id: Option<VaultId>,
 
@@ -331,7 +331,7 @@ pub struct AccountFilter {
     pub search_query: Option<String>,
 }
 
-impl Default for AccountFilter {
+impl Default for ItemFilter {
     fn default() -> Self {
         Self {
             vault_id: None,
@@ -357,7 +357,7 @@ pub struct LegacyVault {
 /// An account as stored before schema versioning.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Account {
-    pub id: AccountId,
+    pub id: ItemId,
 
     pub vault_id: VaultId,
 
@@ -439,7 +439,7 @@ pub struct SafeVault {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SafeAccount {
-    pub id: AccountId,
+    pub id: ItemId,
     pub vault_id: VaultId,
 
     pub display_name: Option<String>,

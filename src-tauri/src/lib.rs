@@ -61,15 +61,7 @@ pub fn run() {
             commands::lock_vault,
             commands::update_vault,
             commands::delete_vault,
-            // Accounts
-            commands::add_account,
-            commands::get_account_by_id,
-            commands::get_all_accounts,
-            commands::update_account,
-            commands::delete_account,
-            commands::get_secret,
-            commands::get_account_password_strength,
-            // Items (generic surface)
+            // Items (the generic surface, all kinds)
             commands::add_item,
             commands::update_item,
             commands::delete_item,
@@ -78,6 +70,7 @@ pub fn run() {
             commands::get_all_items,
             commands::get_item_secret,
             commands::update_item_secret,
+            commands::get_item_password_strength,
             // Util
             commands::get_password_strength,
             commands::flush_vault,
