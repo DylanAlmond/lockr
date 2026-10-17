@@ -83,7 +83,12 @@ onUnmounted(() => {
   max-height: calc(100% - 2rem);
 
   border-radius: 0.75rem;
-  padding: 1.5rem;
+  /* No bottom padding: a sticky footer can never travel past its container's
+     bottom edge, so shell padding there would stay uncovered and show
+     scrolling content beneath the pinned footer. Each footered modal owns
+     the bottom spacing via padding-bottom on its sticky footer instead. */
+  padding: 1.5rem 1.5rem 0;
+
   margin: 1rem;
 
   background-color: var(--color-bg);

@@ -81,9 +81,13 @@ footer {
   gap: 0.75rem;
 
   /* Pinned inside the modal's scrollport so the button stays visible while
-     content scrolls underneath; the opaque background masks passing content */
+     content scrolls underneath; the opaque background masks passing content.
+     The modal shell has no bottom padding — this footer owns the modal's
+     bottom spacing, so padding-bottom keeps the pinned background flush
+     with the shell's bottom edge */
   position: sticky;
   bottom: 0;
+  padding-bottom: 1.5rem;
   background-color: var(--color-bg);
 }
 </style>
