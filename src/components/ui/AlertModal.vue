@@ -99,5 +99,16 @@ footer {
   display: flex;
   justify-content: flex-end;
   gap: 0.75rem;
+  width: 100%;
+
+  /* Matches the other modal footers' full width, and is pinned inside the
+     modal's scrollport so the buttons stay visible while content scrolls
+     underneath; the opaque background masks passing content. The modal shell
+     has no bottom padding — this footer owns the modal's bottom spacing, so
+     padding-bottom keeps the pinned background flush with the shell's edge */
+  position: sticky;
+  bottom: 0;
+  padding-bottom: 1.5rem;
+  background-color: var(--color-bg);
 }
 </style>

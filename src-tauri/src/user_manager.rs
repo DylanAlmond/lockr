@@ -109,7 +109,7 @@ impl UserManager {
     /// Verify the Master Password and decrypt the Secret Key.
     pub fn login(&mut self, id: &UserId, master_password: &str) -> Result<Vec<u8>, VaultError> {
         if !self.is_user_registered(id) {
-            return Err(VaultError::AccountNotFound("User not registered".into()));
+            return Err(VaultError::UserNotFound("User not registered".into()));
         }
 
         let path = self.app_data_dir.join(format!("{}.json", id.to_string()));
@@ -136,10 +136,10 @@ impl UserManager {
         let user_id = self
             .active_user_id
             .as_ref()
-            .ok_or_else(|| VaultError::AccountNotFound("No user is active".into()))?;
+            .ok_or_else(|| VaultError::UserNotFound("No user is active".into()))?;
 
         if !self.is_user_registered(user_id) {
-            return Err(VaultError::AccountNotFound("User not registered".into()));
+            return Err(VaultError::UserNotFound("User not registered".into()));
         }
 
         self.active_user_id = None;
@@ -151,13 +151,13 @@ impl UserManager {
     /// Get the user profile metadata (does NOT decrypt the secret key)
     pub fn get_user(&self, id: &UserId) -> Result<User, VaultError> {
         if !self.is_user_registered(id) {
-            return Err(VaultError::AccountNotFound("User not registered".into()));
+            return Err(VaultError::UserNotFound("User not registered".into()));
         }
 
         let path = self
             .active_path
             .as_ref()
-            .ok_or(VaultError::AccountNotFound("active_path is not set".into()))?;
+            .ok_or(VaultError::UserNotFound("active_path is not set".into()))?;
 
         let json: String = std::fs::read_to_string(path)?;
         let user_file: User = serde_json::from_str(&json)?;
@@ -175,7 +175,7 @@ impl UserManager {
         let user_id = self
             .active_user_id
             .as_ref()
-            .ok_or_else(|| VaultError::AccountNotFound("No user is active".into()))?;
+            .ok_or_else(|| VaultError::UserNotFound("No user is active".into()))?;
 
         let mut user = self.get_user(user_id)?;
 
@@ -197,7 +197,7 @@ impl UserManager {
         let user_id = self
             .active_user_id
             .as_ref()
-            .ok_or_else(|| VaultError::AccountNotFound("No user is active".into()))?;
+            .ok_or_else(|| VaultError::UserNotFound("No user is active".into()))?;
 
         let mut user = self.get_user(user_id)?;
         if !user.vault_ids.contains(&vault_id) {
@@ -212,7 +212,7 @@ impl UserManager {
         let user_id = self
             .active_user_id
             .as_ref()
-            .ok_or_else(|| VaultError::AccountNotFound("No user is active".into()))?;
+            .ok_or_else(|| VaultError::UserNotFound("No user is active".into()))?;
 
         let mut user = self.get_user(user_id)?;
         user.vault_ids.retain(|id| id != &vault_id);
@@ -223,7 +223,7 @@ impl UserManager {
     // Delete the current user
     pub fn delete_user(&mut self) -> Result<(), VaultError> {
         if self.active_user_id.is_none() {
-            return Err(VaultError::AccountNotFound("No user is active".into()));
+            return Err(VaultError::UserNotFound("No user is active".into()));
         }
 
         let path = self

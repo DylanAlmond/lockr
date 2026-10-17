@@ -4,7 +4,7 @@ import { useRouter } from 'vue-router';
 import { ArrowLeft } from '@lucide/vue';
 import AppShell from '../layout/AppShell.vue';
 import Button from '../ui/Button.vue';
-import AccountField from '../ui/AccountField.vue';
+import ItemField from '../ui/ItemField.vue';
 import IconUpload from '../ui/IconUpload.vue';
 // import ColorPicker from '../ui/ColorPicker.vue';
 import AlertModal from '../ui/AlertModal.vue';
@@ -101,7 +101,7 @@ watch(
                 aria-label="Click to upload profile picture"
               />
 
-              <AccountField
+              <ItemField
                 class="name-field"
                 label="name"
                 type="text"
