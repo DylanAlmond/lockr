@@ -34,7 +34,7 @@ function selectType(type: { disabled: boolean; value: ItemType }) {
 
 const types = computed(() => [
   { value: 'account' as ItemType, label: 'Account', description: 'Logins, emails, passwords', icon: KeyRound, disabled: false },
-  { value: 'card' as ItemType, label: 'Card', description: 'Cards with hidden numbers', icon: CreditCard, disabled: false },
+  { value: 'card' as ItemType, label: 'Card', description: 'Bank Cards, Credit Cards', icon: CreditCard, disabled: false },
   { value: 'note' as ItemType, label: 'Note', description: 'Plain note with a body', icon: FileText, disabled: false },
   { value: 'identity' as ItemType, label: 'Identity', description: 'Names, addresses, contacts', icon: IdCard, disabled: false }
 ]);
