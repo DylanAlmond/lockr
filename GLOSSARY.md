@@ -21,11 +21,11 @@ The category of an item, fixed at creation. The kinds are:
 - **note** — freeform text
 - **identity** — a personal identity: name, contact details, address
 
-In code: the `ItemKind` enum, serialized on the wire as `"kind": "account" | "card" | "note" | "identity"`. Kinds without a wired-up safe view cannot yet exist in a vault.
+In code: the `ItemKind` enum, serialized on the wire as `"kind": "account" | "card" | "note" | "identity"`. A kind is fixed for an item's lifetime and determines which field keys the item accepts.
 
 ## Field Key
 
-The name under which a single secret value is stored for an item — for example `password` on an account item. A field key maps to exactly one secret value; together a key and its value form a **secret field**. Secret fields live in the vault blob alongside the items they belong to, but are never sent to the UI except through the on-demand secret fetch (see [Safe View Pattern](#safe-view-pattern)).
+The name under which a single secret value is stored for an item — for example `password` on an account item, or `card_number`, `security_code`, `pin` on a card item. A field key maps to exactly one secret value; together a key and its value form a **secret field**. Secret fields live in the vault blob alongside the items they belong to, but are never sent to the UI except through the on-demand secret fetch (see [Safe View Pattern](#safe-view-pattern)).
 
 ## Schema Version
 
@@ -40,7 +40,7 @@ The copy of a vault's encrypted file written immediately before a schema migrati
 The rule that secrets never leave the backend except through an explicit per-field fetch:
 
 - List and detail results sent to the UI are **safe views** — models that structurally cannot carry secret values (`SafeVault`, `SafeItem`).
-- A secret value reaches the UI only when requested, one field key at a time, via the on-demand secret fetch (`get_item_secret`).
+- A secret value reaches the UI only when requested, one field key at a time, via the on-demand secret fetch (`get_item_secret`). An unset field key fetches as null — 'no value exists' — while a failed fetch is an error; the two states are never conflated.
 - Nothing deletes or exposes secrets as a side effect: listing, searching, and editing metadata never touch secret values.
 
 The UI shows masked placeholders until a secret is explicitly revealed or copied.
