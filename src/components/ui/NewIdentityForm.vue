@@ -2,7 +2,7 @@
 import { computed, onMounted, ref, watch } from 'vue';
 import { CreateItemProps, useVault } from '../../composables/useVault.ts';
 import { Vault } from '../../types/index.ts';
-import AccountField from './AccountField.vue';
+import ItemField from './ItemField.vue';
 import Button from './Button.vue';
 import IconUpload from './IconUpload.vue';
 import Select from './Select.vue';
@@ -103,7 +103,7 @@ onMounted(async () => {
           </div>
 
           <!-- Full Name -->
-          <AccountField
+          <ItemField
             label="full name"
             type="text"
             required
@@ -113,7 +113,7 @@ onMounted(async () => {
           />
 
           <!-- Email -->
-          <AccountField
+          <ItemField
             label="email"
             type="email"
             input
@@ -122,7 +122,7 @@ onMounted(async () => {
           />
 
           <!-- Phone -->
-          <AccountField
+          <ItemField
             label="phone"
             type="tel"
             input
@@ -131,7 +131,7 @@ onMounted(async () => {
           />
 
           <!-- Address -->
-          <AccountField
+          <ItemField
             label="address line 1"
             type="text"
             input
@@ -139,7 +139,7 @@ onMounted(async () => {
             placeholder="Street Address"
           />
 
-          <AccountField
+          <ItemField
             label="address line 2"
             type="text"
             input
@@ -147,7 +147,7 @@ onMounted(async () => {
             placeholder="Apartment, suite, unit…"
           />
 
-          <AccountField
+          <ItemField
             label="city"
             type="text"
             input
@@ -155,7 +155,7 @@ onMounted(async () => {
             placeholder="City"
           />
 
-          <AccountField
+          <ItemField
             label="postal code"
             type="text"
             input
@@ -163,7 +163,7 @@ onMounted(async () => {
             placeholder="Postal Code"
           />
 
-          <AccountField
+          <ItemField
             label="country"
             type="text"
             input

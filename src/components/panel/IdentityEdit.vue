@@ -5,7 +5,7 @@ import { ChevronRight } from '@lucide/vue';
 import Button from '../ui/Button.vue';
 import TagList from '../ui/TagList.vue';
 import { formatTimestamp } from '../../util/timestamp.ts';
-import AccountField from '../ui/AccountField.vue';
+import ItemField from '../ui/ItemField.vue';
 import IconUpload from '../ui/IconUpload.vue';
 import useAppStore from '../../stores/appStore.ts';
 
@@ -128,7 +128,7 @@ async function handleSave() {
 
       <section class="identity-fields-section">
         <!-- Full Name -->
-        <AccountField
+        <ItemField
           label="full name"
           type="text"
           required
@@ -138,7 +138,7 @@ async function handleSave() {
         />
 
         <!-- Email -->
-        <AccountField
+        <ItemField
           label="email"
           type="email"
           input
@@ -147,7 +147,7 @@ async function handleSave() {
         />
 
         <!-- Phone -->
-        <AccountField
+        <ItemField
           label="phone"
           type="tel"
           input
@@ -156,7 +156,7 @@ async function handleSave() {
         />
 
         <!-- Address -->
-        <AccountField
+        <ItemField
           label="address line 1"
           type="text"
           input
@@ -164,7 +164,7 @@ async function handleSave() {
           placeholder="Street Address"
         />
 
-        <AccountField
+        <ItemField
           label="address line 2"
           type="text"
           input
@@ -172,9 +172,9 @@ async function handleSave() {
           placeholder="Apartment, suite, unit…"
         />
 
-        <AccountField label="city" type="text" input v-model="form.city" placeholder="City" />
+        <ItemField label="city" type="text" input v-model="form.city" placeholder="City" />
 
-        <AccountField
+        <ItemField
           label="postal code"
           type="text"
           input
@@ -182,7 +182,7 @@ async function handleSave() {
           placeholder="Postal Code"
         />
 
-        <AccountField
+        <ItemField
           label="country"
           type="text"
           input

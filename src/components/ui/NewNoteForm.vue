@@ -2,7 +2,7 @@
 import { computed, onMounted, ref, watch } from 'vue';
 import { Vault } from '../../types/index.ts';
 import Button from './Button.vue';
-import AccountField from './AccountField.vue';
+import ItemField from './ItemField.vue';
 import { CreateItemProps, useVault } from '../../composables/useVault.ts';
 import Select from './Select.vue';
 import IconUpload from './IconUpload.vue';
@@ -91,7 +91,7 @@ onMounted(async () => {
           </div>
 
           <!-- Title -->
-          <AccountField
+          <ItemField
             label="title"
             type="text"
             input

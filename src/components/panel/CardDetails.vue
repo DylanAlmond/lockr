@@ -5,11 +5,11 @@ import { ChevronRight, EllipsisVertical, Eye, EyeOff, Pencil, Star } from '@luci
 import Button from '../ui/Button.vue';
 import TagList from '../ui/TagList.vue';
 import { formatTimestamp } from '../../util/timestamp.ts';
-import AccountField from '../ui/AccountField.vue';
+import ItemField from '../ui/ItemField.vue';
 import { VAULT_COLORS } from '../../util/constants.ts';
 import Dropdown, { DropdownItem } from '../ui/Dropdown.vue';
 import AlertModal from '../ui/AlertModal.vue';
-import MoveAccountModal from '../ui/MoveAccountModal.vue';
+import MoveItemModal from '../ui/MoveItemModal.vue';
 import { useModal } from '../../composables/useModal.ts';
 import { useVault } from '../../composables/useVault.ts';
 import { cardSecretMask, type CardSecretKey, SECRET_FIELD_CARD_NUMBER, SECRET_FIELD_PIN, SECRET_FIELD_SECURITY_CODE } from '../../util/secrets.ts';
@@ -38,7 +38,7 @@ interface SecretFieldView {
   shown: boolean;
   /** Fetched on demand; never prefetched, never sent elsewhere */
   value: string | null;
-  /** Stable per-field copy hook (AccountField resets on prop identity change) */
+  /** Stable per-field copy hook (ItemField resets on prop identity change) */
   copyValue: () => Promise<string | null>;
 }
 
@@ -72,7 +72,7 @@ function secretPresent(key: string): boolean {
 
 // Masked placeholder echoes the value's structure via the shared helper
 // (card number keeps the real last 4); absent fields resolve to null →
-// AccountField shows 'No Value'.
+// ItemField shows 'No Value'.
 function secretDisplay(field: SecretFieldView): string | null {
   if (field.shown) return field.value ?? null; // failed fetch → 'No Value'
   return cardSecretMask(field.key, secretPresent(field.key), card.value?.card_number_last4 ?? null);
@@ -114,7 +114,7 @@ function goToEdit() {
   if (!card.value) return;
   router.push({
     name: route.name as string,
-    params: { ...route.params, accountId: card.value.id, mode: 'edit' },
+    params: { ...route.params, itemId: card.value.id, mode: 'edit' },
     query: route.query
   });
 }
@@ -127,7 +127,7 @@ async function handleDelete() {
   if (success) {
     await router.replace({
       name: route.name as string,
-      params: { ...route.params, accountId: undefined, mode: undefined },
+      params: { ...route.params, itemId: undefined, mode: undefined },
       query: route.query
     });
   }
@@ -139,7 +139,7 @@ const miscMenuItems = computed<DropdownItem[]>(() => [
     disabled: !card.value,
     onSelect: () => {
       if (!card.value) return;
-      openModal(markRaw(MoveAccountModal), {
+      openModal(markRaw(MoveItemModal), {
         onClose: () => {},
         onConfirm: () => {}
       });
@@ -250,9 +250,9 @@ watch(
       <section class="card-data-section">
         <div class="details-fields">
           <!-- Non-secret fields -->
-          <AccountField label="cardholder" :displayValue="card.cardholder_name" />
-          <AccountField label="brand" :displayValue="card.brand" />
-          <AccountField
+          <ItemField label="cardholder" :displayValue="card.cardholder_name" />
+          <ItemField label="brand" :displayValue="card.brand" />
+          <ItemField
             label="expiry"
             :displayValue="`${String(card.expiry_month).padStart(2, '0')}/${card.expiry_year}`"
           />
@@ -260,7 +260,7 @@ watch(
 
         <!-- Secrets: plaintext rows with account-password affordances -->
         <div class="secret-fields">
-          <AccountField
+          <ItemField
             v-for="field in secretFields"
             :key="field.key"
             :label="field.label"
@@ -279,7 +279,7 @@ watch(
                 @click="toggleSecret(field)"
               />
             </template>
-          </AccountField>
+          </ItemField>
         </div>
       </section>
 

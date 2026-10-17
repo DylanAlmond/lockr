@@ -32,7 +32,7 @@ const { openModal } = useModal();
 // Derive edit state directly from the URL
 const isEditing = computed(() => route.params.mode === 'edit');
 
-const hasSelectedItem = computed(() => !!route.params.accountId);
+const hasSelectedItem = computed(() => !!route.params.itemId);
 
 const isPanelOpen = ref(hasSelectedItem.value);
 
@@ -41,9 +41,9 @@ const togglePanel = () => {
 };
 
 watch(
-  () => route.params.accountId,
-  (accountId) => {
-    isPanelOpen.value = !!accountId;
+  () => route.params.itemId,
+  (itemId) => {
+    isPanelOpen.value = !!itemId;
   }
 );
 
@@ -120,7 +120,7 @@ const createMenuItems = ref<DropdownItem[]>([
     </template>
 
     <div
-      class="accounts-content"
+      class="items-content"
       :class="{
         'has-selection': hasSelectedItem,
         'panel-open': isPanelOpen
@@ -151,7 +151,7 @@ const createMenuItems = ref<DropdownItem[]>([
 </template>
 
 <style scoped>
-.accounts-content {
+.items-content {
   position: relative;
   display: grid;
   grid-template-columns: 440px minmax(0, 1fr);
@@ -162,14 +162,14 @@ const createMenuItems = ref<DropdownItem[]>([
   overflow: hidden;
 }
 
-.accounts-content > main {
+.items-content > main {
   display: flex;
   flex-direction: column;
   min-width: 0;
   min-height: 0;
 }
 
-.accounts-content > aside {
+.items-content > aside {
   position: relative;
 
   display: flex;
@@ -216,7 +216,7 @@ const createMenuItems = ref<DropdownItem[]>([
  * Desktop:
  * The panel is part of the normal layout.
  */
-.accounts-content.has-selection {
+.items-content.has-selection {
   grid-template-columns: minmax(360px, 440px) minmax(480px, 1fr);
 }
 
@@ -225,16 +225,16 @@ const createMenuItems = ref<DropdownItem[]>([
  * The panel becomes a slide-over.
  */
 @media (max-width: 1140px) {
-  .accounts-content {
+  .items-content {
     display: block;
   }
 
-  .accounts-content > main {
+  .items-content > main {
     width: 100%;
     height: 100%;
   }
 
-  .accounts-content > aside {
+  .items-content > aside {
     position: absolute;
     inset: 0 0 0 auto;
 
@@ -252,7 +252,7 @@ const createMenuItems = ref<DropdownItem[]>([
     transition: transform 0.5s cubic-bezier(0.22, 1, 0.36, 1);
   }
 
-  .accounts-content > aside.is-open {
+  .items-content > aside.is-open {
     transform: translateX(0);
   }
 

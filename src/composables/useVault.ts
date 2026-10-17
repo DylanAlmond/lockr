@@ -1,8 +1,7 @@
 import { ref } from 'vue';
 import {
-  Account,
-  AccountFilter,
   Entropy,
+  ItemFilter,
   NewItemData,
   SafeItem,
   SecretInput,
@@ -19,7 +18,7 @@ export interface CreateItemProps {
   icon?: string | null;
   /** Kind wire payload: internally tagged like the backend's NewItemData */
   data: NewItemData;
-  /** Initial secret fields (cards); keys are validated backend-side */
+  /** Initial secret fields (accounts carry 'password', cards their keys); validated backend-side */
   secrets?: SecretInput[];
 }
 
@@ -32,14 +31,6 @@ export interface UpdateItemProps {
   data?: NewItemData;
 }
 
-export interface CreateAccountProps {
-  vaultId: string;
-  username: string;
-  password: string;
-  displayName?: string | null;
-  email?: string | null;
-  icon?: string | null;
-}
 
 export function useVault() {
   async function listVaultIds(): Promise<string[]> {
@@ -108,25 +99,7 @@ export function useVault() {
     }
   }
 
-  async function getAccountbyId(accountId: string): Promise<Account | null> {
-    try {
-      return await invoke<Account>('get_account_by_id', { accountId });
-    } catch (e) {
-      error.value = String(e);
-      return null;
-    }
-  }
-
-  async function getAllAccounts(filter?: AccountFilter): Promise<Account[]> {
-    try {
-      return await invoke<Account[]>('get_all_accounts', { filter: filter || {} });
-    } catch (e) {
-      error.value = String(e);
-      return [];
-    }
-  }
-
-  // ============ Items (generic surface) ============
+  // ============ Items (generic surface, all kinds) ============
 
   async function getItembyId(itemId: string): Promise<SafeItem | null> {
     try {
@@ -137,7 +110,7 @@ export function useVault() {
     }
   }
 
-  async function getAllItems(filter?: AccountFilter): Promise<SafeItem[]> {
+  async function getAllItems(filter?: ItemFilter): Promise<SafeItem[]> {
     try {
       return await invoke<SafeItem[]>('get_all_items', { filter: filter || {} });
     } catch (e) {
@@ -238,72 +211,14 @@ export function useVault() {
     }
   }
 
-  async function addAccount(data: CreateAccountProps): Promise<Account | null> {
+  /**
+   * Password strength for the item's `password` field. Returns null only
+   * when the item has no stored password (the backend answers "Item has
+   * no password" as a validation error for that case).
+   */
+  async function getItemPasswordStrength(vaultId: string, itemId: string): Promise<Entropy | null> {
     try {
-      return await invoke<Account>('add_account', {
-        vaultId: data.vaultId,
-        displayName: data.displayName || null,
-        username: data.username,
-        email: data.email || null,
-        password: data.password,
-        icon: data.icon || null
-      });
-    } catch (e) {
-      error.value = String(e);
-      return null;
-    }
-  }
-
-  async function updateAccount(
-    vaultId: string,
-    accountId: string,
-    data: Partial<Omit<Account, 'id'>>
-  ): Promise<Account | null> {
-    try {
-      return await invoke<Account>('update_account', {
-        vaultId,
-        accountId,
-        displayName: data.display_name ?? undefined,
-        username: data.username ?? undefined,
-        email: data.email ?? undefined,
-        favourite: data.favourite ?? undefined,
-        tags: data.tags ?? undefined,
-        icon: data.icon ?? undefined,
-        color: data.color ?? undefined
-      });
-    } catch (e) {
-      error.value = String(e);
-      return null;
-    }
-  }
-
-  async function deleteAccount(vaultId: string, accountId: string): Promise<boolean> {
-    try {
-      await invoke('delete_account', { vaultId, accountId });
-      return true;
-    } catch (e) {
-      error.value = String(e);
-      return false;
-    }
-  }
-
-  async function getSecret(vaultId: string, accountId: string): Promise<string | null> {
-    try {
-      return await invoke<string>('get_secret', { vaultId, accountId });
-    } catch (e) {
-      error.value = String(e);
-      // Errors propagate: null must mean 'no value exists' only, so
-      // callers can never mistake a failed fetch for an empty password
-      throw e;
-    }
-  }
-
-  async function getAccountPasswordStrength(
-    vaultId: string,
-    accountId: string
-  ): Promise<Entropy | null> {
-    try {
-      return await invoke<Entropy>('get_account_password_strength', { vaultId, accountId });
+      return await invoke<Entropy>('get_item_password_strength', { vaultId, itemId });
     } catch (e) {
       error.value = String(e);
       return null;
@@ -372,16 +287,7 @@ export function useVault() {
     updateVault,
     deleteVault,
 
-    // Accounts
-    getAccountbyId,
-    getAllAccounts,
-    addAccount,
-    updateAccount,
-    deleteAccount,
-    getSecret,
-    getAccountPasswordStrength,
-
-    // Items (generic surface)
+    // Items (the generic surface, all kinds)
     getItembyId,
     getAllItems,
     addItem,
@@ -392,6 +298,7 @@ export function useVault() {
     // Per-field secrets
     getItemSecret,
     updateItemSecret,
+    getItemPasswordStrength,
 
     // Util
     getPasswordStrength,

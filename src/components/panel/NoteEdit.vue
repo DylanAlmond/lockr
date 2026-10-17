@@ -5,7 +5,7 @@ import { ChevronRight } from '@lucide/vue';
 import Button from '../ui/Button.vue';
 import TagList from '../ui/TagList.vue';
 import { formatTimestamp } from '../../util/timestamp.ts';
-import AccountField from '../ui/AccountField.vue';
+import ItemField from '../ui/ItemField.vue';
 import IconUpload from '../ui/IconUpload.vue';
 import useAppStore from '../../stores/appStore.ts';
 
@@ -106,7 +106,7 @@ async function handleSave() {
 
       <section class="note-fields-section">
         <!-- Title -->
-        <AccountField
+        <ItemField
           label="title"
           type="text"
           input

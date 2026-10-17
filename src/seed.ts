@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
-import type { User, Vault, Account } from './types';
+import type { SafeItem, User, Vault } from './types';
 
 const MASTER_PASSWORD = 'test12';
 
@@ -30,13 +30,19 @@ async function addAccount(
   password: string,
   displayName?: string | null,
   email?: string | null
-): Promise<Account | null> {
-  return await invoke<Account>('add_account', {
+): Promise<SafeItem | null> {
+  // The account kind rides the generic item surface; the initial password
+  // is a `password` secret field
+  return await invoke<SafeItem>('add_item', {
     vaultId,
     displayName: displayName || null,
-    username,
-    email: email || null,
-    password
+    icon: null,
+    data: {
+      kind: 'account',
+      username,
+      email: email || null
+    },
+    secrets: [{ key: 'password', value: password }]
   });
 }
 
@@ -293,15 +299,15 @@ async function run() {
     for (const acc of test_accounts) {
       console.log(`Creating account: ${acc.username}`);
 
-      const account = (await addAccount(
+      await addAccount(
         acc.vaultId,
         acc.username,
         acc.password,
         acc.displayName,
         acc.email
-      )) as Account;
+      );
 
-      console.log(`✅ Created account: ${account.username}`);
+      console.log(`✅ Created account: ${acc.username}`);
     }
 
     console.log('\n✅ Dev seed data generated successfully!');

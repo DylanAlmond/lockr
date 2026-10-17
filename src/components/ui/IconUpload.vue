@@ -45,7 +45,7 @@ async function handleUpload() {
 <template>
   <div class="icon-upload">
     <div
-      class="account-icon"
+      class="item-icon"
       :class="{ loading: isUploading }"
       @click="handleUpload"
       role="button"
@@ -71,7 +71,7 @@ async function handleUpload() {
   gap: 0.5rem;
 }
 
-.account-icon {
+.item-icon {
   position: relative;
   display: flex;
   justify-content: center;

@@ -9,7 +9,7 @@ export const SECRET_FIELD_PASSWORD = 'password';
 export type CardSecretKey = 'card_number' | 'security_code' | 'pin';
 
 /** Account password structural mask. Doubles as the copy-gating sentinel
- * in AccountField: a display value equal to it means "mask only, nothing
+ * in ItemField: a display value equal to it means "mask only, nothing
  * real to copy". */
 export const ACCOUNT_PASSWORD_MASK = '••••••••••••••••';
 

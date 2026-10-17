@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue';
-import { SafeItem, AccountFilter } from '../../types/index.ts';
+import { SafeItem, ItemFilter } from '../../types/index.ts';
 import { useRoute } from 'vue-router';
 import { useVault } from '../../composables/useVault.ts';
 import { useSearch } from '../../composables/useSearch.ts';
@@ -19,7 +19,7 @@ import Select from '../ui/Select.vue';
 import { useModal } from '../../composables/useModal.ts';
 import NewItemModal from '../ui/NewItemModal.vue';
 
-type Props = AccountFilter & {
+type Props = ItemFilter & {
   recently_accessed: boolean;
 };
 
@@ -148,7 +148,7 @@ function itemRoute(itemId: string) {
     name: route.name as string,
     params: {
       ...route.params,
-      accountId: itemId,
+      itemId: itemId,
       mode: undefined // Clear edit/create mode when switching items
     },
     query: route.query // Preserve filter queries
@@ -238,13 +238,13 @@ watch(
         </Button>
       </div>
 
-      <div v-for="group in groupedItems" class="account-group" :key="group.label">
+      <div v-for="group in groupedItems" class="item-group" :key="group.label">
         <h2>{{ group.label }}</h2>
-        <ul class="account-list">
+        <ul class="item-list">
           <li v-for="item in group.items" :key="item.id">
-            <!-- active-class works natively here because router-link matches the accountId param -->
-            <RouterLink class="account" :to="itemRoute(item.id)" active-class="active">
-              <div class="account-icon">
+            <!-- active-class works natively here because router-link matches the itemId param -->
+            <RouterLink class="item" :to="itemRoute(item.id)" active-class="active">
+              <div class="item-icon">
                 <img v-if="item.icon" :src="item.icon" alt="Item icon" class="icon-image" />
                 <span v-else class="icon-text">
                   {{ itemLabel(item)[0].toUpperCase() }}
@@ -256,7 +256,7 @@ watch(
                   color="var(--color-accent)"
                 />
               </div>
-              <div class="account-meta">
+              <div class="item-meta">
                 <h3>{{ itemLabel(item) }}</h3>
                 <span>{{ itemSubtitle(item) }}</span>
               </div>
@@ -320,7 +320,7 @@ watch(
   }
 }
 
-.account-group {
+.item-group {
   display: flex;
   flex-direction: column;
   gap: 1rem;
@@ -335,14 +335,14 @@ watch(
   }
 }
 
-.account-list {
+.item-list {
   display: flex;
   flex-direction: column;
   list-style: none;
   gap: 0.5rem;
 }
 
-.account {
+.item {
   display: flex;
   align-items: center;
   gap: 0.75rem;
@@ -382,7 +382,7 @@ watch(
   }
 }
 
-.account-icon {
+.item-icon {
   display: flex;
   justify-content: center;
   align-items: center;
@@ -418,7 +418,7 @@ watch(
   }
 }
 
-.account-meta {
+.item-meta {
   > h3 {
     font-size: 1rem;
     font-family: var(--font-geo);

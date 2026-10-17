@@ -6,7 +6,7 @@ import { ChevronRight } from '@lucide/vue';
 import Button from '../ui/Button.vue';
 import TagList from '../ui/TagList.vue';
 import { formatTimestamp } from '../../util/timestamp.ts';
-import AccountField from '../ui/AccountField.vue';
+import ItemField from '../ui/ItemField.vue';
 import IconUpload from '../ui/IconUpload.vue';
 import useAppStore from '../../stores/appStore.ts';
 import { PASSWORDSTRENGTHS } from '../../util/constants.ts';
@@ -15,8 +15,11 @@ import { useVault } from '../../composables/useVault.ts';
 
 const route = useRoute();
 const router = useRouter();
-const { state, updateActiveAccount, setActiveAccount } = useAppStore();
-const { getSecret, getPasswordStrength, updateItemSecret } = useVault();
+const { state, updateActiveItem, setActiveItem } = useAppStore();
+const { getItemSecret, getPasswordStrength, updateItemSecret } = useVault();
+
+// Narrowed on the account kind, like the other per-kind editors
+const account = computed(() => (state.activeItem?.kind === 'account' ? state.activeItem : null));
 
 const form = ref<Partial<Account>>({});
 // const isFetchingLogo = ref(false);
@@ -54,14 +57,14 @@ const passwordPlaceholder = computed(() => {
 });
 
 async function fetchPassword() {
-  const account = state.activeAccount;
-  if (!account || passwordOriginal.value !== null) return;
+  const current = account.value;
+  if (!current || passwordOriginal.value !== null) return;
 
   try {
-    const stored = await getSecret(account.vault_id, account.id);
+    const stored = await getItemSecret(current.vault_id, current.id, SECRET_FIELD_PASSWORD);
 
-    // The fetch may outlive this account's context; discard if it changed
-    if (state.activeAccount?.id !== account.id) return;
+    // The fetch may outlive this item's context; discard if it changed
+    if (state.activeItem?.id !== current.id) return;
 
     passwordOriginal.value = stored ?? '';
     // Stamp the input only if the user hasn't typed while the fetch was
@@ -89,12 +92,13 @@ const displayInitial = computed(() => {
   return (form.value.display_name || form.value.username || '')[0]?.toUpperCase() || '?';
 });
 
-// Sync local form state whenever the globally active account changes
+// Sync local form state whenever the globally active item changes
 watch(
-  () => state.activeAccount,
-  (newAccount) => {
-    form.value = newAccount ? { ...newAccount } : {};
-    manuallySetIcon.value = false; // Reset when loading a new account
+  () => state.activeItem,
+  (item) => {
+    const view = item?.kind === 'account' ? item : null;
+    form.value = view ? { ...view } : {};
+    manuallySetIcon.value = false; // Reset when loading a new item
 
     // Reset the password row and fetch for the (new) account
     passwordOriginal.value = null;
@@ -145,7 +149,7 @@ function handleCancel() {
 }
 
 async function handleSave() {
-  if (!state.activeAccount) return;
+  if (!account.value) return;
 
   // The prefetch may still be in flight; wait for it so passwordOriginal
   // is known — otherwise the push guard below would silently skip the
@@ -155,12 +159,25 @@ async function handleSave() {
   }
 
   // Snapshot the password FIRST: pushing metadata replaces the active
-  // account object, which re-triggers the reset watcher below and would
+  // item object, which re-triggers the reset watcher below and would
   // otherwise wipe the fetched value before the password push runs.
   const original = passwordOriginal.value;
   const input = passwordInput.value;
+  const item = account.value;
 
-  const updated = await updateActiveAccount(form.value);
+  const success = await updateActiveItem({
+    displayName: form.value.display_name ?? null,
+    icon: form.value.icon || null,
+    favourite: form.value.favourite ?? null,
+    tags: form.value.tags || [],
+    color: form.value.color ?? null,
+    data: {
+      kind: 'account',
+      username: form.value.username ?? '',
+      email: form.value.email ?? null
+    }
+  });
+  if (!success) return;
 
   // Push the password only when it changed from the fetched original.
   // Emptying the field removes the value, like any other secret field.
@@ -168,36 +185,31 @@ async function handleSave() {
   // landed: a failed fetch stays null, so the push — which could erase a
   // stored password we couldn't read — is skipped (surfaced by the
   // fetch-failure notice next to the field).
-  let passwordTouched = false;
-  if (updated && original !== null && input !== original) {
-    passwordTouched = true;
+  if (original !== null && input !== original) {
     await updateItemSecret(
-      state.activeAccount.vault_id,
-      state.activeAccount.id,
+      item.vault_id,
+      item.id,
       SECRET_FIELD_PASSWORD,
       input || null
     );
+
+    // Secret changes re-derive nothing on the view itself, but the
+    // password row was reset by the metadata push — refresh the active
+    // item so the details view shows the final state
+    await setActiveItem(item.id);
   }
 
-  if (updated) {
-    // Secret changes re-derive the payload (presence, entropy); refresh
-    // the active account so the details view shows the final state
-    if (passwordTouched) {
-      await setActiveAccount(state.activeAccount.id);
-    }
-
-    router.push({
-      name: route.name as string,
-      params: { ...route.params, mode: undefined },
-      query: route.query
-    });
-  }
+  router.push({
+    name: route.name as string,
+    params: { ...route.params, mode: undefined },
+    query: route.query
+  });
 }
 </script>
 
 <template>
   <!-- Empty -->
-  <div v-if="!state.activeAccount" class="wrapper">No account found.</div>
+  <div v-if="!account" class="wrapper">No account found.</div>
 
   <!-- Edit Mode -->
   <div v-else class="wrapper">
@@ -218,7 +230,7 @@ async function handleSave() {
           aria-label="Click to upload account icon"
         />
 
-        <AccountField
+        <ItemField
           class="display-name"
           label="display name"
           type="text"
@@ -228,9 +240,9 @@ async function handleSave() {
         />
       </section>
 
-      <section class="account-fields-section">
+      <section class="item-fields-section">
         <!-- Username -->
-        <AccountField
+        <ItemField
           label="username"
           type="text"
           input
@@ -239,7 +251,7 @@ async function handleSave() {
         />
 
         <!-- Email -->
-        <AccountField
+        <ItemField
           label="email"
           type="email"
           input
@@ -248,7 +260,7 @@ async function handleSave() {
         />
 
         <!-- Password (part of the shared section; emptying it removes the value) -->
-        <AccountField
+        <ItemField
           label="password"
           :type="passwordFocused ? 'text' : 'password'"
           input
@@ -262,7 +274,7 @@ async function handleSave() {
               {{ PASSWORDSTRENGTHS[passwordEntropy.score] }}
             </span>
           </template>
-        </AccountField>
+        </ItemField>
       </section>
 
       <!-- Failed password prefetch: the stored state is unknown, so save
@@ -279,7 +291,7 @@ async function handleSave() {
 
       <section class="timestamp-section">
         <ChevronRight :size="20" />
-        <span>{{ `Last edited ${formatTimestamp(state.activeAccount.updated_at)} ` }}</span>
+        <span>{{ `Last edited ${formatTimestamp(account.updated_at)} ` }}</span>
       </section>
     </main>
   </div>
@@ -330,7 +342,7 @@ main {
   flex: 1;
 }
 
-.account-fields-section {
+.item-fields-section {
   display: flex;
   flex-direction: column;
   width: 100%;

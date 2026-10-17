@@ -1,22 +1,19 @@
 import { reactive } from 'vue';
-import { Account, SafeItem, Vault } from '../types';
+import { SafeItem, Vault } from '../types';
 import {
   useVault,
-  type CreateAccountProps,
   type CreateItemProps,
   type UpdateItemProps
 } from '../composables/useVault';
 
 interface AppStore {
-  activeAccount: Account | null;
-  /** Active item of any kind (notes, and later cards/identities). */
+  /** Active item of any kind (account, note, card, identity). */
   activeItem: SafeItem | null;
   mutationCount: number;
   vaultMutationCount: number;
 }
 
 const state = reactive<AppStore>({
-  activeAccount: null,
   activeItem: null,
   mutationCount: 0,
   vaultMutationCount: 0
@@ -24,10 +21,6 @@ const state = reactive<AppStore>({
 
 function useAppStore() {
   const {
-    getAccountbyId,
-    updateAccount,
-    deleteAccount,
-    addAccount,
     createVault,
     updateVault,
     deleteVault,
@@ -46,52 +39,7 @@ function useAppStore() {
     state.activeItem = await getItembyId(itemId);
   }
 
-  async function setActiveAccount(accountId: string | null) {
-    if (!accountId) {
-      state.activeAccount = null;
-      return;
-    }
-    state.activeAccount = await getAccountbyId(accountId);
-  }
-
-  async function updateActiveAccount(data: Partial<Account>): Promise<boolean> {
-    if (!state.activeAccount) return false;
-    try {
-      state.activeAccount = await updateAccount(
-        state.activeAccount.vault_id,
-        state.activeAccount.id,
-        data
-      );
-      state.mutationCount++;
-      return true;
-    } catch (error) {
-      return false;
-    }
-  }
-
-  async function createNewAccount(data: CreateAccountProps): Promise<Account | null> {
-    try {
-      const newAccount = await addAccount(data);
-      state.mutationCount++;
-      return newAccount;
-    } catch (error) {
-      return null;
-    }
-  }
-
-  async function deleteActiveAccount(): Promise<boolean> {
-    if (!state.activeAccount) return false;
-    try {
-      await deleteAccount(state.activeAccount.vault_id, state.activeAccount.id);
-      state.activeAccount = null;
-      state.mutationCount++;
-      return true;
-    } catch (error) {
-      return false;
-    }
-  }
-
-  // ============ Items (generic surface) ============
+  // ============ Items (the generic surface, all kinds) ============
 
   async function createNewItem(props: CreateItemProps): Promise<SafeItem | null> {
     try {
@@ -110,10 +58,6 @@ function useAppStore() {
     if (!updated) return false;
 
     state.activeItem = updated;
-    // Keep the account view in sync for account-kind items
-    if (item.kind === 'account' && updated.kind === 'account') {
-      state.activeAccount = updated;
-    }
     state.mutationCount++;
     return true;
   }
@@ -126,7 +70,6 @@ function useAppStore() {
       if (!success) return false;
 
       state.activeItem = null;
-      if (item.kind === 'account') state.activeAccount = null;
       state.mutationCount++;
       return true;
     } catch (error) {
@@ -146,7 +89,6 @@ function useAppStore() {
       if (!moved) return null;
 
       state.activeItem = moved;
-      if (moved.kind === 'account') state.activeAccount = moved;
       state.vaultMutationCount++;
       return state.activeItem;
     } catch (error) {
@@ -189,11 +131,7 @@ function useAppStore() {
 
   return {
     state,
-    setActiveAccount,
     setActiveItem,
-    updateActiveAccount,
-    createNewAccount,
-    deleteActiveAccount,
     createNewItem,
     updateActiveItem,
     deleteActiveItem,

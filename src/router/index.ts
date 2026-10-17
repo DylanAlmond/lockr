@@ -3,8 +3,8 @@ import AppLayout from '../components/layout/AppLayout.vue';
 import AuthView from '../components/views/AuthView.vue';
 import SettingsView from '../components/views/SettingsView.vue';
 import { useUser } from '../composables/useUser';
-import AccountList from '../components/panel/AccountList.vue';
-import AccountPanel from '../components/panel/AccountPanel.vue';
+import ItemList from '../components/panel/ItemList.vue';
+import ItemPanel from '../components/panel/ItemPanel.vue';
 import RegisterView from '../components/views/RegisterView.vue';
 import LoginView from '../components/views/LoginView.vue';
 
@@ -16,14 +16,14 @@ const routes: RouteRecordRaw[] = [
     redirect: '/all-items',
     children: [
       {
-        // :accountId? handles viewing an account
+        // :itemId? handles viewing an item
         // :mode? handles 'edit' or 'create'
-        path: 'all-items/:accountId?/:mode?',
+        path: 'all-items/:itemId?/:mode?',
         name: 'all-items',
         meta: { requiresAuth: true },
         components: {
-          list: AccountList,
-          panel: AccountPanel
+          list: ItemList,
+          panel: ItemPanel
         },
         props: {
           // Pass dynamic filters based on the URL query params
@@ -36,12 +36,12 @@ const routes: RouteRecordRaw[] = [
         }
       },
       {
-        path: 'vault/:vaultId/:accountId?/:mode?',
+        path: 'vault/:vaultId/:itemId?/:mode?',
         name: 'vault',
         meta: { requiresAuth: true },
         components: {
-          list: AccountList,
-          panel: AccountPanel
+          list: ItemList,
+          panel: ItemPanel
         },
         props: {
           list: (route) => ({

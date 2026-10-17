@@ -2,8 +2,8 @@
 import { onMounted, ref, computed, watch } from 'vue';
 import { Entropy, Vault } from '../../types/index.ts';
 import Button from './Button.vue';
-import AccountField from './AccountField.vue';
-import { CreateAccountProps, useVault } from '../../composables/useVault.ts';
+import ItemField from './ItemField.vue';
+import { CreateItemProps, useVault } from '../../composables/useVault.ts';
 import { PASSWORDSTRENGTHS } from '../../util/constants.ts';
 // import { fetchBrandLogoAsBase64 } from '../../util/imageUpload.ts';
 import Select from './Select.vue';
@@ -14,7 +14,16 @@ const { getPasswordStrength, getUnlockedVaults } = useVault();
 const vaults = ref<Vault[]>([]);
 const manuallySetIcon = ref(false);
 
-const form = ref<CreateAccountProps>({
+interface AccountForm {
+  vaultId: string;
+  username: string;
+  password: string;
+  displayName?: string | null;
+  email?: string | null;
+  icon?: string | null;
+}
+
+const form = ref<AccountForm>({
   vaultId: '',
   username: '',
   password: ''
@@ -37,7 +46,7 @@ const displayInitial = computed(() => {
 });
 
 const emit = defineEmits<{
-  (e: 'submit', data: CreateAccountProps): void;
+  (e: 'submit', data: CreateItemProps): void;
   (e: 'close'): void;
 }>();
 
@@ -54,7 +63,19 @@ watch(
 
 function handleSubmit() {
   if (!form.value.vaultId || !form.value.username) return;
-  emit('submit', { ...form.value });
+  // The account kind rides the generic item surface; the initial password
+  // is a `password` secret field
+  emit('submit', {
+    vaultId: form.value.vaultId,
+    displayName: form.value.displayName ?? null,
+    icon: form.value.icon ?? null,
+    data: {
+      kind: 'account',
+      username: form.value.username,
+      email: form.value.email ?? null
+    },
+    secrets: [{ key: 'password', value: form.value.password }]
+  });
 }
 
 // Calculate password strength in real-time as the user types
@@ -91,7 +112,7 @@ onMounted(async () => {
       />
 
       <main>
-        <section class="account-fields-section">
+        <section class="item-fields-section">
           <div class="select-field">
             <h2 id="move-vault-label">vault</h2>
             <Select
@@ -103,7 +124,7 @@ onMounted(async () => {
           </div>
 
           <!-- Display Name -->
-          <AccountField
+          <ItemField
             label="display name"
             type="text"
             input
@@ -112,7 +133,7 @@ onMounted(async () => {
           />
 
           <!-- Username -->
-          <AccountField
+          <ItemField
             label="username"
             type="text"
             required
@@ -122,7 +143,7 @@ onMounted(async () => {
           />
 
           <!-- Email -->
-          <AccountField
+          <ItemField
             label="email"
             type="email"
             input
@@ -131,7 +152,7 @@ onMounted(async () => {
           />
 
           <!-- Password -->
-          <AccountField
+          <ItemField
             label="password"
             :type="secretType('password')"
             input
@@ -145,7 +166,7 @@ onMounted(async () => {
                 {{ PASSWORDSTRENGTHS[passwordEntropy.score] }}
               </span>
             </template>
-          </AccountField>
+          </ItemField>
         </section>
       </main>
 
@@ -202,7 +223,7 @@ footer {
   white-space: nowrap;
 }
 
-.account-fields-section {
+.item-fields-section {
   display: flex;
   flex-direction: column;
   width: 100%;

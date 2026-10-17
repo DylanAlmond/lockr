@@ -8,7 +8,7 @@ import { formatTimestamp } from '../../util/timestamp.ts';
 import { VAULT_COLORS } from '../../util/constants.ts';
 import Dropdown, { DropdownItem } from '../ui/Dropdown.vue';
 import AlertModal from '../ui/AlertModal.vue';
-import MoveAccountModal from '../ui/MoveAccountModal.vue';
+import MoveItemModal from '../ui/MoveItemModal.vue';
 import { useModal } from '../../composables/useModal.ts';
 import { useVault } from '../../composables/useVault.ts';
 import { markRaw } from 'vue';
@@ -42,7 +42,7 @@ function goToEdit() {
     name: route.name as string,
     params: {
       ...route.params,
-      accountId: note.value.id,
+      itemId: note.value.id,
       mode: 'edit'
     },
     query: route.query
@@ -59,7 +59,7 @@ async function handleDelete() {
       name: route.name as string,
       params: {
         ...route.params,
-        accountId: undefined,
+        itemId: undefined,
         mode: undefined
       },
       query: route.query
@@ -73,7 +73,7 @@ const miscMenuItems = computed<DropdownItem[]>(() => [
     disabled: !note.value,
     onSelect: () => {
       if (!note.value) return;
-      openModal(markRaw(MoveAccountModal), {
+      openModal(markRaw(MoveItemModal), {
         onClose: () => {},
         onConfirm: () => {}
       });

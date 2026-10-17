@@ -7,7 +7,7 @@ import NewAccountForm from './NewAccountForm.vue';
 import NewCardForm from './NewCardForm.vue';
 import NewIdentityForm from './NewIdentityForm.vue';
 import NewNoteForm from './NewNoteForm.vue';
-import { CreateAccountProps, CreateItemProps } from '../../composables/useVault.ts';
+import { CreateItemProps } from '../../composables/useVault.ts';
 import useAppStore from '../../stores/appStore.ts';
 
 type ItemType = 'account' | 'card' | 'note' | 'identity';
@@ -24,7 +24,7 @@ const props = defineProps<{
   defaultVaultId?: string | null;
 }>();
 
-const { createNewAccount, createNewItem } = useAppStore();
+const { createNewItem } = useAppStore();
 
 const selectedType = ref<ItemType | null>(null);
 
@@ -39,8 +39,8 @@ const types = computed(() => [
   { value: 'identity' as ItemType, label: 'Identity', description: 'Names, addresses, contacts', icon: IdCard, disabled: false }
 ]);
 
-async function handleAccountSubmit(data: CreateAccountProps) {
-  const account = await createNewAccount(data);
+async function handleAccountSubmit(data: CreateItemProps) {
+  const account = await createNewItem(data);
   if (account) {
     navigateToCreated(account.vault_id, account.id);
   }
@@ -76,7 +76,7 @@ function navigateToCreated(vaultId: string, itemId: string) {
     name: 'vault',
     params: {
       vaultId,
-      accountId: itemId
+      itemId: itemId
     }
   });
 }

@@ -29,12 +29,7 @@ export interface Account {
   updated_at: string;
 }
 
-export interface AccountSecret {
-  id: string;
-  password: string;
-}
-
-export interface AccountFilter {
+export interface ItemFilter {
   vault_id?: string | null;
   favourite_only?: boolean | null;
   tags?: string[] | null;
@@ -119,8 +114,10 @@ export interface SecretInput {
   value: string;
 }
 
-/** Kind payloads for creating/updating non-account items (wire format). */
+/** Kind payloads for creating/updating items (wire format). Account items
+ * carry their initial password as a `password` SecretInput alongside. */
 export type NewItemData =
+  | { kind: 'account'; username: string; email: string | null }
   | { kind: 'note'; title: string | null; body: string }
   | {
       kind: 'card';

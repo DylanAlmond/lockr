@@ -104,7 +104,7 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div :id="id" class="account-field">
+  <div :id="id" class="item-field">
     <div class="field-meta">
       <h2>{{ label }}</h2>
 
@@ -147,7 +147,7 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
-.account-field {
+.item-field {
   display: flex;
   align-items: center;
   gap: 1rem;
@@ -159,12 +159,12 @@ onUnmounted(() => {
     border-color 0.2s ease;
 }
 
-.account-field:focus-within {
+.item-field:focus-within {
   box-shadow: inset 0 0 0 2px var(--color-accent);
 }
 
 @supports (corner-shape: squircle) {
-  .account-field {
+  .item-field {
     corner-shape: squircle;
   }
 }

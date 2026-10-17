@@ -8,7 +8,7 @@ import {
 } from '../../util/secrets.ts';
 import { SecretInput, Vault } from '../../types/index.ts';
 import { cardSecretMask, cardNumberLast4 } from '../../util/secrets.ts';
-import AccountField from './AccountField.vue';
+import ItemField from './ItemField.vue';
 import Button from './Button.vue';
 import IconUpload from './IconUpload.vue';
 import Select from './Select.vue';
@@ -153,7 +153,7 @@ onMounted(async () => {
           </div>
 
           <!-- Cardholder Name -->
-          <AccountField
+          <ItemField
             label="cardholder name"
             type="text"
             required
@@ -163,7 +163,7 @@ onMounted(async () => {
           />
 
           <!-- Brand -->
-          <AccountField
+          <ItemField
             label="brand"
             type="text"
             input
@@ -172,7 +172,7 @@ onMounted(async () => {
           />
 
           <!-- Expiry -->
-          <AccountField
+          <ItemField
             label="expiry month"
             type="text"
             required
@@ -181,7 +181,7 @@ onMounted(async () => {
             placeholder="e.g. 07"
           />
 
-          <AccountField
+          <ItemField
             label="expiry year"
             type="text"
             required
@@ -191,7 +191,7 @@ onMounted(async () => {
           />
 
           <!-- Card Number: mask as displayed value, typed value while focused -->
-          <AccountField
+          <ItemField
             label="card number"
             type="text"
             input
@@ -203,7 +203,7 @@ onMounted(async () => {
           />
 
           <!-- Security Code -->
-          <AccountField
+          <ItemField
             label="security code"
             type="text"
             input
@@ -215,7 +215,7 @@ onMounted(async () => {
           />
 
           <!-- PIN -->
-          <AccountField
+          <ItemField
             label="pin"
             type="text"
             input

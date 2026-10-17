@@ -55,7 +55,7 @@ async function handleConfirm() {
         params: {
           ...route.params,
           vaultId: moved.vault_id,
-          accountId: moved.id,
+          itemId: moved.id,
           mode: undefined
         },
         query: route.query

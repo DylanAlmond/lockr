@@ -5,11 +5,11 @@ import { ChevronRight, EllipsisVertical, Pencil, Star } from '@lucide/vue';
 import Button from '../ui/Button.vue';
 import TagList from '../ui/TagList.vue';
 import { formatTimestamp } from '../../util/timestamp.ts';
-import AccountField from '../ui/AccountField.vue';
+import ItemField from '../ui/ItemField.vue';
 import { VAULT_COLORS } from '../../util/constants.ts';
 import Dropdown, { DropdownItem } from '../ui/Dropdown.vue';
 import AlertModal from '../ui/AlertModal.vue';
-import MoveAccountModal from '../ui/MoveAccountModal.vue';
+import MoveItemModal from '../ui/MoveItemModal.vue';
 import { useModal } from '../../composables/useModal.ts';
 import { useVault } from '../../composables/useVault.ts';
 import { markRaw } from 'vue';
@@ -43,7 +43,7 @@ function goToEdit() {
     name: route.name as string,
     params: {
       ...route.params,
-      accountId: identity.value.id,
+      itemId: identity.value.id,
       mode: 'edit'
     },
     query: route.query
@@ -60,7 +60,7 @@ async function handleDelete() {
       name: route.name as string,
       params: {
         ...route.params,
-        accountId: undefined,
+        itemId: undefined,
         mode: undefined
       },
       query: route.query
@@ -74,7 +74,7 @@ const miscMenuItems = computed<DropdownItem[]>(() => [
     disabled: !identity.value,
     onSelect: () => {
       if (!identity.value) return;
-      openModal(markRaw(MoveAccountModal), {
+      openModal(markRaw(MoveItemModal), {
         onClose: () => {},
         onConfirm: () => {}
       });
@@ -178,24 +178,24 @@ watch(
 
       <section class="fields-section">
         <!-- Full Name -->
-        <AccountField label="full name" :displayValue="identity.full_name" />
+        <ItemField label="full name" :displayValue="identity.full_name" />
 
         <!-- Email -->
-        <AccountField label="email" type="email" :displayValue="identity.email" :copyValue="identity.email" />
+        <ItemField label="email" type="email" :displayValue="identity.email" :copyValue="identity.email" />
 
         <!-- Phone -->
-        <AccountField label="phone" type="tel" :displayValue="identity.phone" :copyValue="identity.phone" />
+        <ItemField label="phone" type="tel" :displayValue="identity.phone" :copyValue="identity.phone" />
 
         <!-- Address -->
-        <AccountField label="address line 1" :displayValue="identity.address_line1" />
+        <ItemField label="address line 1" :displayValue="identity.address_line1" />
 
-        <AccountField label="address line 2" :displayValue="identity.address_line2" />
+        <ItemField label="address line 2" :displayValue="identity.address_line2" />
 
-        <AccountField label="city" :displayValue="identity.city" />
+        <ItemField label="city" :displayValue="identity.city" />
 
-        <AccountField label="postal code" :displayValue="identity.postal_code" />
+        <ItemField label="postal code" :displayValue="identity.postal_code" />
 
-        <AccountField label="country" :displayValue="identity.country" />
+        <ItemField label="country" :displayValue="identity.country" />
       </section>
 
       <section class="tags-section">

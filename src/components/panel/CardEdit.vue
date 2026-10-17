@@ -5,7 +5,7 @@ import { ChevronRight } from '@lucide/vue';
 import Button from '../ui/Button.vue';
 import TagList from '../ui/TagList.vue';
 import { formatTimestamp } from '../../util/timestamp.ts';
-import AccountField from '../ui/AccountField.vue';
+import ItemField from '../ui/ItemField.vue';
 import IconUpload from '../ui/IconUpload.vue';
 import useAppStore from '../../stores/appStore.ts';
 import { useVault } from '../../composables/useVault.ts';
@@ -246,7 +246,7 @@ async function handleSave() {
 
       <section class="card-fields-section">
         <!-- Cardholder Name -->
-        <AccountField
+        <ItemField
           label="cardholder name"
           type="text"
           required
@@ -256,7 +256,7 @@ async function handleSave() {
         />
 
         <!-- Brand -->
-        <AccountField
+        <ItemField
           label="brand"
           type="text"
           input
@@ -265,7 +265,7 @@ async function handleSave() {
         />
 
         <!-- Expiry -->
-        <AccountField
+        <ItemField
           label="expiry month"
           type="text"
           input
@@ -273,7 +273,7 @@ async function handleSave() {
           placeholder="e.g. 07"
         />
 
-        <AccountField
+        <ItemField
           label="expiry year"
           type="text"
           input
@@ -285,7 +285,7 @@ async function handleSave() {
       <!-- Secret fields (no heading; value revealed only while focused) -->
       <section class="card-secret-section">
         <!-- Card Number: mask as displayed value, real value while focused -->
-        <AccountField
+        <ItemField
           label="card number"
           type="text"
           input
@@ -297,7 +297,7 @@ async function handleSave() {
         />
 
         <!-- Security Code -->
-        <AccountField
+        <ItemField
           label="security code"
           type="text"
           input
@@ -309,7 +309,7 @@ async function handleSave() {
         />
 
         <!-- PIN -->
-        <AccountField
+        <ItemField
           label="pin"
           type="text"
           input

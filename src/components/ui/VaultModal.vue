@@ -2,7 +2,7 @@
 import { ref, computed } from 'vue';
 import { Vault } from '../../types/index.ts';
 import Button from './Button.vue';
-import AccountField from './AccountField.vue';
+import ItemField from './ItemField.vue';
 import ColorPicker from './ColorPicker.vue';
 import useAppStore from '../../stores/appStore.ts';
 import { VAULT_COLORS } from '../../util/constants.ts';
@@ -50,7 +50,7 @@ async function handleConfirm() {
           name: 'vault',
           params: {
             vaultId: vault.id,
-            accountId: undefined
+            itemId: undefined
           }
         });
       }
@@ -72,7 +72,7 @@ async function handleConfirm() {
 
       <main>
         <section class="vault-fields-section">
-          <AccountField
+          <ItemField
             label="name"
             type="text"
             required
