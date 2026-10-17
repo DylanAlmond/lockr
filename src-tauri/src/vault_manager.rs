@@ -805,14 +805,16 @@ impl VaultManager {
         Ok(results)
     }
 
-    /// Returns a specific secret field value for an item. Unknown field keys
-    /// and secret-less kinds are rejected with clear validation errors.
+    /// Returns a specific secret field value for an item. An unset field
+    /// resolves to None; unknown field keys, secret-less kinds and failed
+    /// lookups are real errors, so callers can distinguish 'not set' from
+    /// 'fetch failed'.
     pub fn get_item_secret(
         &self,
         vault_id: VaultId,
         item_id: ItemId,
         field_key: &str,
-    ) -> Result<String, VaultError> {
+    ) -> Result<Option<String>, VaultError> {
         let vault = self.get_vault(vault_id)?;
 
         let item = vault
@@ -821,26 +823,22 @@ impl VaultManager {
             .find(|i| i.id == item_id)
             .ok_or(VaultError::AccountNotFound(item_id.to_string()))?;
 
-        if allowed_secret_keys(&item.kind).is_empty() {
+        let allowed = allowed_secret_keys(&item.kind);
+        if allowed.is_empty() {
             return Err(VaultError::Validation(
                 "This kind of item has no secret fields".to_string(),
             ));
         }
+        if !allowed.contains(&field_key) {
+            return Err(VaultError::Validation(format!(
+                "Unknown secret field '{field_key}' for this kind of item"
+            )));
+        }
 
-        let entry = vault
-            .secrets
-            .iter()
-            .find(|s| s.item_id == item_id)
-            .ok_or(VaultError::AccountNotFound(item_id.to_string()))?;
-
-        entry
-            .get(field_key)
-            .ok_or_else(|| {
-                VaultError::Validation(format!(
-                    "No secret field '{field_key}' on item {item_id}"
-                ))
-            })
-            .map(str::to_string)
+        // No secrets entry at all, or an entry without this field, simply
+        // means the field is unset
+        let entry = vault.secrets.iter().find(|s| s.item_id == item_id);
+        Ok(entry.and_then(|s| s.get(field_key)).map(str::to_string))
     }
 
     /// Sets or clears a specific secret field of an item. Clearing (a `None`
@@ -916,12 +914,13 @@ impl VaultManager {
         Ok(())
     }
 
-    /// Returns only the password string for a specific account
+    /// Returns only the password string (None when unset) for a specific
+    /// account
     pub fn get_secret(
         &self,
         vault_id: VaultId,
         account_id: AccountId,
-    ) -> Result<String, VaultError> {
+    ) -> Result<Option<String>, VaultError> {
         self.get_item_secret(vault_id, account_id, SECRET_FIELD_PASSWORD)
     }
 
@@ -931,8 +930,13 @@ impl VaultManager {
         vault_id: VaultId,
         account_id: AccountId,
     ) -> Result<Entropy, VaultError> {
-        let pw = self.get_secret(vault_id, account_id)?;
-        Ok(zxcvbn(&pw, &[]))
+        match self.get_secret(vault_id, account_id)? {
+            // Passwordless accounts surface as a failed lookup (the
+            // frontend wrapper turns that into 'no strength'), matching
+            // the pre-Option behaviour
+            Some(pw) => Ok(zxcvbn(&pw, &[])),
+            None => Err(VaultError::Validation("Account has no password".to_string())),
+        }
     }
 
     /// Retrieve a specific account item by id (searches all unlocked vaults)
@@ -1155,8 +1159,8 @@ mod tests {
 
         // Passwords come through the existing secret-fetch path
         assert_eq!(
-            manager.get_secret(vault_id, full_id).unwrap(),
-            "legacy_pw_full"
+            manager.get_secret(vault_id, full_id).unwrap().as_deref(),
+            Some("legacy_pw_full")
         );
 
         // Raw unmodified file is backed up beside the vault
@@ -1184,8 +1188,8 @@ mod tests {
             "Backup must not be rewritten on plain unlocks"
         );
         assert_eq!(
-            manager.get_secret(vault_id, full_id).unwrap(),
-            "legacy_pw_full"
+            manager.get_secret(vault_id, full_id).unwrap().as_deref(),
+            Some("legacy_pw_full")
         );
     }
 
@@ -1298,7 +1302,10 @@ mod tests {
         assert_eq!(account.display_name, Some("octocat pass".to_string()));
         assert_eq!(account.username, "octocat");
         assert_eq!(account.email, None);
-        assert_eq!(manager.get_secret(vault.id, account.id).unwrap(), "secret123");
+        assert_eq!(
+            manager.get_secret(vault.id, account.id).unwrap().as_deref(),
+            Some("secret123")
+        );
         assert_eq!(account.favourite, false);
         assert_eq!(account.tags.len(), 0);
 
@@ -1344,7 +1351,10 @@ mod tests {
 
         assert_eq!(updated.username, "octocat");
         assert_eq!(updated.email, Some("hello@example.com".to_string()));
-        assert_eq!(manager.get_secret(vault.id, updated.id).unwrap(), "new_pass");
+        assert_eq!(
+            manager.get_secret(vault.id, updated.id).unwrap().as_deref(),
+            Some("new_pass")
+        );
         assert_eq!(updated.favourite, true);
         assert_eq!(updated.tags, vec!["social".to_string(), "work".to_string()]);
     }
@@ -1812,7 +1822,7 @@ mod tests {
         assert_eq!(account_view.vault_id, vault_b.id);
 
         let secret = manager.get_secret(vault_b.id, account_view.id).unwrap();
-        assert_eq!(secret, "hunter2", "secret entry must move with the item");
+        assert_eq!(secret.as_deref(), Some("hunter2"), "secret entry must move with the item");
 
         let vault_ref = manager.get_vault(vault_a.id).unwrap();
         assert!(vault_ref.items.is_empty(), "source vault is emptied out");
@@ -2113,18 +2123,25 @@ mod tests {
             _ => panic!("expected card view"),
         };
         assert_eq!(
-            manager.get_item_secret(vault.id, card_id, SECRET_FIELD_CARD_NUMBER).unwrap(),
-            "4111 1111 1111 1234"
+            manager
+                .get_item_secret(vault.id, card_id, SECRET_FIELD_CARD_NUMBER)
+                .unwrap()
+                .as_deref(),
+            Some("4111 1111 1111 1234")
         );
         assert_eq!(
             manager
                 .get_item_secret(vault.id, card_id, SECRET_FIELD_SECURITY_CODE)
-                .unwrap(),
-            "123"
+                .unwrap()
+                .as_deref(),
+            Some("123")
         );
         assert_eq!(
-            manager.get_item_secret(vault.id, card_id, SECRET_FIELD_PIN).unwrap(),
-            "4321"
+            manager
+                .get_item_secret(vault.id, card_id, SECRET_FIELD_PIN)
+                .unwrap()
+                .as_deref(),
+            Some("4321")
         );
     }
 
@@ -2198,7 +2215,9 @@ mod tests {
         // Unknown key on a card
         let unknown = manager.get_item_secret(vault.id, card_id, "cvv2");
         match unknown {
-            Err(VaultError::Validation(msg)) => assert!(msg.contains("No secret field 'cvv2'")),
+            Err(VaultError::Validation(msg)) => {
+                assert!(msg.contains("Unknown secret field 'cvv2'"))
+            }
             other => panic!("expected validation error, got {other:?}"),
         }
 
@@ -2250,20 +2269,31 @@ mod tests {
         manager
             .update_item_secret(vault.id, card_id, SECRET_FIELD_PIN, Some("9999".to_string()))
             .unwrap();
-        assert_eq!(manager.get_item_secret(vault.id, card_id, SECRET_FIELD_PIN).unwrap(), "9999");
+        assert_eq!(
+            manager
+                .get_item_secret(vault.id, card_id, SECRET_FIELD_PIN)
+                .unwrap()
+                .as_deref(),
+            Some("9999")
+        );
 
         // ...and None clears the field entirely
         manager
             .update_item_secret(vault.id, card_id, SECRET_FIELD_SECURITY_CODE, None)
             .unwrap();
-        assert!(matches!(
-            manager.get_item_secret(vault.id, card_id, SECRET_FIELD_SECURITY_CODE),
-            Err(VaultError::Validation(_))
-        ));
+        assert_eq!(
+            manager
+                .get_item_secret(vault.id, card_id, SECRET_FIELD_SECURITY_CODE)
+                .unwrap(),
+            None
+        );
         // Other fields of the entry survive the clear
         assert_eq!(
-            manager.get_item_secret(vault.id, card_id, SECRET_FIELD_CARD_NUMBER).unwrap(),
-            "4111 1111 1111 1234"
+            manager
+                .get_item_secret(vault.id, card_id, SECRET_FIELD_CARD_NUMBER)
+                .unwrap()
+                .as_deref(),
+            Some("4111 1111 1111 1234")
         );
         // secrets_present drops the cleared key
         assert!(matches!(
@@ -2279,7 +2309,13 @@ mod tests {
         // Persisted across unlock
         manager.lock_vault(Some(vault.id));
         manager.unlock_vault(vault.id, MASTER_PW, &KEY).unwrap();
-        assert_eq!(manager.get_item_secret(vault.id, card_id, SECRET_FIELD_PIN).unwrap(), "9999");
+        assert_eq!(
+            manager
+                .get_item_secret(vault.id, card_id, SECRET_FIELD_PIN)
+                .unwrap()
+                .as_deref(),
+            Some("9999")
+        );
     }
 
     #[test]
@@ -2310,8 +2346,9 @@ mod tests {
         assert_eq!(
             manager
                 .get_item_secret(vault_b.id, moved_id, SECRET_FIELD_CARD_NUMBER)
-                .unwrap(),
-            "4111 1111 1111 1234"
+                .unwrap()
+                .as_deref(),
+            Some("4111 1111 1111 1234")
         );
         assert_eq!(
             match &moved {

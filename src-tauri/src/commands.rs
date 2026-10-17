@@ -402,7 +402,11 @@ pub fn delete_account(state: AppState, vault_id: String, account_id: String) -> 
 }
 
 #[tauri::command]
-pub fn get_secret(state: AppState, vault_id: String, account_id: String) -> Result<String, String> {
+pub fn get_secret(
+    state: AppState,
+    vault_id: String,
+    account_id: String,
+) -> Result<Option<String>, String> {
     let state = state.lock().map_err(|e| e.to_string())?;
     let vid = Uuid::parse_str(&vault_id).map_err(|e| e.to_string())?;
     let aid = Uuid::parse_str(&account_id).map_err(|e| e.to_string())?;
@@ -573,7 +577,7 @@ pub fn get_item_secret(
     vault_id: String,
     item_id: String,
     field_key: String,
-) -> Result<String, String> {
+) -> Result<Option<String>, String> {
     let state = state.lock().map_err(|e| e.to_string())?;
     let vid = Uuid::parse_str(&vault_id).map_err(|e| e.to_string())?;
     let iid = Uuid::parse_str(&item_id).map_err(|e| e.to_string())?;
