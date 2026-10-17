@@ -10,7 +10,7 @@ The top-level container a user owns. A vault holds items of every kind and the s
 
 A single entry in a vault — a login, a card, a note, an identity. Items carry common metadata (display name, favourite, tags, icon, colour, timestamps) plus kind-specific data determined by their item kind. In code: `VaultItem`.
 
-**Avoid:** "Account". That was the only entry type before the versioned model; it survives in some command and UI surfaces pending the account→item rename (#27) and as the legacy v1 wire format.
+**Avoid:** "Account" for the generic thing a user stores in a vault — that is an **item**. "Account" names only the item *kind* (the login), surviving in kind-typed code (`AccountData`, `SafeItem::Account`, the `"account"` wire tag, `SecretInput`-keyed `password`) and as the legacy v1 wire format. Account items are created, updated, deleted, listed, and secret-fetched through the same generic item surface as every other kind.
 
 ## Item Kind
 
