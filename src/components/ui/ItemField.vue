@@ -2,6 +2,7 @@
 import { ref, computed, onUnmounted, watch } from 'vue';
 import { Copy, Check } from '@lucide/vue';
 import Button from './Button.vue';
+import { ACCOUNT_PASSWORD_MASK } from '../../util/secrets.ts';
 
 type CopyableValue = string | null | (() => string | null | Promise<string | null>);
 
@@ -30,6 +31,8 @@ const props = withDefaults(defineProps<Props>(), {
 
 const emit = defineEmits<{
   (e: 'update:modelValue', value: string): void;
+  (e: 'focus'): void;
+  (e: 'blur'): void;
 }>();
 
 const copied = ref(false);
@@ -39,7 +42,7 @@ const hasCopyValue = computed(() => {
   if (props.input) return !!props.modelValue;
   if (typeof props.copyValue === 'function') return true;
   if (props.copyValue !== undefined && props.copyValue !== null) return !!props.copyValue;
-  return !!props.displayValue && props.displayValue !== '••••••••••••••••';
+  return !!props.displayValue && props.displayValue !== ACCOUNT_PASSWORD_MASK;
 });
 
 async function handleCopy() {
@@ -55,7 +58,7 @@ async function handleCopy() {
     valueToCopy = props.displayValue;
   }
 
-  if (!valueToCopy || valueToCopy === '••••••••••••••••') return;
+  if (!valueToCopy || valueToCopy === ACCOUNT_PASSWORD_MASK) return;
 
   try {
     await navigator.clipboard.writeText(valueToCopy);
@@ -101,7 +104,7 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div :id="id" class="account-field">
+  <div :id="id" class="item-field">
     <div class="field-meta">
       <h2>{{ label }}</h2>
 
@@ -114,6 +117,8 @@ onUnmounted(() => {
         :placeholder="placeholder"
         :required="required"
         @input="emit('update:modelValue', ($event.target as HTMLInputElement).value)"
+        @focus="emit('focus')"
+        @blur="emit('blur')"
       />
 
       <!-- Display Mode -->
@@ -142,7 +147,7 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
-.account-field {
+.item-field {
   display: flex;
   align-items: center;
   gap: 1rem;
@@ -154,12 +159,12 @@ onUnmounted(() => {
     border-color 0.2s ease;
 }
 
-.account-field:focus-within {
+.item-field:focus-within {
   box-shadow: inset 0 0 0 2px var(--color-accent);
 }
 
 @supports (corner-shape: squircle) {
-  .account-field {
+  .item-field {
     corner-shape: squircle;
   }
 }

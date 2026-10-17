@@ -109,6 +109,7 @@ const router = useRouter();
 }
 
 .login-container :deep(.login-form button) {
+  --button-icon-color: var(--color-accent);
   color: var(--color-accent);
 }
 

@@ -1,91 +1,81 @@
 <script setup lang="ts">
-import { onMounted, ref, watch, computed } from 'vue';
+import { onMounted, ref, computed, watch } from 'vue';
 import { Entropy, Vault } from '../../types/index.ts';
 import Button from './Button.vue';
-import AccountField from './AccountField.vue';
-import { CreateAccountProps, useVault } from '../../composables/useVault.ts';
+import ItemField from './ItemField.vue';
+import { CreateItemProps, useVault } from '../../composables/useVault.ts';
 import { PASSWORDSTRENGTHS } from '../../util/constants.ts';
-import { useRoute, useRouter } from 'vue-router';
-import { Eye, EyeOff } from '@lucide/vue';
-import useAppStore from '../../stores/appStore.ts';
 // import { fetchBrandLogoAsBase64 } from '../../util/imageUpload.ts';
 import Select from './Select.vue';
 import IconUpload from './IconUpload.vue';
 
-const route = useRoute();
-const router = useRouter();
-
 const { getPasswordStrength, getUnlockedVaults } = useVault();
-const { createNewAccount } = useAppStore();
 
 const vaults = ref<Vault[]>([]);
-// const isFetchingLogo = ref(false);
 const manuallySetIcon = ref(false);
-// let displayNameDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 
-const form = ref<CreateAccountProps>({
-  vaultId: (route.params.vaultId as string) || '',
+interface AccountForm {
+  vaultId: string;
+  username: string;
+  password: string;
+  displayName?: string | null;
+  email?: string | null;
+  icon?: string | null;
+}
+
+const form = ref<AccountForm>({
+  vaultId: '',
   username: '',
   password: ''
 });
 
+const props = defineProps<{ defaultVaultId?: string | null }>();
+
 const passwordEntropy = ref<Entropy | null>(null);
-const showPassword = ref(false);
+
+// Secret fields reveal their value only while the field is focused;
+// on blur they re-mask as password dots.
+const focusedSecret = ref<string | null>(null);
+
+function secretType(key: string): 'text' | 'password' {
+  return focusedSecret.value === key ? 'text' : 'password';
+}
 
 const displayInitial = computed(() => {
   return (form.value.displayName || form.value.username || '')[0]?.toUpperCase() || '?';
 });
 
 const emit = defineEmits<{
+  (e: 'submit', data: CreateItemProps): void;
   (e: 'close'): void;
-  (e: 'confirm'): void;
 }>();
 
-// Auto-fetch logo when display name changes (if icon wasn't manually set)
-// watch(
-//   () => form.value.displayName,
-//   (displayName) => {
-//     if (!displayName || manuallySetIcon.value) {
-//       return;
-//     }
+// Pre-fill the in-context vault once vaults are known
+watch(
+  () => [vaults.value, props.defaultVaultId],
+  () => {
+    if (!form.value.vaultId && props.defaultVaultId) {
+      form.value.vaultId = props.defaultVaultId;
+    }
+  },
+  { immediate: true }
+);
 
-//     // Debounce the logo fetch to avoid too many requests
-//     if (displayNameDebounceTimer) {
-//       clearTimeout(displayNameDebounceTimer);
-//     }
-
-//     displayNameDebounceTimer = setTimeout(async () => {
-//       try {
-//         isFetchingLogo.value = true;
-//         const logo = await fetchBrandLogoAsBase64(displayName);
-//         if (logo) {
-//           form.value.icon = logo;
-//         }
-//       } catch (error) {
-//         console.error('Logo fetch error:', error);
-//       } finally {
-//         isFetchingLogo.value = false;
-//       }
-//     }, 500);
-//   }
-// );
-
-async function handleConfirm() {
-  if (!form.value) return;
-
-  const account = await createNewAccount(form.value);
-
-  if (account) {
-    router.push({
-      name: 'vault',
-      params: {
-        vaultId: account.vault_id,
-        accountId: account.id
-      }
-    });
-  }
-
-  emit('close');
+function handleSubmit() {
+  if (!form.value.vaultId || !form.value.username) return;
+  // The account kind rides the generic item surface; the initial password
+  // is a `password` secret field
+  emit('submit', {
+    vaultId: form.value.vaultId,
+    displayName: form.value.displayName ?? null,
+    icon: form.value.icon ?? null,
+    data: {
+      kind: 'account',
+      username: form.value.username,
+      email: form.value.email ?? null
+    },
+    secrets: [{ key: 'password', value: form.value.password }]
+  });
 }
 
 // Calculate password strength in real-time as the user types
@@ -107,7 +97,7 @@ onMounted(async () => {
 </script>
 
 <template>
-  <form @submit.prevent="handleConfirm">
+  <form @submit.prevent="handleSubmit">
     <article class="container">
       <header>
         <h2>New Account</h2>
@@ -122,7 +112,7 @@ onMounted(async () => {
       />
 
       <main>
-        <section class="account-fields-section">
+        <section class="item-fields-section">
           <div class="select-field">
             <h2 id="move-vault-label">vault</h2>
             <Select
@@ -134,7 +124,7 @@ onMounted(async () => {
           </div>
 
           <!-- Display Name -->
-          <AccountField
+          <ItemField
             label="display name"
             type="text"
             input
@@ -143,7 +133,7 @@ onMounted(async () => {
           />
 
           <!-- Username -->
-          <AccountField
+          <ItemField
             label="username"
             type="text"
             required
@@ -153,7 +143,7 @@ onMounted(async () => {
           />
 
           <!-- Email -->
-          <AccountField
+          <ItemField
             label="email"
             type="email"
             input
@@ -162,29 +152,21 @@ onMounted(async () => {
           />
 
           <!-- Password -->
-          <AccountField
+          <ItemField
             label="password"
-            :type="showPassword ? 'text' : 'password'"
+            :type="secretType('password')"
             input
             v-model="form.password"
-            placeholder="Enter password"
+            placeholder="No Value"
+            @focus="focusedSecret = 'password'"
+            @blur="focusedSecret = null"
           >
             <template #actions>
               <span v-if="passwordEntropy !== null" class="password-strength">
                 {{ PASSWORDSTRENGTHS[passwordEntropy.score] }}
               </span>
-
-              <Button
-                :disabled="!form.password.length"
-                aria-label="Toggle password visibility"
-                icon-only
-                variant="outline"
-                size="small"
-                :icon-component="showPassword ? EyeOff : Eye"
-                @click="showPassword = !showPassword"
-              />
             </template>
-          </AccountField>
+          </ItemField>
         </section>
       </main>
 
@@ -231,6 +213,16 @@ footer {
   justify-content: flex-end;
   gap: 0.75rem;
   width: 100%;
+
+  /* Pinned inside the modal's scrollport so the buttons stay visible while
+     content scrolls underneath; the opaque background masks passing fields.
+     The modal shell has no bottom padding — this footer owns the modal's
+     bottom spacing, so padding-bottom keeps the pinned background flush
+     with the shell's bottom edge */
+  position: sticky;
+  bottom: 0;
+  padding-bottom: 1.5rem;
+  background-color: var(--color-bg);
 }
 
 .password-strength {
@@ -241,7 +233,7 @@ footer {
   white-space: nowrap;
 }
 
-.account-fields-section {
+.item-fields-section {
   display: flex;
   flex-direction: column;
   width: 100%;
@@ -285,4 +277,3 @@ footer {
   }
 }
 </style>
-

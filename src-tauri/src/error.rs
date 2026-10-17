@@ -5,8 +5,11 @@ pub enum VaultError {
     #[error("Vault not found: {0}")]
     NotFound(String),
 
-    #[error("Account not found: {0}")]
-    AccountNotFound(String),
+    #[error("Item not found: {0}")]
+    ItemNotFound(String),
+
+    #[error("User not found: {0}")]
+    UserNotFound(String),
 
     #[error("Wrong master password")]
     AuthenticationFailed,

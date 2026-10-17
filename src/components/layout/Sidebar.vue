@@ -92,7 +92,7 @@ function vaultMenuItems(vault: Vault): DropdownItem[] {
         openModal(markRaw(AlertModal), {
           title: `Delete "${vault.name}"`,
           message:
-            "Are you sure you want to continue? All accounts in this vault will be deleted. This can't be undone.",
+            "Are you sure you want to continue? All items in this vault will be deleted. This can't be undone.",
           actionLabel: 'Delete',
           confirmationValue: vault.name,
           onClose: () => {},

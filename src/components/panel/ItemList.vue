@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue';
-import { Account, AccountFilter } from '../../types/index.ts';
+import { SafeItem, ItemFilter } from '../../types/index.ts';
 import { useRoute } from 'vue-router';
 import { useVault } from '../../composables/useVault.ts';
 import { useSearch } from '../../composables/useSearch.ts';
@@ -17,9 +17,9 @@ import {
 import useAppStore from '../../stores/appStore.ts';
 import Select from '../ui/Select.vue';
 import { useModal } from '../../composables/useModal.ts';
-import NewAccountModal from '../ui/NewAccountModal.vue';
+import NewItemModal from '../ui/NewItemModal.vue';
 
-type Props = AccountFilter & {
+type Props = ItemFilter & {
   recently_accessed: boolean;
 };
 
@@ -37,10 +37,32 @@ const route = useRoute();
 
 const { searchQuery } = useSearch();
 const { state } = useAppStore();
-const { getAllAccounts } = useVault();
+const { getAllItems } = useVault();
 const { openModal } = useModal();
 
-const accounts = ref<Account[]>([]);
+// Kind-aware display helpers shared by grouping, sorting and row rendering
+function itemLabel(item: SafeItem): string {
+  if (item.display_name) return item.display_name;
+  if (item.kind === 'account') return item.username;
+  if (item.kind === 'identity') return item.full_name;
+  if (item.kind === 'card') return item.cardholder_name;
+  return item.title || 'Untitled';
+}
+
+// Single-line snippet of a note's body for the row subtitle
+function noteSnippet(body: string): string {
+  const firstLine = body.split('\n')[0].trim();
+  return firstLine.length > 60 ? `${firstLine.slice(0, 60)}…` : firstLine;
+}
+
+function itemSubtitle(item: SafeItem): string {
+  if (item.kind === 'account') return item.email || item.username;
+  if (item.kind === 'identity') return item.email || item.phone || item.full_name;
+  if (item.kind === 'card') return item.card_number_last4 ? `ending in ${item.card_number_last4}` : item.brand || '';
+  return noteSnippet(item.body) || item.title || '';
+}
+
+const items = ref<SafeItem[]>([]);
 const sortCategory = ref<SortCategory>('alphabetical');
 const sortAsc = ref(sortCategory.value === 'alphabetical');
 
@@ -64,8 +86,8 @@ const categories = [
   { value: 'alphabetical', label: 'Alphabetical' }
 ];
 
-const filteredAccounts = computed(() => {
-  let list = [...accounts.value];
+const filteredItems = computed(() => {
+  let list = [...items.value];
 
   list.sort((a, b) => {
     let comparison = 0;
@@ -73,7 +95,7 @@ const filteredAccounts = computed(() => {
       comparison = new Date(a.updated_at).getTime() - new Date(b.updated_at).getTime();
     }
     if (sortCategory.value === 'alphabetical') {
-      comparison = (a.display_name || a.username).localeCompare(b.display_name || b.username);
+      comparison = itemLabel(a).localeCompare(itemLabel(b));
     }
     return sortAsc.value ? comparison : -comparison;
   });
@@ -81,28 +103,28 @@ const filteredAccounts = computed(() => {
   return list;
 });
 
-interface AccountGroup {
+interface ItemGroup {
   label: string;
-  items: Account[];
+  items: SafeItem[];
 }
 
-const groupedAccounts = computed<AccountGroup[]>(() => {
-  const groups = new Map<string, Account[]>();
+const groupedItems = computed<ItemGroup[]>(() => {
+  const groups = new Map<string, SafeItem[]>();
 
-  for (const account of filteredAccounts.value) {
+  for (const item of filteredItems.value) {
     let label: string;
     if (sortCategory.value === 'date') {
-      const d = new Date(account.updated_at);
+      const d = new Date(item.updated_at);
       label = `${monthNames[d.getMonth()]} ${d.getFullYear()}`;
     } else {
-      label = (account.display_name || account.username)[0].toUpperCase();
+      label = itemLabel(item)[0].toUpperCase();
     }
 
     if (!groups.has(label)) groups.set(label, []);
-    groups.get(label)!.push(account);
+    groups.get(label)!.push(item);
   }
 
-  return Array.from(groups.entries()).map(([label, items]) => ({ label, items }));
+  return Array.from(groups.entries()).map(([label, list]) => ({ label, items: list }));
 });
 
 function setSortCategory(category: SortCategory) {
@@ -114,27 +136,26 @@ function toggleSort() {
   sortAsc.value = !sortAsc.value;
 }
 
-function openCreateAccountModal() {
-  openModal(NewAccountModal, {
-    onClose: () => {},
-    onConfirm: () => {}
+function openCreateItemModal() {
+  openModal(NewItemModal, {
+    onClose: () => {}
   });
 }
 
 // Update links to preserve current view context and clear 'edit'/'create' modes
-function accountRoute(accountId: string) {
+function itemRoute(itemId: string) {
   return {
     name: route.name as string,
     params: {
       ...route.params,
-      accountId: accountId,
-      mode: undefined // Clear edit/create mode when switching accounts
+      itemId: itemId,
+      mode: undefined // Clear edit/create mode when switching items
     },
     query: route.query // Preserve filter queries
   };
 }
 
-// Reload accounts whenever the filter or search changes
+// Reload items whenever the filter or search changes
 watch(
   () => [
     props.vault_id,
@@ -146,11 +167,11 @@ watch(
     state.vaultMutationCount
   ],
   async () => {
-    const nextAccounts = await getAllAccounts({
+    const nextItems = await getAllItems({
       ...props,
       search_query: searchQuery.value
     });
-    accounts.value = nextAccounts;
+    items.value = nextItems;
   },
   { immediate: true }
 );
@@ -170,7 +191,7 @@ watch(
   <div class="container">
     <div class="filter-wrapper">
       <Select
-        :disabled="groupedAccounts.length === 0"
+        :disabled="groupedItems.length === 0"
         :model-value="sortCategory"
         :options="categories"
         variant="label"
@@ -183,7 +204,7 @@ watch(
 
       <Button
         @click="toggleSort"
-        :disabled="groupedAccounts.length === 0"
+        :disabled="groupedItems.length === 0"
         icon-only
         variant="outline"
         :icon-component="
@@ -208,40 +229,36 @@ watch(
     </div>
 
     <div class="results-wrapper no-scrollbar">
-      <div v-if="groupedAccounts.length === 0" class="empty-state">
-        <h3>No accounts found</h3>
+      <div v-if="groupedItems.length === 0" class="empty-state">
+        <h3>No items found</h3>
 
-        <p>Add your first account to get started.</p>
-        <Button variant="accent" :icon-component="Plus" @click="openCreateAccountModal">
-          New Account
+        <p>Add your first item to get started.</p>
+        <Button variant="accent" :icon-component="Plus" @click="openCreateItemModal">
+          New Item
         </Button>
       </div>
 
-      <div v-for="group in groupedAccounts" class="account-group" :key="group.label">
+      <div v-for="group in groupedItems" class="item-group" :key="group.label">
         <h2>{{ group.label }}</h2>
-        <ul class="account-list">
-          <li v-for="account in group.items" :key="account.id">
-            <!-- active-class works natively here because router-link matches the accountId param -->
-            <RouterLink class="account" :to="accountRoute(account.id)" active-class="active">
-              <div class="account-icon">
-                <img
-                  v-if="account.icon"
-                  :src="account.icon"
-                  alt="Account icon"
-                  class="icon-image"
-                />
+        <ul class="item-list">
+          <li v-for="item in group.items" :key="item.id">
+            <!-- active-class works natively here because router-link matches the itemId param -->
+            <RouterLink class="item" :to="itemRoute(item.id)" active-class="active">
+              <div class="item-icon">
+                <img v-if="item.icon" :src="item.icon" alt="Item icon" class="icon-image" />
                 <span v-else class="icon-text">
-                  {{ (account.display_name || account.username)[0].toUpperCase() }}
+                  {{ itemLabel(item)[0].toUpperCase() }}
                 </span>
                 <Star
-                  v-if="account.favourite"
+                  v-if="item.favourite"
                   :size="20"
-                  :fill="account.favourite ? 'var(--color-accent)' : undefined"
+                  :fill="item.favourite ? 'var(--color-accent)' : 'none'"
+                  color="var(--color-accent)"
                 />
               </div>
-              <div class="account-meta">
-                <h3>{{ account.display_name || account.username }}</h3>
-                <span>{{ account.email || account.username }}</span>
+              <div class="item-meta">
+                <h3>{{ itemLabel(item) }}</h3>
+                <span>{{ itemSubtitle(item) }}</span>
               </div>
             </RouterLink>
           </li>
@@ -303,7 +320,7 @@ watch(
   }
 }
 
-.account-group {
+.item-group {
   display: flex;
   flex-direction: column;
   gap: 1rem;
@@ -318,14 +335,14 @@ watch(
   }
 }
 
-.account-list {
+.item-list {
   display: flex;
   flex-direction: column;
   list-style: none;
   gap: 0.5rem;
 }
 
-.account {
+.item {
   display: flex;
   align-items: center;
   gap: 0.75rem;
@@ -365,7 +382,7 @@ watch(
   }
 }
 
-.account-icon {
+.item-icon {
   display: flex;
   justify-content: center;
   align-items: center;
@@ -401,7 +418,7 @@ watch(
   }
 }
 
-.account-meta {
+.item-meta {
   > h3 {
     font-size: 1rem;
     font-family: var(--font-geo);

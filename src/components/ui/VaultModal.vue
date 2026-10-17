@@ -2,7 +2,7 @@
 import { ref, computed } from 'vue';
 import { Vault } from '../../types/index.ts';
 import Button from './Button.vue';
-import AccountField from './AccountField.vue';
+import ItemField from './ItemField.vue';
 import ColorPicker from './ColorPicker.vue';
 import useAppStore from '../../stores/appStore.ts';
 import { VAULT_COLORS } from '../../util/constants.ts';
@@ -50,7 +50,7 @@ async function handleConfirm() {
           name: 'vault',
           params: {
             vaultId: vault.id,
-            accountId: undefined
+            itemId: undefined
           }
         });
       }
@@ -72,7 +72,7 @@ async function handleConfirm() {
 
       <main>
         <section class="vault-fields-section">
-          <AccountField
+          <ItemField
             label="name"
             type="text"
             required
@@ -135,6 +135,16 @@ footer {
   justify-content: flex-end;
   gap: 0.75rem;
   width: 100%;
+
+  /* Pinned inside the modal's scrollport so the buttons stay visible while
+     content scrolls underneath; the opaque background masks passing fields.
+     The modal shell has no bottom padding — this footer owns the modal's
+     bottom spacing, so padding-bottom keeps the pinned background flush
+     with the shell's bottom edge */
+  position: sticky;
+  bottom: 0;
+  padding-bottom: 1.5rem;
+  background-color: var(--color-bg);
 }
 
 .vault-fields-section {

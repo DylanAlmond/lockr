@@ -1,18 +1,36 @@
 import { ref } from 'vue';
-import { Account, AccountFilter, Entropy, Vault } from '../types';
+import {
+  Entropy,
+  ItemFilter,
+  NewItemData,
+  SafeItem,
+  SecretInput,
+  Vault
+} from '../types';
 import { invoke } from '@tauri-apps/api/core';
 
 const isLoading = ref(false);
 const error = ref<string | null>(null);
 
-export interface CreateAccountProps {
+export interface CreateItemProps {
   vaultId: string;
-  username: string;
-  password: string;
   displayName?: string | null;
-  email?: string | null;
   icon?: string | null;
+  /** Kind wire payload: internally tagged like the backend's NewItemData */
+  data: NewItemData;
+  /** Initial secret fields (accounts carry 'password', cards their keys); validated backend-side */
+  secrets?: SecretInput[];
 }
+
+export interface UpdateItemProps {
+  displayName?: string | null;
+  icon?: string | null;
+  favourite?: boolean | null;
+  tags?: string[] | null;
+  color?: string | null;
+  data?: NewItemData;
+}
+
 
 export function useVault() {
   async function listVaultIds(): Promise<string[]> {
@@ -81,33 +99,34 @@ export function useVault() {
     }
   }
 
-  async function getAccountbyId(accountId: string): Promise<Account | null> {
+  // ============ Items (generic surface, all kinds) ============
+
+  async function getItembyId(itemId: string): Promise<SafeItem | null> {
     try {
-      return await invoke<Account>('get_account_by_id', { accountId });
+      return await invoke<SafeItem>('get_item_by_id', { itemId });
     } catch (e) {
       error.value = String(e);
       return null;
     }
   }
 
-  async function getAllAccounts(filter?: AccountFilter): Promise<Account[]> {
+  async function getAllItems(filter?: ItemFilter): Promise<SafeItem[]> {
     try {
-      return await invoke<Account[]>('get_all_accounts', { filter: filter || {} });
+      return await invoke<SafeItem[]>('get_all_items', { filter: filter || {} });
     } catch (e) {
       error.value = String(e);
       return [];
     }
   }
 
-  async function addAccount(data: CreateAccountProps): Promise<Account | null> {
+  async function addItem(props: CreateItemProps): Promise<SafeItem | null> {
     try {
-      return await invoke<Account>('add_account', {
-        vaultId: data.vaultId,
-        displayName: data.displayName || null,
-        username: data.username,
-        email: data.email || null,
-        password: data.password,
-        icon: data.icon || null
+      return await invoke<SafeItem>('add_item', {
+        vaultId: props.vaultId,
+        displayName: props.displayName || null,
+        icon: props.icon || null,
+        data: props.data,
+        secrets: props.secrets ?? null
       });
     } catch (e) {
       error.value = String(e);
@@ -115,49 +134,31 @@ export function useVault() {
     }
   }
 
-  async function updateAccount(
+  // ============ Per-field secrets ============
+
+  async function getItemSecret(
     vaultId: string,
-    accountId: string,
-    data: Partial<Omit<Account, 'id'>>
-  ): Promise<Account | null> {
+    itemId: string,
+    fieldKey: string
+  ): Promise<string | null> {
     try {
-      return await invoke<Account>('update_account', {
-        vaultId,
-        accountId,
-        displayName: data.display_name ?? undefined,
-        username: data.username ?? undefined,
-        email: data.email ?? undefined,
-        favourite: data.favourite ?? undefined,
-        tags: data.tags ?? undefined,
-        icon: data.icon ?? undefined,
-        color: data.color ?? undefined
-      });
+      return await invoke<string>('get_item_secret', { vaultId, itemId, fieldKey });
     } catch (e) {
       error.value = String(e);
-      return null;
+      // Errors propagate: null must mean 'no value exists' only, so
+      // callers can never mistake a failed fetch for an empty secret
+      throw e;
     }
   }
 
-  async function updateAccountPassword(
+  async function updateItemSecret(
     vaultId: string,
-    accountId: string,
-    password: string | null
-  ): Promise<Account | null> {
+    itemId: string,
+    fieldKey: string,
+    value: string | null
+  ): Promise<boolean> {
     try {
-      return await invoke<Account>('update_account', {
-        vaultId,
-        accountId,
-        password
-      });
-    } catch (e) {
-      error.value = String(e);
-      return null;
-    }
-  }
-
-  async function deleteAccount(vaultId: string, accountId: string): Promise<boolean> {
-    try {
-      await invoke('delete_account', { vaultId, accountId });
+      await invoke('update_item_secret', { vaultId, itemId, fieldKey, value });
       return true;
     } catch (e) {
       error.value = String(e);
@@ -165,21 +166,59 @@ export function useVault() {
     }
   }
 
-  async function getSecret(vaultId: string, accountId: string): Promise<string | null> {
+  async function updateItem(
+    vaultId: string,
+    itemId: string,
+    data: UpdateItemProps
+  ): Promise<SafeItem | null> {
     try {
-      return await invoke<string>('get_secret', { vaultId, accountId });
+      return await invoke<SafeItem>('update_item', {
+        vaultId,
+        itemId,
+        displayName: data.displayName ?? undefined,
+        icon: data.icon ?? undefined,
+        favourite: data.favourite ?? undefined,
+        tags: data.tags ?? undefined,
+        color: data.color ?? undefined,
+        data: data.data ?? undefined
+      });
     } catch (e) {
       error.value = String(e);
       return null;
     }
   }
 
-  async function getAccountPasswordStrength(
-    vaultId: string,
-    accountId: string
-  ): Promise<Entropy | null> {
+  async function deleteItem(vaultId: string, itemId: string): Promise<boolean> {
     try {
-      return await invoke<Entropy>('get_account_password_strength', { vaultId, accountId });
+      await invoke('delete_item', { vaultId, itemId });
+      return true;
+    } catch (e) {
+      error.value = String(e);
+      return false;
+    }
+  }
+
+  async function moveItem(
+    vaultId: string,
+    itemId: string,
+    targetVaultId: string
+  ): Promise<SafeItem | null> {
+    try {
+      return await invoke<SafeItem>('move_item', { vaultId, itemId, targetVaultId });
+    } catch (e) {
+      error.value = String(e);
+      return null;
+    }
+  }
+
+  /**
+   * Password strength for the item's `password` field. Both a passwordless
+   * item and any lookup failure surface as null 'no strength' here — the
+   * same soft handling the strength display had before the rename.
+   */
+  async function getItemPasswordStrength(vaultId: string, itemId: string): Promise<Entropy | null> {
+    try {
+      return await invoke<Entropy>('get_item_password_strength', { vaultId, itemId });
     } catch (e) {
       error.value = String(e);
       return null;
@@ -248,15 +287,18 @@ export function useVault() {
     updateVault,
     deleteVault,
 
-    // Accounts
-    getAccountbyId,
-    getAllAccounts,
-    addAccount,
-    updateAccount,
-    deleteAccount,
-    getSecret,
-    getAccountPasswordStrength,
-    updateAccountPassword,
+    // Items (the generic surface, all kinds)
+    getItembyId,
+    getAllItems,
+    addItem,
+    updateItem,
+    deleteItem,
+    moveItem,
+
+    // Per-field secrets
+    getItemSecret,
+    updateItemSecret,
+    getItemPasswordStrength,
 
     // Util
     getPasswordStrength,
