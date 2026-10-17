@@ -212,9 +212,9 @@ export function useVault() {
   }
 
   /**
-   * Password strength for the item's `password` field. Returns null only
-   * when the item has no stored password (the backend answers "Item has
-   * no password" as a validation error for that case).
+   * Password strength for the item's `password` field. Both a passwordless
+   * item and any lookup failure surface as null 'no strength' here — the
+   * same soft handling the strength display had before the rename.
    */
   async function getItemPasswordStrength(vaultId: string, itemId: string): Promise<Entropy | null> {
     try {

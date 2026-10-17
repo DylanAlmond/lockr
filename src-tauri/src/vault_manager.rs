@@ -402,7 +402,12 @@ impl VaultManager {
         secrets: Option<Vec<SecretInput>>,
     ) -> Result<SafeItem, VaultError> {
         let kind = match data {
-            NewItemData::Account(account) => ItemKind::Account(account),
+            NewItemData::Account(mut account) => {
+                // Account email follows the shared text-field rule:
+                // empty strings mean 'not set'
+                account.email = normalize(account.email);
+                ItemKind::Account(account)
+            }
             NewItemData::Note(note) => ItemKind::Note(note),
             NewItemData::Card(card) => {
                 if !(1..=12).contains(&card.expiry_month) {
@@ -490,8 +495,7 @@ impl VaultManager {
     }
 
     /// Update an item's metadata, and for supported kinds its kind data.
-    /// Kind data may not change an item's kind or target accounts (they keep
-    /// their dedicated command surface).
+    /// Kind data may not change an item's kind.
     pub fn update_item(
         &mut self,
         vault_id: VaultId,
@@ -530,7 +534,12 @@ impl VaultManager {
 
             if let Some(data) = data {
                 match (&mut item.kind, data) {
-                    (ItemKind::Account(current), NewItemData::Account(new)) => *current = new,
+                    (ItemKind::Account(current), NewItemData::Account(mut new)) => {
+                        // Account email follows the shared text-field rule:
+                        // empty strings mean 'not set'
+                        new.email = normalize(new.email);
+                        *current = new;
+                    }
                     (ItemKind::Note(current), NewItemData::Note(new)) => *current = new,
                     (ItemKind::Identity(current), NewItemData::Identity(new)) => {
                         *current = new
@@ -1162,6 +1171,28 @@ mod tests {
         assert_eq!(updated.email, Some("octo@example.com".to_string()));
         assert_eq!(updated.display_name, Some("Octo renamed".to_string()));
         assert_eq!(updated.favourite, true);
+
+        // An emptied email persists as 'not set' (shared text-field rule)
+        let cleared = match manager
+            .update_item(
+                vault.id,
+                id,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(crate::NewItemData::Account(crate::AccountData {
+                    username: "newcat".to_string(),
+                    email: Some(String::new()),
+                })),
+            )
+            .unwrap()
+        {
+            SafeItem::Account(a) => a,
+            other => panic!("expected account safe view, got {other:?}"),
+        };
+        assert_eq!(cleared.email, None);
 
         // The password did not change (it rides update_item_secret only)
         assert_eq!(
