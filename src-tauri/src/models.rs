@@ -1,4 +1,4 @@
-use std::fmt;
+use std::{collections::BTreeMap, fmt};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -10,13 +10,175 @@ pub type VaultId = Uuid;
 pub type ItemId = Uuid;
 pub type SecretId = Uuid;
 
+/// The identity of one installation of Lockr. Minted locally on first use
+/// and persisted beside the vaults directory; never derived from hardware.
+pub type DeviceId = Uuid;
+
 /// The current on-disk vault schema version.
-pub const CURRENT_SCHEMA_VERSION: u32 = 2;
+pub const CURRENT_SCHEMA_VERSION: u32 = 3;
 
 /// Serde default for the schema version field. Vault files written before
 /// versioning omit the field (= v1) and are migrated on unlock.
 fn legacy_schema_version() -> u32 {
     1
+}
+
+/// A causal version vector: the highest counter observed from each Device,
+/// keyed by [`DeviceId`]. Wall clocks never participate in ordering.
+///
+/// Comparison is partial. Two vectors are [`ClockOrder::Equal`] when they
+/// carry the same counters, one [`ClockOrder::Dominates`] the other when it
+/// is strictly ahead on at least one Device and never behind, and otherwise
+/// they are [`ClockOrder::Concurrent`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct VersionVector(BTreeMap<DeviceId, u64>);
+
+/// The causal relationship between two [`VersionVector`]s.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClockOrder {
+    Equal,
+    Dominates,
+    Dominated,
+    Concurrent,
+}
+
+impl VersionVector {
+    pub fn new() -> Self {
+        Self(BTreeMap::new())
+    }
+
+    /// A vector holding exactly one observation: `device` at `counter`.
+    pub fn from_version(device: DeviceId, counter: u64) -> Self {
+        let mut vector = Self::new();
+        if counter > 0 {
+            vector.0.insert(device, counter);
+        }
+        vector
+    }
+
+    /// The counter observed from `device`; zero when never observed.
+    pub fn get(&self, device: &DeviceId) -> u64 {
+        self.0.get(device).copied().unwrap_or(0)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&DeviceId, &u64)> {
+        self.0.iter()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// The underlying map, for serialization-shaped consumers such as merge.
+    pub fn as_map(&self) -> &BTreeMap<DeviceId, u64> {
+        &self.0
+    }
+
+    /// Advance `device`'s counter by one and return the new value.
+    pub fn increment(&mut self, device: DeviceId) -> u64 {
+        let next = self.get(&device).saturating_add(1);
+        self.0.insert(device, next);
+        next
+    }
+
+    /// Record a field's version, keeping the greater counter if one exists.
+    pub fn observe(&mut self, version: &FieldVersion) {
+        if version.counter > self.get(&version.device) {
+            self.0.insert(version.device, version.counter);
+        }
+    }
+
+    /// Pointwise maximum with another vector.
+    pub fn merge(&mut self, other: &Self) {
+        for (device, counter) in &other.0 {
+            if *counter > self.get(device) {
+                self.0.insert(*device, *counter);
+            }
+        }
+    }
+
+    pub fn compare(&self, other: &Self) -> ClockOrder {
+        let mut ahead = false;
+        let mut behind = false;
+
+        for device in self.0.keys().chain(other.0.keys()) {
+            let mine = self.get(device);
+            let theirs = other.get(device);
+            if mine > theirs {
+                ahead = true;
+            } else if mine < theirs {
+                behind = true;
+            }
+        }
+
+        match (ahead, behind) {
+            (false, false) => ClockOrder::Equal,
+            (true, false) => ClockOrder::Dominates,
+            (false, true) => ClockOrder::Dominated,
+            (true, true) => ClockOrder::Concurrent,
+        }
+    }
+}
+
+/// The Device and counter that last wrote one field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FieldVersion {
+    pub device: DeviceId,
+    pub counter: u64,
+}
+
+impl FieldVersion {
+    pub fn new(device: DeviceId, counter: u64) -> Self {
+        Self { device, counter }
+    }
+}
+
+impl Default for FieldVersion {
+    fn default() -> Self {
+        Self {
+            device: Uuid::nil(),
+            counter: 0,
+        }
+    }
+}
+
+/// Common (kind-independent) item fields that participate in per-field merge,
+/// named exactly as they appear on the wire.
+pub const COMMON_ITEM_FIELD_KEYS: &[&str] = &[
+    "display_name",
+    "favourite",
+    "tags",
+    "icon",
+    "color",
+];
+
+/// The kind-specific field names as they appear on the wire.
+pub fn kind_field_keys(kind: &ItemKind) -> &'static [&'static str] {
+    match kind {
+        ItemKind::Account(_) => &["username", "email"],
+        ItemKind::Card(_) => &["cardholder_name", "expiry_month", "expiry_year", "brand"],
+        ItemKind::Note(_) => &["title", "body"],
+        ItemKind::Identity(_) => &[
+            "full_name",
+            "email",
+            "phone",
+            "address_line1",
+            "address_line2",
+            "city",
+            "postal_code",
+            "country",
+        ],
+    }
+}
+
+/// Every field name of an item that participates in per-field merge: common
+/// fields plus the fields of its kind. Secret field keys are added by the
+/// caller from the item's [`ItemSecrets`].
+pub fn item_field_keys(kind: &ItemKind) -> Vec<&'static str> {
+    let mut keys = COMMON_ITEM_FIELD_KEYS.to_vec();
+    keys.extend_from_slice(kind_field_keys(kind));
+    keys
 }
 
 /// Key of the account password secret field.
@@ -116,7 +278,11 @@ pub struct Vault {
 }
 
 /// A vault entry of any kind: common metadata plus kind-specific fields.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// A deleted item survives as a Tombstone: `deleted` is true, `kind` is
+/// `None`, and only identity plus clock are serialized. Clocks are additive
+/// so v2 content (which has neither) still parses.
+#[derive(Debug, Clone)]
 pub struct VaultItem {
     pub id: ItemId,
 
@@ -131,17 +297,69 @@ pub struct VaultItem {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 
+    /// The item's lifecycle clock: creation, move, deletion.
+    pub clock: VersionVector,
+
+    /// Last writer of each mutable wire field, keyed by its wire name.
+    pub field_clocks: BTreeMap<String, FieldVersion>,
+
+    /// True for a Tombstone. A live item always carries a `kind`.
+    pub deleted: bool,
+
     /// Kind-specific fields, flattened into the item on the wire
-    /// (`{"kind": "account", "username": ...}`).
-    #[serde(flatten)]
-    pub kind: ItemKind,
+    /// (`{"kind": "account", "username": ...}`). `None` for a Tombstone.
+    pub kind: Option<ItemKind>,
 }
 
 impl VaultItem {
+    /// A retained, content-free record of a deleted item.
+    pub fn tombstone(id: ItemId, vault_id: VaultId, clock: VersionVector) -> Self {
+        let epoch = DateTime::from_timestamp(0, 0).expect("unix epoch is valid");
+        Self {
+            id,
+            vault_id,
+            display_name: None,
+            favourite: false,
+            tags: Vec::new(),
+            icon: None,
+            color: String::new(),
+            created_at: epoch,
+            updated_at: epoch,
+            clock,
+            field_clocks: BTreeMap::new(),
+            deleted: true,
+            kind: None,
+        }
+    }
+
+    pub fn is_tombstone(&self) -> bool {
+        self.deleted || self.kind.is_none()
+    }
+
+    /// Stamp every mutable field of this item at one `(device, counter)`
+    /// version. Used when an item is created or migrated.
+    pub fn stamp_all_fields(&mut self, device: DeviceId, counter: u64) {
+        self.field_clocks.clear();
+        if let Some(kind) = &self.kind {
+            let version = FieldVersion::new(device, counter);
+            for key in item_field_keys(kind) {
+                self.field_clocks.insert(key.to_string(), version);
+            }
+        }
+    }
+
+    pub fn record_field(&mut self, key: &str, version: FieldVersion) {
+        self.field_clocks.insert(key.to_string(), version);
+    }
+
     /// Lowercased text of the kind's searchable fields, used by list search.
     pub fn search_text(&self) -> Vec<String> {
+        let Some(kind) = &self.kind else {
+            return Vec::new();
+        };
+
         let mut texts = vec![self.display_name.clone().unwrap_or_default().to_lowercase()];
-        match &self.kind {
+        match kind {
             ItemKind::Account(data) => {
                 texts.push(data.username.to_lowercase());
                 if let Some(email) = &data.email {
@@ -180,6 +398,142 @@ impl VaultItem {
 
         texts.retain(|text| !text.is_empty());
         texts
+    }
+}
+
+#[derive(Serialize)]
+struct LiveVaultItemWire<'a> {
+    id: &'a ItemId,
+    vault_id: &'a VaultId,
+    display_name: &'a Option<String>,
+    favourite: bool,
+    tags: &'a Vec<String>,
+    icon: &'a Option<String>,
+    color: &'a String,
+    created_at: &'a DateTime<Utc>,
+    updated_at: &'a DateTime<Utc>,
+    clock: &'a VersionVector,
+    field_clocks: &'a BTreeMap<String, FieldVersion>,
+    #[serde(flatten)]
+    kind: &'a ItemKind,
+}
+
+#[derive(Serialize)]
+struct TombstoneVaultItemWire<'a> {
+    id: &'a ItemId,
+    vault_id: &'a VaultId,
+    deleted: bool,
+    clock: &'a VersionVector,
+}
+
+#[derive(Deserialize)]
+struct LiveVaultItemPayload {
+    id: ItemId,
+    vault_id: VaultId,
+    #[serde(default)]
+    display_name: Option<String>,
+    #[serde(default)]
+    favourite: bool,
+    #[serde(default)]
+    tags: Vec<String>,
+    #[serde(default)]
+    icon: Option<String>,
+    #[serde(default)]
+    color: String,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+    #[serde(default)]
+    clock: VersionVector,
+    #[serde(default)]
+    field_clocks: BTreeMap<String, FieldVersion>,
+    #[serde(flatten)]
+    kind: ItemKind,
+}
+
+#[derive(Deserialize)]
+struct TombstoneVaultItemPayload {
+    id: ItemId,
+    vault_id: VaultId,
+    #[serde(default)]
+    clock: VersionVector,
+}
+
+impl Serialize for VaultItem {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        if self.is_tombstone() {
+            TombstoneVaultItemWire {
+                id: &self.id,
+                vault_id: &self.vault_id,
+                deleted: true,
+                clock: &self.clock,
+            }
+            .serialize(serializer)
+        } else {
+            LiveVaultItemWire {
+                id: &self.id,
+                vault_id: &self.vault_id,
+                display_name: &self.display_name,
+                favourite: self.favourite,
+                tags: &self.tags,
+                icon: &self.icon,
+                color: &self.color,
+                created_at: &self.created_at,
+                updated_at: &self.updated_at,
+                clock: &self.clock,
+                field_clocks: &self.field_clocks,
+                kind: self
+                    .kind
+                    .as_ref()
+                    .expect("a live item always carries a kind"),
+            }
+            .serialize(serializer)
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for VaultItem {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::Error as _;
+
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let deleted = value
+            .get("deleted")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+
+        if deleted {
+            let payload: TombstoneVaultItemPayload =
+                serde_json::from_value(value).map_err(D::Error::custom)?;
+            Ok(VaultItem::tombstone(
+                payload.id,
+                payload.vault_id,
+                payload.clock,
+            ))
+        } else {
+            let payload: LiveVaultItemPayload =
+                serde_json::from_value(value).map_err(D::Error::custom)?;
+            Ok(VaultItem {
+                id: payload.id,
+                vault_id: payload.vault_id,
+                display_name: payload.display_name,
+                favourite: payload.favourite,
+                tags: payload.tags,
+                icon: payload.icon,
+                color: payload.color,
+                created_at: payload.created_at,
+                updated_at: payload.updated_at,
+                clock: payload.clock,
+                field_clocks: payload.field_clocks,
+                deleted: false,
+                kind: Some(payload.kind),
+            })
+        }
     }
 }
 
@@ -253,6 +607,12 @@ pub struct IdentityData {
 pub struct SecretField {
     pub key: String,
     pub value: String,
+
+    /// Last writer of this secret value. Secrets are fields like any other,
+    /// so a concurrent password change is a Conflict.
+    #[zeroize(skip)]
+    #[serde(default)]
+    pub clock: FieldVersion,
 }
 
 /// All secret fields of an item. Stored in the vault blob but never sent to
@@ -266,12 +626,13 @@ pub struct ItemSecrets {
 }
 
 impl ItemSecrets {
-    pub fn new(item_id: ItemId, key: &str, value: String) -> Self {
+    pub fn new(item_id: ItemId, key: &str, value: String, clock: FieldVersion) -> Self {
         Self {
             item_id,
             fields: vec![SecretField {
                 key: key.to_string(),
                 value,
+                clock,
             }],
         }
     }
@@ -284,14 +645,16 @@ impl ItemSecrets {
             .map(|f| f.value.as_str())
     }
 
-    /// Sets or replaces the given secret field's value.
-    pub fn set(&mut self, key: &str, value: String) {
+    /// Sets or replaces the given secret field's value and version.
+    pub fn set(&mut self, key: &str, value: String, clock: FieldVersion) {
         if let Some(field) = self.fields.iter_mut().find(|f| f.key == key) {
             field.value = value;
+            field.clock = clock;
         } else {
             self.fields.push(SecretField {
                 key: key.to_string(),
                 value,
+                clock,
             });
         }
     }
@@ -342,6 +705,36 @@ impl Default for ItemFilter {
     }
 }
 
+impl Vault {
+    /// Stamp every item and secret field in a freshly migrated vault with
+    /// this Device at counter 1. Two Devices migrating the same v2 file
+    /// therefore get concurrent clocks rather than identical ones.
+    pub fn stamp_migrated_items(&mut self, device_id: DeviceId) {
+        let version = FieldVersion::new(device_id, 1);
+
+        for item in &mut self.items {
+            item.clock = VersionVector::from_version(device_id, 1);
+            if item.is_tombstone() {
+                item.field_clocks.clear();
+            } else {
+                item.stamp_all_fields(device_id, 1);
+            }
+        }
+
+        for entry in &mut self.secrets {
+            for field in &mut entry.fields {
+                field.clock = version;
+            }
+
+            if let Some(item) = self.items.iter_mut().find(|item| item.id == entry.item_id) {
+                for field in &entry.fields {
+                    item.field_clocks.insert(field.key.clone(), version);
+                }
+            }
+        }
+    }
+}
+
 // ============ Legacy (v1) accounts-only format — migration only ============
 
 /// A pre-versioning vault file: accounts-only, passwords inline per account.
@@ -386,9 +779,10 @@ pub struct AccountSecret {
 impl LegacyVault {
     /// Transforms a v1 accounts-only vault into the versioned model: every
     /// account becomes an account-kind item and its password moves into a
-    /// per-field secret.
-    pub fn into_versioned(&self) -> Vault {
-        Vault {
+    /// per-field secret. The migrated content is stamped with the local
+    /// Device at counter 1.
+    pub fn into_versioned(&self, device_id: DeviceId) -> Vault {
+        let mut vault = Vault {
             schema_version: CURRENT_SCHEMA_VERSION,
             id: self.id,
             name: self.name.clone(),
@@ -406,10 +800,13 @@ impl LegacyVault {
                     color: a.color.clone(),
                     created_at: a.created_at,
                     updated_at: a.updated_at,
-                    kind: ItemKind::Account(AccountData {
+                    clock: VersionVector::new(),
+                    field_clocks: BTreeMap::new(),
+                    deleted: false,
+                    kind: Some(ItemKind::Account(AccountData {
                         username: a.username.clone(),
                         email: a.email.clone(),
-                    }),
+                    })),
                 })
                 .collect(),
             secrets: self
@@ -420,10 +817,14 @@ impl LegacyVault {
                         a.id,
                         SECRET_FIELD_PASSWORD,
                         a.secret.password.clone(),
+                        FieldVersion::new(device_id, 1),
                     )
                 })
                 .collect(),
-        }
+        };
+
+        vault.stamp_migrated_items(device_id);
+        vault
     }
 }
 
@@ -542,7 +943,7 @@ pub enum SafeItem {
 /// The Safe View of an item: only account-kind items have an account view.
 /// Returns `None` for every other kind.
 pub fn account_from_item(item: &VaultItem) -> Option<SafeAccount> {
-    let ItemKind::Account(data) = &item.kind else {
+    let ItemKind::Account(data) = item.kind.as_ref()? else {
         return None;
     };
 
@@ -564,7 +965,11 @@ pub fn account_from_item(item: &VaultItem) -> Option<SafeAccount> {
 /// The Safe View of a card item, derived from the item plus its vault's
 /// secret entries (the card number lives in the secret store).
 pub fn card_from_item(item: &VaultItem, secrets: &[ItemSecrets]) -> SafeCard {
-    let ItemKind::Card(data) = &item.kind else {
+    let kind = item
+        .kind
+        .as_ref()
+        .expect("card_from_item on a tombstone");
+    let ItemKind::Card(data) = kind else {
         unreachable!("card_from_item on a non-card item");
     };
 
@@ -574,7 +979,7 @@ pub fn card_from_item(item: &VaultItem, secrets: &[ItemSecrets]) -> SafeCard {
         .and_then(card_number_last4);
 
     // Keys of the fields that actually have values, in presentation order
-    let secrets_present = allowed_secret_keys(&item.kind)
+    let secrets_present = allowed_secret_keys(kind)
         .iter()
         .filter(|key| entry.is_some_and(|s| s.get(key).is_some()))
         .map(|key| key.to_string())
@@ -599,11 +1004,12 @@ pub fn card_from_item(item: &VaultItem, secrets: &[ItemSecrets]) -> SafeCard {
     }
 }
 
-/// The Safe View of an item of any kind. Every kind has a safe view; note
-/// and identity items carry no secret fields, account and card items keep
-/// theirs out of the payload (card cards only via `card_number_last4`).
-pub fn item_to_safe(item: &VaultItem, secrets: &[ItemSecrets]) -> SafeItem {
-    match &item.kind {
+/// The Safe View of an item of any kind. Every live kind has a safe view;
+/// note and identity items carry no secret fields, account and card items
+/// keep theirs out of the payload (cards only via `card_number_last4`).
+/// A Tombstone has no safe view and yields `None`.
+pub fn item_to_safe(item: &VaultItem, secrets: &[ItemSecrets]) -> Option<SafeItem> {
+    Some(match item.kind.as_ref()? {
         ItemKind::Account(_) => {
             SafeItem::Account(account_from_item(item).expect("matched account kind"))
         }
@@ -640,7 +1046,7 @@ pub fn item_to_safe(item: &VaultItem, secrets: &[ItemSecrets]) -> SafeItem {
             postal_code: data.postal_code.clone(),
             country: data.country.clone(),
         }),
-    }
+    })
 }
 
 /// Converts our internal DB models to safe frontend models
@@ -678,10 +1084,13 @@ mod tests {
             color: "#6240BF".to_string(),
             created_at: now,
             updated_at: now,
-            kind: ItemKind::Account(AccountData {
+            clock: VersionVector::new(),
+            field_clocks: BTreeMap::new(),
+            deleted: false,
+            kind: Some(ItemKind::Account(AccountData {
                 username: username.to_string(),
                 email: Some("dev@example.com".to_string()),
-            }),
+            })),
         }
     }
 
@@ -699,6 +1108,7 @@ mod tests {
                 item.id,
                 SECRET_FIELD_PASSWORD,
                 "round_trip_pw".to_string(),
+                FieldVersion::default(),
             )],
         };
 
@@ -708,7 +1118,7 @@ mod tests {
         assert_eq!(parsed.schema_version, CURRENT_SCHEMA_VERSION);
         assert_eq!(parsed.id, vault.id);
         assert_eq!(parsed.items.len(), 1);
-        let data = parsed.items[0].kind.as_account().unwrap();
+        let data = parsed.items[0].kind.as_ref().unwrap().as_account().unwrap();
         assert_eq!(data.username, "octocat");
         assert_eq!(data.email, Some("dev@example.com".to_string()));
         assert_eq!(parsed.items[0].favourite, true);
@@ -741,6 +1151,187 @@ mod tests {
     }
 
     #[test]
+    fn test_v3_vault_round_trips_clocks_and_secret_versions() {
+        let device = Uuid::from_u128(1);
+        let vault_id = Uuid::new_v4();
+        let item_id = Uuid::new_v4();
+        let now = Utc::now();
+
+        let mut clock = VersionVector::new();
+        assert_eq!(clock.increment(device), 1);
+        let mut field_clocks = BTreeMap::new();
+        field_clocks.insert(
+            "display_name".to_string(),
+            FieldVersion::new(device, 1),
+        );
+        field_clocks.insert("username".to_string(), FieldVersion::new(device, 1));
+
+        let item = VaultItem {
+            id: item_id,
+            vault_id,
+            display_name: Some("Dev Vault".to_string()),
+            favourite: true,
+            tags: vec!["work".to_string()],
+            icon: Some("github".to_string()),
+            color: "#6240BF".to_string(),
+            created_at: now,
+            updated_at: now,
+            clock,
+            field_clocks,
+            deleted: false,
+            kind: Some(ItemKind::Account(AccountData {
+                username: "octocat".to_string(),
+                email: Some("dev@example.com".to_string()),
+            })),
+        };
+
+        let vault = Vault {
+            schema_version: CURRENT_SCHEMA_VERSION,
+            id: vault_id,
+            name: "Round Trip".to_string(),
+            color: "#6240BF".to_string(),
+            items: vec![item],
+            secrets: vec![ItemSecrets::new(
+                item_id,
+                SECRET_FIELD_PASSWORD,
+                "round_trip_pw".to_string(),
+                FieldVersion::new(device, 1),
+            )],
+        };
+
+        let bytes = serde_json::to_vec(&vault).unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let device_key = device.to_string();
+        assert_eq!(json["schema_version"], 3);
+        assert_eq!(json["items"][0]["kind"], "account");
+        assert_eq!(json["items"][0]["clock"][&device_key], 1);
+        assert_eq!(
+            json["items"][0]["field_clocks"]["display_name"]["device"],
+            device_key
+        );
+        assert_eq!(
+            json["items"][0]["field_clocks"]["display_name"]["counter"],
+            1
+        );
+        assert_eq!(json["secrets"][0]["fields"][0]["clock"]["counter"], 1);
+
+        let parsed: Vault = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(parsed.schema_version, 3);
+        let parsed_item = &parsed.items[0];
+        assert_eq!(parsed_item.clock.get(&device), 1);
+        assert_eq!(
+            parsed_item.field_clocks.get("username"),
+            Some(&FieldVersion::new(device, 1))
+        );
+        assert_eq!(
+            parsed.secrets[0].fields[0].clock,
+            FieldVersion::new(device, 1)
+        );
+    }
+
+    #[test]
+    fn test_v2_item_without_clocks_defaults_to_v3_empty_versions() {
+        let vault_id = Uuid::new_v4();
+        let item_id = Uuid::new_v4();
+        let raw = format!(
+            r##"{{
+                "schema_version": 2,
+                "id": "{vault_id}",
+                "name": "V",
+                "color": "#6240BF",
+                "items": [{{
+                    "id": "{item_id}",
+                    "vault_id": "{vault_id}",
+                    "display_name": "A",
+                    "favourite": false,
+                    "tags": [],
+                    "icon": null,
+                    "color": "",
+                    "created_at": "2023-11-14T22:13:20Z",
+                    "updated_at": "2023-11-14T22:13:20Z",
+                    "kind": "account",
+                    "username": "octocat",
+                    "email": null
+                }}],
+                "secrets": [{{
+                    "item_id": "{item_id}",
+                    "fields": [{{"key": "password", "value": "pw"}}]
+                }}]
+            }}"##
+        );
+
+        let parsed: Vault = serde_json::from_str(&raw).unwrap();
+        assert_eq!(parsed.schema_version, 2);
+        assert!(!parsed.items[0].is_tombstone());
+        assert!(parsed.items[0].clock.is_empty());
+        assert!(parsed.items[0].field_clocks.is_empty());
+        assert_eq!(parsed.secrets[0].fields[0].clock, FieldVersion::default());
+        assert_eq!(
+            parsed.items[0].kind.as_ref().unwrap().as_account().unwrap().username,
+            "octocat"
+        );
+    }
+
+    #[test]
+    fn test_tombstone_serializes_identity_and_clock_only() {
+        let device = Uuid::from_u128(7);
+        let vault_id = Uuid::new_v4();
+        let item_id = Uuid::new_v4();
+
+        let tombstone = VaultItem::tombstone(
+            item_id,
+            vault_id,
+            VersionVector::from_version(device, 2),
+        );
+
+        assert!(tombstone.is_tombstone());
+        assert!(tombstone.kind.is_none());
+
+        let json = serde_json::to_value(&tombstone).unwrap();
+        assert_eq!(json["id"], item_id.to_string());
+        assert_eq!(json["vault_id"], vault_id.to_string());
+        assert_eq!(json["deleted"], true);
+        assert_eq!(json["clock"][&device.to_string()], 2);
+        assert!(json.get("kind").is_none());
+        assert!(json.get("username").is_none());
+        assert!(json.get("display_name").is_none());
+        assert!(json.get("tags").is_none());
+
+        let parsed: VaultItem = serde_json::from_value(json).unwrap();
+        assert!(parsed.is_tombstone());
+        assert_eq!(parsed.id, item_id);
+        assert_eq!(parsed.clock.get(&device), 2);
+    }
+
+    #[test]
+    fn test_version_vectors_compare_causally() {
+        let device_a = Uuid::from_u128(1);
+        let device_b = Uuid::from_u128(2);
+
+        let mut first = VersionVector::new();
+        assert_eq!(first.increment(device_a), 1);
+
+        let mut same = VersionVector::new();
+        same.increment(device_a);
+        assert_eq!(first.compare(&same), ClockOrder::Equal);
+
+        let mut newer = same.clone();
+        newer.increment(device_a);
+        assert_eq!(newer.compare(&first), ClockOrder::Dominates);
+        assert_eq!(first.compare(&newer), ClockOrder::Dominated);
+
+        let mut concurrent = first.clone();
+        concurrent.increment(device_b);
+        assert_eq!(concurrent.compare(&newer), ClockOrder::Concurrent);
+        assert_eq!(newer.compare(&concurrent), ClockOrder::Concurrent);
+
+        let mut merged = concurrent.clone();
+        merged.merge(&newer);
+        assert_eq!(merged.get(&device_a), 2);
+        assert_eq!(merged.get(&device_b), 1);
+    }
+
+    #[test]
     fn test_legacy_vault_migration_moves_passwords_to_field_secrets() {
         let vault_id = Uuid::new_v4();
         let account_id = Uuid::new_v4();
@@ -769,7 +1360,8 @@ mod tests {
             }],
         };
 
-        let vault = legacy.into_versioned();
+        let device = Uuid::from_u128(42);
+        let vault = legacy.into_versioned(device);
 
         assert_eq!(vault.schema_version, CURRENT_SCHEMA_VERSION);
         assert_eq!(vault.items.len(), 1);
@@ -778,12 +1370,23 @@ mod tests {
         assert_eq!(item.display_name, Some("GitHub".to_string()));
         assert_eq!(item.created_at, created);
         assert_eq!(item.updated_at, updated);
-        let data = item.kind.as_account().unwrap();
+        let data = item.kind.as_ref().unwrap().as_account().unwrap();
         assert_eq!(data.username, "octocat");
         assert_eq!(data.email, Some("octo@example.com".to_string()));
+
+        // The v1 content was stamped by the local Device at counter 1
+        assert_eq!(item.clock.get(&device), 1);
+        assert_eq!(
+            item.field_clocks.get("password"),
+            Some(&FieldVersion::new(device, 1))
+        );
 
         assert_eq!(vault.secrets.len(), 1);
         assert_eq!(vault.secrets[0].item_id, account_id);
         assert_eq!(vault.secrets[0].get(SECRET_FIELD_PASSWORD), Some("legacy_pw"));
+        assert_eq!(
+            vault.secrets[0].fields[0].clock,
+            FieldVersion::new(device, 1)
+        );
     }
 }

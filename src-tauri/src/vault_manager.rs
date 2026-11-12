@@ -13,10 +13,12 @@ use crate::atomic::write_atomic;
 use crate::crypto::{
     decrypt_with_key, derive_master_key, encrypt_with_key, generate_salt, MasterKey, SALT_LEN,
 };
+use crate::device::load_or_create_device_id;
 use crate::{
-    ItemFilter, CURRENT_SCHEMA_VERSION, IntoSafe, ItemId, ItemKind, ItemSecrets,
-    LegacyVault, NewItemData, SecretInput, SECRET_FIELD_PASSWORD, SafeItem, SafeVault, Vault,
-    VaultError, VaultId, VaultItem, allowed_secret_keys, item_to_safe,
+    allowed_secret_keys, item_to_safe, kind_field_keys, CURRENT_SCHEMA_VERSION, DeviceId,
+    FieldVersion, IntoSafe, ItemFilter, ItemId, ItemKind, ItemSecrets, LegacyVault, NewItemData,
+    SafeItem, SafeVault, SecretInput, Vault, VaultError, VaultId, VaultItem, VersionVector,
+    SECRET_FIELD_PASSWORD,
 };
 
 /// Normalizes an optional text field: empty strings mean "not set".
@@ -74,6 +76,10 @@ pub struct VaultManager {
     /// Where to store vault files
     vaults_dir: PathBuf,
 
+    /// This installation's identity, minted on first use and persisted
+    /// beside the vaults directory.
+    device_id: DeviceId,
+
     /// A map of decrypted unlocked vaults (with cached keys)
     unlocked_vaults: HashMap<VaultId, UnlockedVault>,
 
@@ -85,6 +91,7 @@ pub struct VaultManager {
 impl VaultManager {
     /// Create new vault dir
     pub fn new(app_data_dir: PathBuf) -> Result<Self, VaultError> {
+        let device_id = load_or_create_device_id(&app_data_dir)?;
         let vaults_dir = app_data_dir.join("vaults");
 
         if !vaults_dir.exists() {
@@ -93,9 +100,15 @@ impl VaultManager {
 
         Ok(Self {
             vaults_dir,
+            device_id,
             unlocked_vaults: HashMap::new(),
             autosave: true,
         })
+    }
+
+    /// This installation's Device identity.
+    pub fn device_id(&self) -> DeviceId {
+        self.device_id
     }
 
     /// Toggle autosave. When disabled, mutations only mark vaults dirty.
@@ -265,14 +278,11 @@ impl VaultManager {
 
         // Parse — new format first, legacy accounts-only fallback for
         // anything written before schema versioning.
-        let (vault, migrated) = match serde_json::from_slice::<Vault>(&json_bytes) {
-            Ok(mut vault) => {
+        let (mut vault, migrated) = match serde_json::from_slice::<Vault>(&json_bytes) {
+            Ok(vault) => {
                 // Versioned shape, but an outdated stamp (or no stamp at
                 // all): re-stamp so the save brings it to the current format.
                 let migrated = vault.schema_version < CURRENT_SCHEMA_VERSION;
-                if migrated {
-                    vault.schema_version = CURRENT_SCHEMA_VERSION;
-                }
                 (vault, migrated)
             }
             Err(_) => {
@@ -281,11 +291,17 @@ impl VaultManager {
                 // legacy parse error; both describe the same corrupted
                 // payload, and the original file is left untouched.
                 let legacy: LegacyVault = serde_json::from_slice(&json_bytes)?;
-                (legacy.into_versioned(), true)
+                (legacy.into_versioned(self.device_id), true)
             }
         };
 
         if migrated {
+            // v2 (and v1) content has no per-field or lifecycle clocks.
+            // Stamp it with *this* Device at counter 1, so two Devices that
+            // migrate the same file are honestly concurrent.
+            vault.stamp_migrated_items(self.device_id);
+            vault.schema_version = CURRENT_SCHEMA_VERSION;
+
             // Back up the unmodified encrypted file before any save can
             // persist the transformed format. The on-disk file itself is
             // untouched until then, so the backup is the rollback path.
@@ -433,15 +449,27 @@ impl VaultManager {
         Ok(())
     }
 
-    /// Delete an item of any kind and its secret entry, if any.
+    /// Delete an item of any kind and its secret entry, if any. The item is
+    /// retained as a Tombstone — identity and clock only — so the deletion
+    /// can travel to other Devices instead of the item reappearing on sync.
     pub fn delete_item(&mut self, vault_id: VaultId, item_id: ItemId) -> Result<(), VaultError> {
         {
+            let device = self.device_id;
             let vault = self.get_vault_mut(vault_id)?;
-            let exists = vault.items.iter().any(|i| i.id == item_id);
-            if !exists {
-                return Err(VaultError::ItemNotFound(item_id.to_string()));
-            }
-            vault.items.retain(|i| i.id != item_id);
+            let index = vault
+                .items
+                .iter()
+                .position(|i| i.id == item_id && !i.is_tombstone())
+                .ok_or(VaultError::ItemNotFound(item_id.to_string()))?;
+
+            let mut item = vault.items.remove(index);
+            item.clock.increment(device);
+
+            vault.items.push(VaultItem::tombstone(
+                item.id,
+                item.vault_id,
+                item.clock,
+            ));
             vault.secrets.retain(|s| s.item_id != item_id);
         }
 
@@ -481,6 +509,13 @@ impl VaultManager {
             NewItemData::Identity(identity) => ItemKind::Identity(identity),
         };
 
+        // A new item starts at this Device's next lifecycle counter; every
+        // field it carries shares that counter as its last-writer version.
+        let device = self.device_id;
+        let mut item_clock = VersionVector::new();
+        let counter = item_clock.increment(device);
+        let version = FieldVersion::new(device, counter);
+
         // Validate the secret inputs against the kind before mutating anything
         let secret_fields: Vec<crate::SecretField> = {
             let allowed = allowed_secret_keys(&kind);
@@ -503,6 +538,7 @@ impl VaultManager {
                         fields.push(crate::SecretField {
                             key: input.key.clone(),
                             value: input.value.clone(),
+                            clock: version,
                         });
                     }
                     fields
@@ -513,7 +549,7 @@ impl VaultManager {
         };
 
         let now = Utc::now();
-        let item = VaultItem {
+        let mut item = VaultItem {
             id: Uuid::new_v4(),
             vault_id,
             display_name: normalize(display_name),
@@ -523,8 +559,15 @@ impl VaultManager {
             color: String::new(),
             created_at: now,
             updated_at: now,
-            kind,
+            clock: item_clock,
+            field_clocks: Default::default(),
+            deleted: false,
+            kind: Some(kind),
         };
+        item.stamp_all_fields(device, counter);
+        for field in &secret_fields {
+            item.record_field(&field.key, version);
+        }
 
         {
             let vault = self.get_vault_mut(vault_id)?;
@@ -543,15 +586,18 @@ impl VaultManager {
     }
 
     /// Builds the safe view of an item against its vault's current state
-    /// (card items derive last4 from the vault's secret store).
+    /// (card items derive last4 from the vault's secret store). Tombstones
+    /// have no safe view and are treated as missing.
     fn safe_view_of(&self, vault_id: VaultId, item_id: ItemId) -> Result<SafeItem, VaultError> {
         let vault = self.get_vault(vault_id)?;
         let item = vault
             .items
             .iter()
-            .find(|i| i.id == item_id)
+            .find(|i| i.id == item_id && !i.is_tombstone())
             .ok_or(VaultError::ItemNotFound(item_id.to_string()))?;
-        Ok(item_to_safe(item, &vault.secrets))
+        item_to_safe(item, &vault.secrets).ok_or_else(|| {
+            VaultError::ItemNotFound(item_id.to_string())
+        })
     }
 
     /// Update an item's metadata, and for supported kinds its kind data.
@@ -568,32 +614,46 @@ impl VaultManager {
         data: Option<NewItemData>,
     ) -> Result<SafeItem, VaultError> {
         {
+            let device = self.device_id;
             let vault = self.get_vault_mut(vault_id)?;
 
             let item = vault
                 .items
                 .iter_mut()
-                .find(|i| i.id == item_id)
+                .find(|i| i.id == item_id && !i.is_tombstone())
                 .ok_or(VaultError::ItemNotFound(item_id.to_string()))?;
+
+            let counter = item.clock.increment(device);
+            let version = FieldVersion::new(device, counter);
 
             if let Some(fav) = favourite {
                 item.favourite = fav;
+                item.record_field("favourite", version);
             }
             if let Some(t) = tags {
                 item.tags = t;
+                item.record_field("tags", version);
             }
             if let Some(c) = color {
                 item.color = c;
+                item.record_field("color", version);
             }
             if let Some(name) = display_name {
                 item.display_name = normalize(Some(name));
+                item.record_field("display_name", version);
             }
             if let Some(icon) = icon {
                 item.icon = normalize(Some(icon));
+                item.record_field("icon", version);
             }
 
             if let Some(data) = data {
-                match (&mut item.kind, data) {
+                let kind = item
+                    .kind
+                    .as_mut()
+                    .ok_or(VaultError::ItemNotFound(item_id.to_string()))?;
+
+                match (kind, data) {
                     (ItemKind::Account(current), NewItemData::Account(mut new)) => {
                         // Account email follows the shared text-field rule:
                         // empty strings mean 'not set'
@@ -611,6 +671,14 @@ impl VaultManager {
                         ))
                     }
                 }
+
+                for key in kind_field_keys(
+                    item.kind
+                        .as_ref()
+                        .expect("a live item always carries a kind"),
+                ) {
+                    item.record_field(key, version);
+                }
             }
 
             item.updated_at = Utc::now();
@@ -627,8 +695,14 @@ impl VaultManager {
     /// Retrieve a specific item of any sendable kind by id (all unlocked vaults).
     pub fn get_item_by_id(&self, item_id: ItemId) -> Result<SafeItem, VaultError> {
         for uv in self.unlocked_vaults.values() {
-            if let Some(item) = uv.vault.items.iter().find(|i| i.id == item_id) {
-                return Ok(item_to_safe(item, &uv.vault.secrets));
+            if let Some(item) = uv
+                .vault
+                .items
+                .iter()
+                .find(|i| i.id == item_id && !i.is_tombstone())
+            {
+                return item_to_safe(item, &uv.vault.secrets)
+                    .ok_or_else(|| VaultError::ItemNotFound(item_id.to_string()));
             }
         }
 
@@ -655,11 +729,12 @@ impl VaultManager {
 
         // Remove the item and its secret entry from the source vault
         let (item, mut secret) = {
+            let device = self.device_id;
             let source = self.get_vault_mut(vault_id)?;
             let idx = source
                 .items
                 .iter()
-                .position(|i| i.id == item_id)
+                .position(|i| i.id == item_id && !i.is_tombstone())
                 .ok_or(VaultError::ItemNotFound(item_id.to_string()))?;
             let mut item = source.items.remove(idx);
 
@@ -669,6 +744,8 @@ impl VaultManager {
                 .position(|s| s.item_id == item_id)
                 .map(|s_idx| source.secrets.remove(s_idx));
 
+            // A move is a lifecycle event on the same identity.
+            item.clock.increment(device);
             item.id = Uuid::new_v4();
             item.vault_id = target_vault_id;
             item.updated_at = Utc::now();
@@ -707,7 +784,10 @@ impl VaultManager {
 
         for vault in vaults_to_scan {
             for item in &vault.items {
-                let view = item_to_safe(item, &vault.secrets);
+                // Tombstones are retained for sync but never listed.
+                let Some(view) = item_to_safe(item, &vault.secrets) else {
+                    continue;
+                };
 
                 if let Some(true) = filter.favourite_only {
                     if !item.favourite {
@@ -764,10 +844,14 @@ impl VaultManager {
         let item = vault
             .items
             .iter()
-            .find(|i| i.id == item_id)
+            .find(|i| i.id == item_id && !i.is_tombstone())
             .ok_or(VaultError::ItemNotFound(item_id.to_string()))?;
 
-        let allowed = allowed_secret_keys(&item.kind);
+        let allowed = allowed_secret_keys(
+            item.kind
+                .as_ref()
+                .expect("a live item always carries a kind"),
+        );
         if allowed.is_empty() {
             return Err(VaultError::Validation(
                 "This kind of item has no secret fields".to_string(),
@@ -800,10 +884,14 @@ impl VaultManager {
             let item = vault
                 .items
                 .iter()
-                .find(|i| i.id == item_id)
+                .find(|i| i.id == item_id && !i.is_tombstone())
                 .ok_or(VaultError::ItemNotFound(item_id.to_string()))?;
 
-            let allowed = allowed_secret_keys(&item.kind);
+            let allowed = allowed_secret_keys(
+                item.kind
+                    .as_ref()
+                    .expect("a live item always carries a kind"),
+            );
             if allowed.is_empty() {
                 return Err(VaultError::Validation(
                     "This kind of item has no secret fields".to_string(),
@@ -828,18 +916,25 @@ impl VaultManager {
         }
 
         {
+            let device = self.device_id;
             let vault = self.get_vault_mut(vault_id)?;
             let item = vault
                 .items
                 .iter_mut()
-                .find(|i| i.id == item_id)
+                .find(|i| i.id == item_id && !i.is_tombstone())
                 .expect("the item was just validated");
+
+            // A secret is a field like any other: bump the item's lifecycle
+            // clock and record the same version against the field key.
+            let counter = item.clock.increment(device);
+            let version = FieldVersion::new(device, counter);
             item.updated_at = Utc::now();
+            item.record_field(field_key, version);
 
             let entry_pos = vault.secrets.iter().position(|s| s.item_id == item_id);
 
             match (entry_pos, value) {
-                (Some(pos), Some(value)) => vault.secrets[pos].set(field_key, value),
+                (Some(pos), Some(value)) => vault.secrets[pos].set(field_key, value, version),
                 (Some(pos), None) => {
                     vault.secrets[pos].remove(field_key);
                     // Drop emptied entries to keep the store tidy
@@ -849,7 +944,7 @@ impl VaultManager {
                 }
                 (None, Some(value)) => vault
                     .secrets
-                    .push(ItemSecrets::new(item_id, field_key, value)),
+                    .push(ItemSecrets::new(item_id, field_key, value, version)),
                 (None, None) => unreachable!("no-op clears return above"),
             }
         }
@@ -888,8 +983,8 @@ impl VaultManager {
 mod tests {
     use super::*;
     use crate::{
-        SECRET_FIELD_CARD_NUMBER, SECRET_FIELD_PIN, SECRET_FIELD_SECURITY_CODE,
-        card_number_last4,
+        card_number_last4, ClockOrder, SECRET_FIELD_CARD_NUMBER, SECRET_FIELD_PIN,
+        SECRET_FIELD_SECURITY_CODE,
     };
 
     fn setup() -> PathBuf {
@@ -1059,6 +1154,154 @@ mod tests {
                 .unwrap()
                 .as_deref(),
             Some("legacy_pw_full")
+        );
+    }
+
+    /// Encrypt arbitrary vault plaintext into a vault file, as an older
+    /// writer would have.
+    fn write_encrypted_vault_file(
+        temp_dir: &PathBuf,
+        vault_id: Uuid,
+        plaintext: &[u8],
+    ) -> PathBuf {
+        let salt = [7u8; 32];
+        let master_key = derive_master_key(MASTER_PW, &KEY, &salt).unwrap();
+        let encrypted = encrypt_with_key(&master_key, &salt, plaintext).unwrap();
+
+        let vaults_dir = temp_dir.join("vaults");
+        std::fs::create_dir_all(&vaults_dir).unwrap();
+        let path = vaults_dir.join(format!("{}.vault", vault_id));
+        std::fs::write(&path, encrypted).unwrap();
+        path
+    }
+
+    /// Writes a v2 vault (schema version 2, no clock fields anywhere).
+    fn write_v2_vault_file(
+        temp_dir: &PathBuf,
+        vault_id: Uuid,
+        item_id: Uuid,
+    ) -> PathBuf {
+        let json = serde_json::json!({
+            "schema_version": 2,
+            "id": vault_id.to_string(),
+            "name": "V2 Vault",
+            "color": "#6240BF",
+            "items": [{
+                "id": item_id.to_string(),
+                "vault_id": vault_id.to_string(),
+                "display_name": "Old login",
+                "favourite": true,
+                "tags": ["legacy"],
+                "icon": "github",
+                "color": "#6240BF",
+                "created_at": "2023-11-14T22:13:20Z",
+                "updated_at": "2023-11-14T22:13:20Z",
+                "kind": "account",
+                "username": "octocat",
+                "email": "octo@example.com"
+            }],
+            "secrets": [{
+                "item_id": item_id.to_string(),
+                "fields": [{"key": "password", "value": "v2_password"}]
+            }]
+        });
+
+        write_encrypted_vault_file(temp_dir, vault_id, &serde_json::to_vec(&json).unwrap())
+    }
+
+    #[test]
+    fn test_migrates_v2_vault_to_v3_with_byte_identical_backup() {
+        let temp_dir = setup();
+        let vault_id = Uuid::new_v4();
+        let item_id = Uuid::new_v4();
+        let vault_path = write_v2_vault_file(&temp_dir, vault_id, item_id);
+        let backup_path = temp_dir
+            .join("vaults")
+            .join(format!("{}.vault.OLD", vault_id));
+        let before = std::fs::read(&vault_path).unwrap();
+
+        let mut manager = VaultManager::new(temp_dir.clone()).unwrap();
+        let migrated = manager.unlock_vault(vault_id, MASTER_PW, &KEY).unwrap();
+
+        assert_eq!(CURRENT_SCHEMA_VERSION, 3);
+        assert_eq!(migrated.schema_version, 3);
+        assert!(manager.is_dirty(vault_id), "migration must mark the vault dirty");
+        assert_eq!(
+            std::fs::read(&backup_path).unwrap(),
+            before,
+            "the rollback copy must be byte-identical to the pre-migration file"
+        );
+
+        // The migrated content is stamped by this installation's Device.
+        let device = manager.device_id();
+        let item = &migrated.items[0];
+        assert_eq!(item.clock.get(&device), 1);
+        assert_eq!(
+            item.field_clocks.get("username"),
+            Some(&FieldVersion::new(device, 1))
+        );
+        assert_eq!(
+            item.field_clocks.get("display_name"),
+            Some(&FieldVersion::new(device, 1))
+        );
+        assert_eq!(
+            migrated.secrets[0].fields[0].clock,
+            FieldVersion::new(device, 1)
+        );
+
+        // The v3 save changes the vault file but never the backup.
+        manager.flush_vault(vault_id).unwrap();
+        assert_ne!(std::fs::read(&vault_path).unwrap(), before);
+
+        manager.lock_vault(Some(vault_id));
+        let re_unlocked = manager.unlock_vault(vault_id, MASTER_PW, &KEY).unwrap();
+        assert_eq!(re_unlocked.schema_version, 3);
+        assert!(!manager.is_dirty(vault_id), "a v3 unlock must not re-migrate");
+        assert_eq!(
+            std::fs::read(&backup_path).unwrap(),
+            before,
+            "re-unlocking a v3 vault must not touch the backup"
+        );
+        assert_eq!(
+            manager
+                .get_item_secret(vault_id, item_id, SECRET_FIELD_PASSWORD)
+                .unwrap()
+                .as_deref(),
+            Some("v2_password")
+        );
+    }
+
+    #[test]
+    fn test_two_devices_migrating_same_v2_vault_get_concurrent_clocks() {
+        let first_dir = setup();
+        let second_dir = setup();
+        let vault_id = Uuid::new_v4();
+        let item_id = Uuid::new_v4();
+
+        let first_path = write_v2_vault_file(&first_dir, vault_id, item_id);
+        let encrypted = std::fs::read(&first_path).unwrap();
+        let second_vaults = second_dir.join("vaults");
+        std::fs::create_dir_all(&second_vaults).unwrap();
+        std::fs::write(second_vaults.join(format!("{}.vault", vault_id)), encrypted).unwrap();
+
+        let mut first = VaultManager::new(first_dir).unwrap();
+        let mut second = VaultManager::new(second_dir).unwrap();
+        assert_ne!(first.device_id(), second.device_id());
+
+        let first_vault = first.unlock_vault(vault_id, MASTER_PW, &KEY).unwrap();
+        let second_vault = second.unlock_vault(vault_id, MASTER_PW, &KEY).unwrap();
+
+        let first_clock = &first_vault.items[0].clock;
+        let second_clock = &second_vault.items[0].clock;
+
+        assert_eq!(first_clock.get(&first.device_id()), 1);
+        assert_eq!(first_clock.get(&second.device_id()), 0);
+        assert_eq!(second_clock.get(&second.device_id()), 1);
+        assert_eq!(second_clock.get(&first.device_id()), 0);
+        assert_eq!(
+            first_clock.compare(second_clock),
+            ClockOrder::Concurrent,
+            "independently migrated copies must not look identical"
         );
     }
 
@@ -1462,6 +1705,216 @@ mod tests {
         assert_eq!(re_unlocked.items.len(), 1);
     }
 
+    #[test]
+    fn test_new_items_carry_local_device_clock() {
+        let temp_dir = setup();
+        let mut manager = VaultManager::new(temp_dir.clone()).unwrap();
+        let vault = manager
+            .create_vault("Test".to_string(), "#6240BF".to_string(), MASTER_PW, &KEY)
+            .unwrap();
+        let device = manager.device_id();
+
+        let item = add_test_account_item(&mut manager, vault.id, "octocat", "hunter2");
+        let item_id = match item {
+            SafeItem::Account(view) => view.id,
+            _ => panic!("expected account view"),
+        };
+
+        let stored = manager
+            .get_vault(vault.id)
+            .unwrap()
+            .items
+            .iter()
+            .find(|stored| stored.id == item_id)
+            .unwrap();
+
+        assert_eq!(stored.clock.get(&device), 1);
+        assert_eq!(stored.clock.iter().count(), 1);
+        assert!(!stored.is_tombstone());
+
+        for key in [
+            "display_name",
+            "favourite",
+            "tags",
+            "icon",
+            "color",
+            "username",
+            "email",
+            "password",
+        ] {
+            assert_eq!(
+                stored.field_clocks.get(key),
+                Some(&FieldVersion::new(device, 1)),
+                "field '{key}' must carry this Device's creation version"
+            );
+        }
+
+        let secret_entry = manager
+            .get_vault(vault.id)
+            .unwrap()
+            .secrets
+            .iter()
+            .find(|entry| entry.item_id == item_id)
+            .unwrap();
+        assert_eq!(
+            secret_entry.fields[0].clock,
+            FieldVersion::new(device, 1)
+        );
+    }
+
+    #[test]
+    fn test_item_update_ticks_only_touched_field_clocks() {
+        let temp_dir = setup();
+        let mut manager = VaultManager::new(temp_dir.clone()).unwrap();
+        let vault = manager
+            .create_vault("Test".to_string(), "#6240BF".to_string(), MASTER_PW, &KEY)
+            .unwrap();
+        let device = manager.device_id();
+
+        let item = add_test_account_item(&mut manager, vault.id, "octocat", "hunter2");
+        let item_id = match item {
+            SafeItem::Account(view) => view.id,
+            _ => panic!("expected account view"),
+        };
+
+        // Renaming touches display_name only, but ticks the lifecycle clock.
+        manager
+            .update_item(
+                vault.id,
+                item_id,
+                Some("Renamed".to_string()),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+        let stored = manager
+            .get_vault(vault.id)
+            .unwrap()
+            .items
+            .iter()
+            .find(|stored| stored.id == item_id)
+            .unwrap();
+        assert_eq!(stored.clock.get(&device), 2);
+        assert_eq!(
+            stored.field_clocks.get("display_name"),
+            Some(&FieldVersion::new(device, 2))
+        );
+        for untouched in ["username", "email", "favourite", "tags"] {
+            assert_eq!(
+                stored.field_clocks.get(untouched),
+                Some(&FieldVersion::new(device, 1)),
+                "untouched field '{untouched}' must keep its earlier version"
+            );
+        }
+
+        // Replacing kind data stamps every field of the kind.
+        manager
+            .update_item(
+                vault.id,
+                item_id,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(crate::NewItemData::Account(crate::AccountData {
+                    username: "newcat".to_string(),
+                    email: Some("new@example.com".to_string()),
+                })),
+            )
+            .unwrap();
+
+        let stored = manager
+            .get_vault(vault.id)
+            .unwrap()
+            .items
+            .iter()
+            .find(|stored| stored.id == item_id)
+            .unwrap();
+        assert_eq!(stored.clock.get(&device), 3);
+        for changed in ["username", "email"] {
+            assert_eq!(
+                stored.field_clocks.get(changed),
+                Some(&FieldVersion::new(device, 3))
+            );
+        }
+        assert_eq!(
+            stored.field_clocks.get("display_name"),
+            Some(&FieldVersion::new(device, 2))
+        );
+    }
+
+    #[test]
+    fn test_secret_update_ticks_item_and_secret_versions() {
+        let temp_dir = setup();
+        let mut manager = VaultManager::new(temp_dir.clone()).unwrap();
+        let vault = manager
+            .create_vault("Test".to_string(), "#6240BF".to_string(), MASTER_PW, &KEY)
+            .unwrap();
+        let device = manager.device_id();
+
+        let item = add_test_account_item(&mut manager, vault.id, "octocat", "hunter2");
+        let item_id = match item {
+            SafeItem::Account(view) => view.id,
+            _ => panic!("expected account view"),
+        };
+
+        manager
+            .update_item_secret(
+                vault.id,
+                item_id,
+                SECRET_FIELD_PASSWORD,
+                Some("new_password".to_string()),
+            )
+            .unwrap();
+
+        {
+            let vault_ref = manager.get_vault(vault.id).unwrap();
+            let stored = vault_ref
+                .items
+                .iter()
+                .find(|stored| stored.id == item_id)
+                .unwrap();
+            assert_eq!(stored.clock.get(&device), 2);
+            assert_eq!(
+                stored.field_clocks.get(SECRET_FIELD_PASSWORD),
+                Some(&FieldVersion::new(device, 2))
+            );
+            let secret = vault_ref
+                .secrets
+                .iter()
+                .find(|entry| entry.item_id == item_id)
+                .unwrap();
+            assert_eq!(
+                secret.fields[0].clock,
+                FieldVersion::new(device, 2)
+            );
+        }
+
+        // Clearing is a write too: the field keeps the newer clock even
+        // though no secret value remains.
+        manager
+            .update_item_secret(vault.id, item_id, SECRET_FIELD_PASSWORD, None)
+            .unwrap();
+
+        let vault_ref = manager.get_vault(vault.id).unwrap();
+        let stored = vault_ref
+            .items
+            .iter()
+            .find(|stored| stored.id == item_id)
+            .unwrap();
+        assert_eq!(stored.clock.get(&device), 3);
+        assert_eq!(
+            stored.field_clocks.get(SECRET_FIELD_PASSWORD),
+            Some(&FieldVersion::new(device, 3))
+        );
+        assert!(vault_ref.secrets.iter().all(|s| s.item_id != item_id));
+    }
+
     // ============ Item command surface (notes first) ============
 
     fn add_test_note(manager: &mut VaultManager, vault_id: VaultId, title: &str, body: &str) -> SafeItem {
@@ -1635,12 +2088,13 @@ mod tests {
     }
 
     #[test]
-    fn test_delete_item_removes_item_and_secret_entry() {
+    fn test_delete_item_retains_tombstone_without_payload_or_secrets() {
         let temp_dir = setup();
         let mut manager = VaultManager::new(temp_dir.clone()).unwrap();
         let vault = manager
             .create_vault("Test".to_string(), "#6240BF".to_string(), MASTER_PW, &KEY)
             .unwrap();
+        let device = manager.device_id();
 
         let note = add_test_note(&mut manager, vault.id, "Note", "Body");
         let note_id = match &note {
@@ -1648,19 +2102,63 @@ mod tests {
             _ => panic!("expected note"),
         };
         manager.delete_item(vault.id, note_id).unwrap();
-        assert_eq!(manager.get_vault(vault.id).unwrap().items.len(), 0);
-        assert!(manager.get_item_by_id(note_id).is_err());
 
-        // delete_item is kind-generic: works on accounts too
+        {
+            let vault_ref = manager.get_vault(vault.id).unwrap();
+            assert_eq!(vault_ref.items.len(), 1, "the tombstone is retained");
+            let tombstone = &vault_ref.items[0];
+            assert!(tombstone.is_tombstone());
+            assert!(tombstone.kind.is_none(), "a tombstone carries no payload");
+            assert_eq!(tombstone.id, note_id);
+            assert_eq!(tombstone.clock.get(&device), 2);
+            assert!(tombstone.field_clocks.is_empty());
+            assert!(tombstone.display_name.is_none());
+            assert!(tombstone.tags.is_empty());
+        }
+
+        // Tombstones are retained for sync but never listed or fetched.
+        assert!(manager
+            .get_all_items(ItemFilter::default())
+            .unwrap()
+            .is_empty());
+        assert!(matches!(
+            manager.get_item_by_id(note_id),
+            Err(VaultError::ItemNotFound(_))
+        ));
+        assert!(matches!(
+            manager.get_item_secret(vault.id, note_id, SECRET_FIELD_PASSWORD),
+            Err(VaultError::ItemNotFound(_))
+        ));
+
+        // delete_item is kind-generic and drops secrets too.
         let account = add_test_account_item(&mut manager, vault.id, "octocat", "pw");
         let account_id = match &account {
             SafeItem::Account(a) => a.id,
             _ => unreachable!(),
         };
         manager.delete_item(vault.id, account_id).unwrap();
-        let vault_ref = manager.get_vault(vault.id).unwrap();
-        assert!(vault_ref.items.is_empty());
-        assert!(vault_ref.secrets.is_empty(), "Deleting must drop secrets too");
+        {
+            let vault_ref = manager.get_vault(vault.id).unwrap();
+            assert_eq!(vault_ref.items.len(), 2);
+            assert!(vault_ref.items.iter().all(|item| item.is_tombstone()));
+            assert!(vault_ref.secrets.is_empty(), "Deleting must drop secrets too");
+            let account_tombstone = vault_ref
+                .items
+                .iter()
+                .find(|item| item.id == account_id)
+                .unwrap();
+            assert_eq!(account_tombstone.clock.get(&device), 2);
+        }
+
+        // A saved v3 vault reloads its tombstones intact.
+        manager.lock_vault(Some(vault.id));
+        let re_unlocked = manager.unlock_vault(vault.id, MASTER_PW, &KEY).unwrap();
+        assert_eq!(re_unlocked.items.len(), 2);
+        assert!(re_unlocked.items.iter().all(|item| item.is_tombstone()));
+        assert!(manager
+            .get_all_items(ItemFilter::default())
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -1909,7 +2407,10 @@ mod tests {
             _ => unreachable!(),
         };
         manager.delete_item(vault_b.id, new_id).unwrap();
-        assert!(manager.get_vault(vault_b.id).unwrap().items.is_empty());
+        let vault_b_ref = manager.get_vault(vault_b.id).unwrap();
+        assert_eq!(vault_b_ref.items.len(), 1, "deletion leaves a Tombstone");
+        assert!(vault_b_ref.items[0].is_tombstone());
+        assert_eq!(vault_b_ref.items[0].id, new_id);
     }
 
     #[test]

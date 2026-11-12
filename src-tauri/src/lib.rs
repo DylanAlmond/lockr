@@ -1,6 +1,7 @@
 mod atomic;
 mod commands;
 mod crypto;
+mod device;
 mod error;
 mod models;
 mod user_manager;
