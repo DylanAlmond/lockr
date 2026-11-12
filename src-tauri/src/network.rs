@@ -171,6 +171,21 @@ impl RegistryState {
         Self(bytes)
     }
 
+    /// The registry state a sync exchanges: both registries, encoded as
+    /// shared identity data. No vault content and no secrets.
+    pub fn from_registries(registries: &crate::SharedRegistries) -> Result<Self, NetworkError> {
+        let bytes = serde_json::to_vec(registries).map_err(|err| {
+            NetworkError::MalformedFrame(format!("registry state cannot be encoded: {err}"))
+        })?;
+        Ok(Self(bytes))
+    }
+
+    pub fn to_registries(&self) -> Result<crate::SharedRegistries, NetworkError> {
+        serde_json::from_slice(&self.0).map_err(|err| {
+            NetworkError::MalformedFrame(format!("registry state cannot be decoded: {err}"))
+        })
+    }
+
     pub fn as_bytes(&self) -> &[u8] {
         &self.0
     }
@@ -823,6 +838,37 @@ mod tests {
 
         std::fs::remove_dir_all(a_dir).ok();
         std::fs::remove_dir_all(b_dir).ok();
+    }
+
+    #[test]
+    fn test_registry_state_carries_both_registries_and_nothing_else() {
+        use crate::registry::{SharedRegistries, VaultRegistry};
+        use crate::DeviceRegistry;
+
+        let vault_id = uuid::Uuid::new_v4();
+        let mut vaults = VaultRegistry::new();
+        vaults.insert(vault_id);
+
+        let registries = SharedRegistries {
+            devices: DeviceRegistry::new(),
+            vaults,
+        };
+
+        let state = RegistryState::from_registries(&registries).unwrap();
+        assert_eq!(state.to_registries().unwrap(), registries);
+
+        let wire = String::from_utf8(state.as_bytes().to_vec()).unwrap();
+        assert!(wire.contains("devices"));
+        assert!(wire.contains("vaults"));
+        assert!(
+            !wire.contains("password") && !wire.contains("secret"),
+            "registry state must never carry secret material"
+        );
+
+        // The opaque blob is rejected if a peer sends something else.
+        assert!(RegistryState::from_bytes(b"not registry state".to_vec())
+            .to_registries()
+            .is_err());
     }
 
     #[test]

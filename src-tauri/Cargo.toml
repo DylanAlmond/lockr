@@ -28,6 +28,7 @@ chrono = { version = "0.4.45", features = ["serde"] }
 argon2 = { version = "0.5.3", features = ["std"] }
 aes-gcm = "0.11.0"
 base64 = "0.22.1"
+ed25519-dalek = "2.2.0"
 rand = "0.10.1"
 zeroize = { version = "1.9.0", features = ["derive"] }
 zxcvbn = { version = "3.1.1", features = ["ser"] }
