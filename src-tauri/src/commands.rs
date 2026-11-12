@@ -311,9 +311,12 @@ pub fn get_device_identity_error(state: AppState) -> Result<Option<String>, Stri
 
 /// Explicitly start again as a new Device after a damaged identity file.
 ///
-/// This is one-way: the old Device id is retired permanently. The damaged
-/// file is kept beside the new one for inspection. `confirm` exists so the
-/// action can never be taken by an accidental click.
+/// This is one-way: this installation abandons its old Device id and mints a
+/// fresh one. The damaged file is kept beside the new one for inspection.
+/// This path has no master password and no signing key, so it does **not**
+/// revoke the old Device in the registry; another admitted Device must do
+/// that. `confirm` exists so the action can never be taken by an accidental
+/// click.
 #[tauri::command]
 pub fn start_with_new_device_identity(state: AppState, confirm: bool) -> Result<(), String> {
     let mut state = state.lock().map_err(|e| e.to_string())?;
@@ -322,11 +325,10 @@ pub fn start_with_new_device_identity(state: AppState, confirm: bool) -> Result<
         return Err("This Device's identity is not damaged".into());
     }
     if !confirm {
-        return Err(
-            "Starting with a new identity is permanent: other Devices will not recognise \
-             this one, and the old Device stays revoked. Pass confirm=true to proceed."
-                .into(),
-        );
+        return Err(format!(
+            "{} Pass confirm=true to proceed.",
+            crate::device::NEW_IDENTITY_EFFECT
+        ));
     }
 
     state.recover_with_new_device_identity()
@@ -670,6 +672,27 @@ mod tests {
             std::fs::read(temp_dir.join("device_id")).unwrap(),
             b"not-a-uuid"
         );
+
+        std::fs::remove_dir_all(temp_dir).ok();
+    }
+
+    #[test]
+    fn test_an_unreadable_device_identity_offers_the_same_recovery_path() {
+        let temp_dir = setup();
+        std::fs::create_dir(temp_dir.join("device_id")).unwrap();
+
+        let mut state = ManagerState::initialize(temp_dir.clone());
+
+        assert!(
+            state.device_identity_damaged,
+            "an unreadable identity must be offered the new-identity recovery"
+        );
+        assert!(state.startup_error.is_some());
+        assert!(state.ready().is_err());
+
+        state.recover_with_new_device_identity().unwrap();
+        assert!(state.ready().is_ok());
+        assert!(!temp_dir.join("device_id").is_dir());
 
         std::fs::remove_dir_all(temp_dir).ok();
     }
