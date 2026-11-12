@@ -450,10 +450,16 @@ struct LiveVaultItemPayload {
     kind: ItemKind,
 }
 
+/// A Tombstone's wire shape. `deny_unknown_fields` is deliberate: a
+/// tombstone with a stray payload would otherwise lose that payload silently,
+/// and a merge must resolve such a copy before serialising it.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct TombstoneVaultItemPayload {
     id: ItemId,
     vault_id: VaultId,
+    #[allow(dead_code)] // Presence is what matters; the branch already checked it
+    deleted: bool,
     #[serde(default)]
     clock: VersionVector,
 }
@@ -560,7 +566,7 @@ impl ItemKind {
 /// Kind-specific payload for creating or updating an item, alongside the
 /// separate initial secret fields (accounts carry their password as the
 /// `password` field key).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum NewItemData {
     Account(AccountData),
@@ -569,14 +575,14 @@ pub enum NewItemData {
     Identity(IdentityData),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AccountData {
     pub username: String,
     pub email: Option<String>,
 }
 
 #[allow(dead_code)] // Brand display is wired up with card details in ticket #25
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CardData {
     pub cardholder_name: String,
     pub expiry_month: u8,
@@ -584,13 +590,13 @@ pub struct CardData {
     pub brand: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NoteData {
     pub title: Option<String>,
     pub body: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct IdentityData {
     pub full_name: String,
     pub email: Option<String>,
@@ -964,13 +970,14 @@ pub fn account_from_item(item: &VaultItem) -> Option<SafeAccount> {
 
 /// The Safe View of a card item, derived from the item plus its vault's
 /// secret entries (the card number lives in the secret store).
-pub fn card_from_item(item: &VaultItem, secrets: &[ItemSecrets]) -> SafeCard {
-    let kind = item
-        .kind
-        .as_ref()
-        .expect("card_from_item on a tombstone");
+///
+/// Crate-private and fallible: a Tombstone (or a non-card item) yields `None`
+/// rather than panicking, so a direct consumer can never be handed content
+/// that does not exist.
+pub(crate) fn card_from_item(item: &VaultItem, secrets: &[ItemSecrets]) -> Option<SafeCard> {
+    let kind = item.kind.as_ref()?;
     let ItemKind::Card(data) = kind else {
-        unreachable!("card_from_item on a non-card item");
+        return None;
     };
 
     let entry = secrets.iter().find(|s| s.item_id == item.id);
@@ -985,7 +992,7 @@ pub fn card_from_item(item: &VaultItem, secrets: &[ItemSecrets]) -> SafeCard {
         .map(|key| key.to_string())
         .collect();
 
-    SafeCard {
+    Some(SafeCard {
         id: item.id,
         vault_id: item.vault_id,
         display_name: item.display_name.clone(),
@@ -1001,7 +1008,7 @@ pub fn card_from_item(item: &VaultItem, secrets: &[ItemSecrets]) -> SafeCard {
         expiry_year: data.expiry_year,
         card_number_last4: card_number,
         secrets_present,
-    }
+    })
 }
 
 /// The Safe View of an item of any kind. Every live kind has a safe view;
@@ -1013,7 +1020,12 @@ pub fn item_to_safe(item: &VaultItem, secrets: &[ItemSecrets]) -> Option<SafeIte
         ItemKind::Account(_) => {
             SafeItem::Account(account_from_item(item).expect("matched account kind"))
         }
-        ItemKind::Card(_) => SafeItem::Card(card_from_item(item, secrets)),
+        ItemKind::Card(_) => {
+            let Some(card) = card_from_item(item, secrets) else {
+                return None;
+            };
+            SafeItem::Card(card)
+        }
         ItemKind::Note(data) => SafeItem::Note(SafeNote {
             id: item.id,
             vault_id: item.vault_id,
@@ -1301,6 +1313,31 @@ mod tests {
         assert!(parsed.is_tombstone());
         assert_eq!(parsed.id, item_id);
         assert_eq!(parsed.clock.get(&device), 2);
+    }
+
+    #[test]
+    fn test_tombstone_with_a_stray_payload_is_rejected() {
+        let vault_id = Uuid::new_v4();
+        let item_id = Uuid::new_v4();
+
+        // A tombstone that still carries content would lose it silently if
+        // deserialisation accepted the extra keys. Merge must see it as
+        // malformed instead.
+        let raw = format!(
+            r##"{{
+                "id": "{item_id}",
+                "vault_id": "{vault_id}",
+                "deleted": true,
+                "clock": {{}},
+                "username": "should-not-be-here"
+            }}"##
+        );
+
+        let result = serde_json::from_str::<VaultItem>(&raw);
+        assert!(
+            result.is_err(),
+            "a tombstone carrying a payload must not deserialize"
+        );
     }
 
     #[test]
