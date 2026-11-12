@@ -299,6 +299,7 @@ impl VaultManager {
             color,
             items: Vec::new(),
             secrets: Vec::new(),
+            duplicate_dismissals: Vec::new(),
         };
 
         let salt = generate_salt();
@@ -1093,6 +1094,50 @@ impl VaultManager {
             Some(pw) => Ok(zxcvbn(&pw, &[])),
             None => Err(VaultError::Validation("Item has no password".to_string())),
         }
+    }
+
+    /// List the Duplicates this vault currently suggests. Purely a read: a
+    /// suggestion is never applied, and resolving one always takes an
+    /// explicit call to [`VaultManager::resolve_duplicate`].
+    pub fn duplicate_suggestions(
+        &self,
+        vault_id: VaultId,
+    ) -> Result<Vec<crate::DuplicateSuggestion>, VaultError> {
+        let vault = self.get_vault(vault_id)?;
+        Ok(crate::duplicates::suggest_duplicates(vault))
+    }
+
+    /// Apply the User's decision about a suggested pair. Keeping both records
+    /// a dismissal in the vault, so the decision syncs; keeping one identity
+    /// or Combining tombstones the other.
+    pub fn resolve_duplicate(
+        &mut self,
+        vault_id: VaultId,
+        first: ItemId,
+        second: ItemId,
+        resolution: crate::DuplicateResolution,
+    ) -> Result<crate::DuplicateOutcome, VaultError> {
+        // Mark the vault dirty only after the resolution has been accepted, so
+        // a rejected Combine neither advances a clock nor triggers a save.
+        let device = self.device_id;
+        let outcome = {
+            let unlocked = self
+                .unlocked_vaults
+                .get_mut(&vault_id)
+                .ok_or(VaultError::VaultLocked)?;
+            let outcome = crate::duplicates::resolve_duplicate(
+                &mut unlocked.vault,
+                first,
+                second,
+                resolution,
+                device,
+            )?;
+            unlocked.dirty = true;
+            outcome
+        };
+
+        self.maybe_save(vault_id)?;
+        Ok(outcome)
     }
 
     /// Save immediately if autosave is on. Otherwise just leave the dirty
@@ -2649,6 +2694,612 @@ mod tests {
                 )]),
             )
             .unwrap()
+    }
+
+    fn add_named_account(
+        manager: &mut VaultManager,
+        vault_id: VaultId,
+        display_name: &str,
+        username: &str,
+        password: &str,
+    ) -> SafeItem {
+        manager
+            .add_item(
+                vault_id,
+                Some(display_name.to_string()),
+                None,
+                crate::NewItemData::Account(crate::AccountData {
+                    username: username.to_string(),
+                    email: None,
+                }),
+                Some(vec![crate::SecretInput::new(
+                    SECRET_FIELD_PASSWORD,
+                    password.to_string(),
+                )]),
+            )
+            .unwrap()
+    }
+
+    fn safe_item_id(item: &SafeItem) -> ItemId {
+        match item {
+            SafeItem::Account(view) => view.id,
+            SafeItem::Card(view) => view.id,
+            SafeItem::Note(view) => view.id,
+            SafeItem::Identity(view) => view.id,
+        }
+    }
+
+    fn canonical_pair(first: ItemId, second: ItemId) -> (ItemId, ItemId) {
+        if first <= second {
+            (first, second)
+        } else {
+            (second, first)
+        }
+    }
+
+    #[test]
+    fn test_duplicate_suggestions_require_same_kind_normalised_name_and_account_username() {
+        let temp_dir = setup();
+        let mut manager = VaultManager::new(temp_dir).unwrap();
+        let vault = manager
+            .create_vault("Test".to_string(), "#6240BF".to_string(), MASTER_PW, &KEY)
+            .unwrap();
+
+        let first = add_named_account(&mut manager, vault.id, "GitHub", "octocat", "first-pw");
+        let second = add_named_account(&mut manager, vault.id, "  gItHuB  ", "octocat", "second-pw");
+
+        // A different username (including only a case difference), a
+        // different kind, and an unnamed item are not Duplicates even when
+        // the display name matches.
+        add_named_account(&mut manager, vault.id, "GitHub", "someone-else", "third-pw");
+        add_named_account(&mut manager, vault.id, "GitHub", "OctoCat", "case-pw");
+        manager
+            .add_item(
+                vault.id,
+                Some("GitHub".to_string()),
+                None,
+                crate::NewItemData::Note(crate::NoteData {
+                    title: None,
+                    body: "not an account".to_string(),
+                }),
+                None,
+            )
+            .unwrap();
+        add_named_account(&mut manager, vault.id, "", "octocat", "fourth-pw");
+
+        let before = serde_json::to_value(manager.get_vault(vault.id).unwrap()).unwrap();
+        let suggestions = manager.duplicate_suggestions(vault.id).unwrap();
+        let after = serde_json::to_value(manager.get_vault(vault.id).unwrap()).unwrap();
+
+        assert_eq!(
+            before, after,
+            "listing suggestions must never change the vault"
+        );
+        assert_eq!(suggestions.len(), 1, "got {suggestions:?}");
+
+        let pair = canonical_pair(safe_item_id(&first), safe_item_id(&second));
+        assert_eq!(
+            (suggestions[0].first.item_id, suggestions[0].second.item_id),
+            pair
+        );
+        assert_eq!(suggestions[0].username.as_deref(), Some("octocat"));
+
+        // The differing password needs an explicit Combine choice, but the
+        // suggestion must never carry either secret value.
+        let password = suggestions[0]
+            .colliding_fields
+            .iter()
+            .find(|field| field.field_key == SECRET_FIELD_PASSWORD)
+            .expect("a differing password collides");
+        assert!(password.is_secret);
+        assert!(password.first_value.is_none());
+        assert!(password.second_value.is_none());
+        let payload = serde_json::to_string(&suggestions).unwrap();
+        assert!(!payload.contains("first-pw"));
+        assert!(!payload.contains("second-pw"));
+    }
+
+    #[test]
+    fn test_keep_both_dismisses_the_pair_and_persists_it_in_the_vault() {
+        let temp_dir = setup();
+        let mut manager = VaultManager::new(temp_dir).unwrap();
+        let vault = manager
+            .create_vault("Test".to_string(), "#6240BF".to_string(), MASTER_PW, &KEY)
+            .unwrap();
+
+        let first = add_named_account(&mut manager, vault.id, "GitHub", "octocat", "one");
+        let second = add_named_account(&mut manager, vault.id, "GitHub", "octocat", "two");
+        let (first_id, second_id) = (safe_item_id(&first), safe_item_id(&second));
+        assert_eq!(manager.duplicate_suggestions(vault.id).unwrap().len(), 1);
+
+        let outcome = manager
+            .resolve_duplicate(
+                vault.id,
+                first_id,
+                second_id,
+                crate::DuplicateResolution::KeepBoth,
+            )
+            .unwrap();
+        assert_eq!(outcome, crate::DuplicateOutcome::KeptBoth);
+
+        assert!(manager.duplicate_suggestions(vault.id).unwrap().is_empty());
+        assert!(manager.get_vault(vault.id).unwrap().is_duplicate_dismissed(first_id, second_id));
+
+        // Both identities survive untouched.
+        let vault_data = manager.get_vault(vault.id).unwrap();
+        for id in [first_id, second_id] {
+            assert!(vault_data
+                .items
+                .iter()
+                .any(|item| item.id == id && !item.is_tombstone()));
+        }
+
+        // The dismissal is vault content, so a lock/unlock round trip keeps it.
+        manager.lock_vault(Some(vault.id));
+        manager.unlock_vault(vault.id, MASTER_PW, &KEY).unwrap();
+        assert!(manager.duplicate_suggestions(vault.id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_keep_one_identity_tombstones_the_other_and_keeps_its_secret() {
+        let temp_dir = setup();
+        let mut manager = VaultManager::new(temp_dir).unwrap();
+        let vault = manager
+            .create_vault("Test".to_string(), "#6240BF".to_string(), MASTER_PW, &KEY)
+            .unwrap();
+
+        let keeper = add_named_account(&mut manager, vault.id, "GitHub", "octocat", "keeper-pw");
+        let discarded = add_named_account(&mut manager, vault.id, "GitHub", "octocat", "discarded-pw");
+        let (keeper_id, discarded_id) = (safe_item_id(&keeper), safe_item_id(&discarded));
+
+        // A survivor id that belongs to neither Item is rejected before any
+        // mutation.
+        let invalid = manager.resolve_duplicate(
+            vault.id,
+            keeper_id,
+            discarded_id,
+            crate::DuplicateResolution::Keep {
+                item_id: Uuid::new_v4(),
+            },
+        );
+        assert!(matches!(invalid, Err(VaultError::Validation(_))));
+        assert_eq!(manager.duplicate_suggestions(vault.id).unwrap().len(), 1);
+
+        let outcome = manager
+            .resolve_duplicate(
+                vault.id,
+                keeper_id,
+                discarded_id,
+                crate::DuplicateResolution::Keep { item_id: keeper_id },
+            )
+            .unwrap();
+        assert_eq!(outcome, crate::DuplicateOutcome::Kept { item_id: keeper_id });
+
+        let vault_data = manager.get_vault(vault.id).unwrap();
+        let keeper_item = vault_data
+            .items
+            .iter()
+            .find(|item| item.id == keeper_id)
+            .unwrap();
+        assert!(!keeper_item.is_tombstone());
+        assert_eq!(
+            manager
+                .get_item_secret(vault.id, keeper_id, SECRET_FIELD_PASSWORD)
+                .unwrap()
+                .as_deref(),
+            Some("keeper-pw")
+        );
+
+        let tombstone = vault_data
+            .items
+            .iter()
+            .find(|item| item.id == discarded_id)
+            .unwrap();
+        assert!(tombstone.is_tombstone());
+        assert!(vault_data
+            .secrets
+            .iter()
+            .all(|entry| entry.item_id != discarded_id));
+        assert!(manager.duplicate_suggestions(vault.id).unwrap().is_empty());
+    }
+
+    fn add_duplicate_account(
+        manager: &mut VaultManager,
+        vault_id: VaultId,
+        display_name: &str,
+        username: &str,
+        email: &str,
+        password: &str,
+        tags: &[&str],
+        favourite: bool,
+    ) -> SafeItem {
+        let item = manager
+            .add_item(
+                vault_id,
+                Some(display_name.to_string()),
+                None,
+                crate::NewItemData::Account(crate::AccountData {
+                    username: username.to_string(),
+                    email: Some(email.to_string()),
+                }),
+                Some(vec![crate::SecretInput::new(
+                    SECRET_FIELD_PASSWORD,
+                    password.to_string(),
+                )]),
+            )
+            .unwrap();
+
+        manager
+            .update_item(
+                vault_id,
+                safe_item_id(&item),
+                None,
+                None,
+                Some(favourite),
+                Some(tags.iter().map(|tag| tag.to_string()).collect()),
+                None,
+                None,
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn test_combine_refuses_to_pick_a_secret_without_an_explicit_choice() {
+        let temp_dir = setup();
+        let mut manager = VaultManager::new(temp_dir).unwrap();
+        let vault = manager
+            .create_vault("Test".to_string(), "#6240BF".to_string(), MASTER_PW, &KEY)
+            .unwrap();
+
+        let first = add_duplicate_account(
+            &mut manager,
+            vault.id,
+            "GitHub",
+            "octocat",
+            "one@example.com",
+            "first-pw",
+            &[],
+            false,
+        );
+        let second = add_duplicate_account(
+            &mut manager,
+            vault.id,
+            "github",
+            "octocat",
+            "two@example.com",
+            "second-pw",
+            &[],
+            false,
+        );
+        let (first_id, second_id) = (safe_item_id(&first), safe_item_id(&second));
+        let before = serde_json::to_value(manager.get_vault(vault.id).unwrap()).unwrap();
+
+        // No choices at all: every colliding field, the password included,
+        // is left for the User to decide.
+        let unresolved = manager.resolve_duplicate(
+            vault.id,
+            first_id,
+            second_id,
+            crate::DuplicateResolution::Combine {
+                survivor: first_id,
+                field_choices: Default::default(),
+            },
+        );
+        assert!(
+            matches!(&unresolved, Err(VaultError::Validation(_))),
+            "got {unresolved:?}"
+        );
+
+        // Choosing every field except the password is still refused: no
+        // secret is ever chosen silently.
+        let mut partial = std::collections::BTreeMap::new();
+        partial.insert("display_name".to_string(), first_id);
+        partial.insert("email".to_string(), second_id);
+        let partial = manager.resolve_duplicate(
+            vault.id,
+            first_id,
+            second_id,
+            crate::DuplicateResolution::Combine {
+                survivor: first_id,
+                field_choices: partial,
+            },
+        );
+        assert!(
+            matches!(&partial, Err(VaultError::Validation(message)) if message.contains("password")),
+            "got {partial:?}"
+        );
+
+        // A rejected Combine changes nothing at all.
+        let after = serde_json::to_value(manager.get_vault(vault.id).unwrap()).unwrap();
+        assert_eq!(before, after);
+        assert_eq!(
+            manager
+                .get_item_secret(vault.id, first_id, SECRET_FIELD_PASSWORD)
+                .unwrap()
+                .as_deref(),
+            Some("first-pw")
+        );
+        assert_eq!(
+            manager
+                .get_item_secret(vault.id, second_id, SECRET_FIELD_PASSWORD)
+                .unwrap()
+                .as_deref(),
+            Some("second-pw")
+        );
+    }
+
+    #[test]
+    fn test_combine_unions_tags_ors_favourite_picks_fields_and_tombstones_the_loser() {
+        let temp_dir = setup();
+        let mut manager = VaultManager::new(temp_dir).unwrap();
+        let vault = manager
+            .create_vault("Test".to_string(), "#6240BF".to_string(), MASTER_PW, &KEY)
+            .unwrap();
+
+        let survivor = add_duplicate_account(
+            &mut manager,
+            vault.id,
+            "GitHub",
+            "octocat",
+            "one@example.com",
+            "first-pw",
+            &["work"],
+            false,
+        );
+        let other = add_duplicate_account(
+            &mut manager,
+            vault.id,
+            "github",
+            "octocat",
+            "two@example.com",
+            "second-pw",
+            &["personal", "work"],
+            true,
+        );
+        let (survivor_id, other_id) = (safe_item_id(&survivor), safe_item_id(&other));
+        let device = manager.device_id();
+        let before = manager.get_vault(vault.id).unwrap();
+        let survivor_clock = before
+            .items
+            .iter()
+            .find(|item| item.id == survivor_id)
+            .unwrap()
+            .clock
+            .clone();
+        let other_clock = before
+            .items
+            .iter()
+            .find(|item| item.id == other_id)
+            .unwrap()
+            .clock
+            .clone();
+
+        let mut choices = std::collections::BTreeMap::new();
+        choices.insert("display_name".to_string(), survivor_id);
+        choices.insert("email".to_string(), other_id);
+        choices.insert(SECRET_FIELD_PASSWORD.to_string(), other_id);
+
+        let outcome = manager
+            .resolve_duplicate(
+                vault.id,
+                survivor_id,
+                other_id,
+                crate::DuplicateResolution::Combine {
+                    survivor: survivor_id,
+                    field_choices: choices,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            outcome,
+            crate::DuplicateOutcome::Combined {
+                survivor: survivor_id
+            }
+        );
+
+        let vault_data = manager.get_vault(vault.id).unwrap();
+        let combined = vault_data
+            .items
+            .iter()
+            .find(|item| item.id == survivor_id)
+            .unwrap();
+        assert!(!combined.is_tombstone());
+
+        // Tags are a union, favourite is an OR.
+        assert_eq!(
+            combined.tags,
+            vec!["work".to_string(), "personal".to_string()]
+        );
+        assert!(combined.favourite);
+
+        // Chosen non-secret fields came from the chosen identity.
+        assert_eq!(combined.display_name.as_deref(), Some("GitHub"));
+        assert_eq!(
+            combined.kind.as_ref().unwrap().as_account().unwrap().username,
+            "octocat"
+        );
+        assert_eq!(
+            combined.kind.as_ref().unwrap().as_account().unwrap().email.as_deref(),
+            Some("two@example.com")
+        );
+
+        // The explicitly chosen secret is the one that survives, and the
+        // loser keeps no secrets.
+        assert_eq!(
+            manager
+                .get_item_secret(vault.id, survivor_id, SECRET_FIELD_PASSWORD)
+                .unwrap()
+                .as_deref(),
+            Some("second-pw")
+        );
+        assert!(vault_data
+            .secrets
+            .iter()
+            .all(|entry| entry.item_id != other_id));
+
+        // The loser is tombstoned rather than deleted outright.
+        let tombstone = vault_data
+            .items
+            .iter()
+            .find(|item| item.id == other_id)
+            .unwrap();
+        assert!(tombstone.is_tombstone());
+
+        // The survivor carries a fresh tick from the resolving Device, which
+        // dominates both of the clocks it was combined from.
+        assert_eq!(combined.clock.compare(&survivor_clock), ClockOrder::Dominates);
+        assert_eq!(combined.clock.compare(&other_clock), ClockOrder::Dominates);
+        let tick = combined.clock.get(&device);
+        assert!(tick > survivor_clock.get(&device));
+        assert!(tick > other_clock.get(&device));
+        assert_eq!(
+            combined.field_clocks.get(SECRET_FIELD_PASSWORD),
+            Some(&FieldVersion::new(device, tick))
+        );
+        assert_eq!(
+            combined.field_clocks.get("tags"),
+            Some(&FieldVersion::new(device, tick))
+        );
+
+        assert!(manager.duplicate_suggestions(vault.id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_duplicate_suggestions_never_cross_vaults() {
+        let temp_dir = setup();
+        let mut manager = VaultManager::new(temp_dir).unwrap();
+        let first_vault = manager
+            .create_vault("First".to_string(), "#6240BF".to_string(), MASTER_PW, &KEY)
+            .unwrap();
+        let second_vault = manager
+            .create_vault("Second".to_string(), "#6240BF".to_string(), MASTER_PW, &KEY)
+            .unwrap();
+
+        let first_a = add_named_account(&mut manager, first_vault.id, "Shared", "user", "one");
+        let first_b = add_named_account(&mut manager, first_vault.id, "Shared", "user", "two");
+        let second_a = add_named_account(&mut manager, second_vault.id, "Shared", "user", "three");
+
+        let first_suggestions = manager.duplicate_suggestions(first_vault.id).unwrap();
+        assert_eq!(first_suggestions.len(), 1);
+        assert_eq!(
+            canonical_pair(
+                first_suggestions[0].first.item_id,
+                first_suggestions[0].second.item_id
+            ),
+            canonical_pair(safe_item_id(&first_a), safe_item_id(&first_b))
+        );
+
+        assert!(
+            manager
+                .duplicate_suggestions(second_vault.id)
+                .unwrap()
+                .is_empty(),
+            "an Item in another vault is not a counterpart"
+        );
+
+        // And the first vault's suggestions never name the other vault's item.
+        assert!(first_suggestions.iter().all(|suggestion| {
+            suggestion.first.item_id != safe_item_id(&second_a)
+                && suggestion.second.item_id != safe_item_id(&second_a)
+        }));
+    }
+
+    fn two_managers_sharing_a_vault() -> (
+        VaultManager,
+        VaultManager,
+        VaultId,
+        PathBuf,
+        PathBuf,
+    ) {
+        let first_dir = setup();
+        let second_dir = setup();
+
+        let mut first = VaultManager::new(first_dir.clone()).unwrap();
+        let vault = first
+            .create_vault("Shared".to_string(), "#6240BF".to_string(), MASTER_PW, &KEY)
+            .unwrap();
+        first.lock_vault(Some(vault.id));
+
+        let second_vaults = second_dir.join("vaults");
+        std::fs::create_dir_all(&second_vaults).unwrap();
+        copy_vault_file(&first_dir, &second_dir, vault.id);
+
+        let mut second = VaultManager::new(second_dir.clone()).unwrap();
+        first.unlock_vault(vault.id, MASTER_PW, &KEY).unwrap();
+        second.unlock_vault(vault.id, MASTER_PW, &KEY).unwrap();
+
+        (first, second, vault.id, first_dir, second_dir)
+    }
+
+    fn copy_vault_file(from: &PathBuf, to: &PathBuf, vault_id: VaultId) {
+        let source = from.join("vaults").join(format!("{}.vault", vault_id));
+        let target = to.join("vaults").join(format!("{}.vault", vault_id));
+        std::fs::write(target, std::fs::read(source).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn test_a_dismissal_syncs_to_the_other_manager_and_silences_both() {
+        let (mut first, mut second, vault_id, first_dir, second_dir) =
+            two_managers_sharing_a_vault();
+
+        let alpha_a = add_named_account(&mut first, vault_id, "Alpha", "alpha", "a1");
+        let alpha_b = add_named_account(&mut first, vault_id, "Alpha", "alpha", "a2");
+        let beta_a = add_named_account(&mut first, vault_id, "Beta", "beta", "b1");
+        let beta_b = add_named_account(&mut first, vault_id, "Beta", "beta", "b2");
+        let (alpha_a, alpha_b) = (safe_item_id(&alpha_a), safe_item_id(&alpha_b));
+        let (beta_a, beta_b) = (safe_item_id(&beta_a), safe_item_id(&beta_b));
+
+        // Whole-file exchange (ADR-0002 section 11) starts both managers from
+        // the same vault content.
+        first.lock_vault(Some(vault_id));
+        second.lock_vault(Some(vault_id));
+        copy_vault_file(&first_dir, &second_dir, vault_id);
+        first.unlock_vault(vault_id, MASTER_PW, &KEY).unwrap();
+        second.unlock_vault(vault_id, MASTER_PW, &KEY).unwrap();
+        assert_eq!(first.duplicate_suggestions(vault_id).unwrap().len(), 2);
+        assert_eq!(second.duplicate_suggestions(vault_id).unwrap().len(), 2);
+
+        // Resolve Alpha on one Device...
+        first
+            .resolve_duplicate(
+                vault_id,
+                alpha_a,
+                alpha_b,
+                crate::DuplicateResolution::KeepBoth,
+            )
+            .unwrap();
+        assert_eq!(first.duplicate_suggestions(vault_id).unwrap().len(), 1);
+
+        // ...sync, and the other Device stops suggesting it too.
+        second.lock_vault(Some(vault_id));
+        copy_vault_file(&first_dir, &second_dir, vault_id);
+        second.unlock_vault(vault_id, MASTER_PW, &KEY).unwrap();
+        assert_eq!(second.duplicate_suggestions(vault_id).unwrap().len(), 1);
+        assert!(second
+            .get_vault(vault_id)
+            .unwrap()
+            .is_duplicate_dismissed(alpha_a, alpha_b));
+
+        // The reverse direction works the same way.
+        second
+            .resolve_duplicate(
+                vault_id,
+                beta_a,
+                beta_b,
+                crate::DuplicateResolution::KeepBoth,
+            )
+            .unwrap();
+        first.lock_vault(Some(vault_id));
+        copy_vault_file(&second_dir, &first_dir, vault_id);
+        first.unlock_vault(vault_id, MASTER_PW, &KEY).unwrap();
+
+        assert!(first.duplicate_suggestions(vault_id).unwrap().is_empty());
+        assert!(second.duplicate_suggestions(vault_id).unwrap().is_empty());
+        for manager in [&first, &second] {
+            let vault = manager.get_vault(vault_id).unwrap();
+            assert!(vault.is_duplicate_dismissed(alpha_a, alpha_b));
+            assert!(vault.is_duplicate_dismissed(beta_a, beta_b));
+        }
     }
 
     #[test]
