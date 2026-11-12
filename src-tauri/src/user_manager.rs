@@ -57,8 +57,14 @@ impl UserManager {
     // ============ Migration from the single-file profile ============
 
     /// Split a pre-split `user.json` into a device-local profile and a shared
-    /// profile. The legacy file itself is left byte-identical so an existing
-    /// rollback path still works.
+    /// profile. The legacy file is renamed into the device-local slot, so its
+    /// pre-split fields survive for a one-way migration only.
+    ///
+    /// `vault_ids` are copied into the shared Vault Registry *here*, at the
+    /// migration boundary. The fallback in [`Self::load_shared_profile_or_legacy`]
+    /// deliberately does not read them again: after this point the shared
+    /// registry is the only authority, so a lost shared file cannot resurrect
+    /// a stale vault list.
     fn migrate_legacy_profile(&self) -> Result<(), VaultError> {
         let old_path = self.app_data_dir.join("user.json");
         if !old_path.exists() {
@@ -119,10 +125,13 @@ impl UserManager {
             let json = std::fs::read_to_string(&path)?;
 
             match serde_json::from_str::<DeviceProfile>(&json) {
-                Ok(profile) => {
-                    let shared = self.load_shared_profile_or_legacy(&profile);
-                    available_accounts.push(user_view(&profile, &shared));
-                }
+                Ok(profile) => match self.load_shared_profile_or_legacy(&profile) {
+                    Ok(shared) => available_accounts.push(user_view(&profile, &shared)),
+                    Err(err) => eprintln!(
+                        "Failed to verify shared profile for user {}: {}",
+                        profile.id, err
+                    ),
+                },
                 Err(err) => {
                     eprintln!("Failed to parse user profile {}: {}", path.display(), err);
                 }
@@ -273,9 +282,12 @@ impl UserManager {
     }
 
     /// A registry without this Device's admission cannot make it sign
-    /// anything other Devices will accept. Add a self-admission on first
-    /// login, and refuse to silently replace a different key recorded for
-    /// this Device id.
+    /// anything other Devices will accept. On an empty (pre-split) registry
+    /// this Device is the root and admits itself; otherwise another admitted
+    /// Device must have admitted it during pairing. The registry refuses a
+    /// self-admission once a root exists, so this is not a way in.
+    /// It also refuses to silently replace a different key recorded for this
+    /// Device id.
     fn ensure_self_admission(
         &self,
         shared: &mut SharedProfile,
@@ -347,7 +359,7 @@ impl UserManager {
     /// need the registries without assembling the UI-facing [`User`].
     pub fn get_shared_profile(&self, id: &UserId) -> Result<SharedProfile, VaultError> {
         let local = self.load_local_profile(id)?;
-        Ok(self.load_shared_profile_or_legacy(&local))
+        self.load_shared_profile_or_legacy(&local)
     }
 
     pub fn save_shared_profile(&self, profile: &SharedProfile) -> Result<(), VaultError> {
@@ -365,29 +377,41 @@ impl UserManager {
         }
 
         let json = std::fs::read_to_string(&path)?;
-        Ok(serde_json::from_str(&json)?)
+        let shared: SharedProfile = serde_json::from_str(&json)?;
+
+        // The shared file is untrusted input: a tampered admission or
+        // revocation must be rejected here, not trusted until the next
+        // registry operation reads it.
+        shared.devices.verify()?;
+
+        Ok(shared)
     }
 
     /// Read the shared half, falling back to the fields a pre-split profile
     /// carried so migration never needs the master password.
-    fn load_shared_profile_or_legacy(&self, local: &DeviceProfile) -> SharedProfile {
-        match self.load_shared_profile(&local.id) {
-            Ok(shared) => shared,
-            Err(_) => {
-                let mut vaults = VaultRegistry::new();
-                for vault_id in &local.vault_ids {
-                    vaults.insert(*vault_id);
-                }
-                SharedProfile {
-                    user_id: local.id,
-                    name: local.name.clone(),
-                    color: local.color.clone(),
-                    icon: local.icon.clone(),
-                    devices: DeviceRegistry::new(),
-                    vaults,
-                }
-            }
+    ///
+    /// Only a *missing* shared file falls back. An unreadable or invalid one
+    /// is an error: silently substituting legacy fields would trust a file
+    /// that failed verification.
+    fn load_shared_profile_or_legacy(
+        &self,
+        local: &DeviceProfile,
+    ) -> Result<SharedProfile, VaultError> {
+        if self.shared_path(&local.id).exists() {
+            return self.load_shared_profile(&local.id);
         }
+
+        Ok(SharedProfile {
+            user_id: local.id,
+            name: local.name.clone(),
+            color: local.color.clone(),
+            icon: local.icon.clone(),
+            devices: DeviceRegistry::new(),
+            // Legacy `vault_ids` are deliberately ignored: after the split
+            // the shared Vault Registry is authoritative, and a missing
+            // shared file must not resurrect a stale membership list.
+            vaults: VaultRegistry::new(),
+        })
     }
 
     fn load_or_create_shared_profile(
@@ -398,7 +422,7 @@ impl UserManager {
             return self.load_shared_profile(&local.id);
         }
 
-        let shared = self.load_shared_profile_or_legacy(local);
+        let shared = self.load_shared_profile_or_legacy(local)?;
         self.save_shared_profile(&shared)?;
         Ok(shared)
     }
@@ -408,7 +432,7 @@ impl UserManager {
     /// Get the user profile metadata (does NOT decrypt the secret key)
     pub fn get_user(&self, id: &UserId) -> Result<User, VaultError> {
         let local = self.load_local_profile(id)?;
-        let shared = self.load_shared_profile_or_legacy(&local);
+        let shared = self.load_shared_profile_or_legacy(&local)?;
         Ok(user_view(&local, &shared))
     }
 
@@ -515,7 +539,10 @@ fn user_view(local: &DeviceProfile, shared: &SharedProfile) -> User {
 mod tests {
     use super::*;
     use crate::crypto::encrypt;
+    use crate::device::DeviceKeypair;
+    use crate::registry::DeviceRecord;
     use crate::User;
+    use chrono::DateTime;
     use uuid::Uuid;
 
     fn setup() -> PathBuf {
@@ -735,6 +762,47 @@ mod tests {
     }
 
     #[test]
+    fn test_a_missing_shared_profile_does_not_resurrect_legacy_vault_ids() {
+        let temp_dir = setup();
+        let manager = UserManager::new(temp_dir.clone()).unwrap();
+        let user_id = Uuid::new_v4();
+        let stale_vault = Uuid::new_v4();
+
+        // A pre-split local profile still carries the old `vault_ids` list,
+        // but after the split only the shared Vault Registry is authoritative.
+        let local = serde_json::json!({
+            "id": user_id,
+            "encrypted_secret_key": "legacy-key",
+            "device_id": manager.device_id(),
+            "encrypted_signing_key": "legacy-signing-key",
+            "signing_public_key": "legacy-public-key",
+            "name": "Old Name",
+            "color": "#111111",
+            "icon": null,
+            "vault_ids": [stale_vault],
+        });
+        std::fs::write(
+            temp_dir.join(format!("{user_id}.json")),
+            serde_json::to_string_pretty(&local).unwrap(),
+        )
+        .unwrap();
+
+        let shared = manager.get_shared_profile(&user_id).unwrap();
+
+        assert!(
+            shared.vault_ids().is_empty(),
+            "a missing shared file must not resurrect the legacy vault list"
+        );
+        assert!(
+            manager.get_user(&user_id).unwrap().vault_ids.is_empty(),
+            "the UI-facing view must not gain a stale vault"
+        );
+        assert_eq!(shared.name, "Old Name", "metadata fallback still works");
+
+        std::fs::remove_dir_all(temp_dir).ok();
+    }
+
+    #[test]
     fn test_vault_ids_are_derived_from_the_vault_registry() {
         let temp_dir = setup();
         let mut manager = UserManager::new(temp_dir.clone()).unwrap();
@@ -819,6 +887,97 @@ mod tests {
         assert!(!record.signature.is_empty());
         shared.devices.verify().unwrap();
         assert_eq!(shared.vault_ids(), legacy.vault_ids);
+
+        std::fs::remove_dir_all(temp_dir).ok();
+    }
+
+    #[test]
+    fn test_a_tampered_shared_profile_fails_verification_instead_of_being_trusted() {
+        let temp_dir = setup();
+        let mut manager = UserManager::new(temp_dir.clone()).unwrap();
+        let user = manager
+            .register("Tamper Target".to_string(), "Password")
+            .unwrap();
+
+        let path = shared_path(&temp_dir, &user.id);
+        let mut shared: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let devices = shared["devices"]["devices"].as_object_mut().unwrap();
+        let record = devices
+            .get_mut(&manager.device_id().to_string())
+            .expect("the root Device is in the registry");
+        record["name"] = serde_json::json!("Attacker's Laptop");
+        std::fs::write(&path, serde_json::to_string_pretty(&shared).unwrap()).unwrap();
+
+        let error = manager
+            .get_shared_profile(&user.id)
+            .expect_err("a tampered shared profile must not be trusted");
+        assert!(matches!(error, VaultError::DeviceRegistry(_)));
+        assert!(
+            manager.get_user(&user.id).is_err(),
+            "the UI-facing profile must not be assembled from an unverified registry"
+        );
+
+        std::fs::remove_dir_all(temp_dir).ok();
+    }
+
+    #[test]
+    fn test_a_shared_profile_with_a_historical_revocation_still_loads() {
+        let temp_dir = setup();
+        let mut manager = UserManager::new(temp_dir.clone()).unwrap();
+        let user = manager
+            .register("Revocation History".to_string(), "Password")
+            .unwrap();
+
+        let at = |seconds| DateTime::from_timestamp(seconds, 0).unwrap();
+        let root = Uuid::new_v4();
+        let signer = Uuid::new_v4();
+        let target = Uuid::new_v4();
+        let root_key = DeviceKeypair::generate();
+        let signer_key = DeviceKeypair::generate();
+        let target_key = DeviceKeypair::generate();
+
+        let admit = |device_id, public_key, admitted_at, key: &DeviceKeypair| {
+            DeviceRecord::admit(
+                device_id,
+                public_key,
+                "Test Device".to_string(),
+                "windows".to_string(),
+                root,
+                admitted_at,
+                key,
+            )
+        };
+
+        let mut devices = DeviceRegistry::new();
+        devices
+            .admit(admit(root, root_key.public_key(), at(1_000), &root_key))
+            .unwrap();
+        devices
+            .admit(admit(signer, signer_key.public_key(), at(2_000), &root_key))
+            .unwrap();
+        devices
+            .admit(admit(target, target_key.public_key(), at(2_100), &root_key))
+            .unwrap();
+
+        // The signer revokes the target while still admitted, then is itself
+        // revoked by the root.
+        devices
+            .revoke(&target, at(3_000), &signer, &signer_key)
+            .unwrap();
+        devices
+            .revoke(&signer, at(4_000), &root, &root_key)
+            .unwrap();
+
+        let mut shared = manager.get_shared_profile(&user.id).unwrap();
+        shared.devices = devices;
+        manager.save_shared_profile(&shared).unwrap();
+
+        let loaded = manager
+            .get_shared_profile(&user.id)
+            .expect("a legitimate historical revocation must not make the profile unloadable");
+        assert!(loaded.devices.is_revoked(&target));
+        assert!(loaded.devices.is_revoked(&signer));
 
         std::fs::remove_dir_all(temp_dir).ok();
     }

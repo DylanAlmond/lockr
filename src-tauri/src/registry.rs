@@ -190,7 +190,15 @@ impl DeviceRegistry {
     /// accepting it would let a peer substitute its own key for an honest
     /// Device's.
     pub fn admit(&mut self, record: DeviceRecord) -> Result<(), VaultError> {
-        self.verify_record(&record)?;
+        // The first Device in an otherwise empty registry is the root and is
+        // the only one allowed to admit itself. Once a root exists, every
+        // admission must be signed by an already-admitted Device.
+        let root = if self.devices.is_empty() {
+            (record.admitted_by == record.device_id).then_some(record.device_id)
+        } else {
+            self.root_device_id()?
+        };
+        self.verify_record_with_root(&record, root)?;
 
         if let Some(existing) = self.devices.get(&record.device_id) {
             let chosen = merge_records(existing, &record)?;
@@ -204,10 +212,67 @@ impl DeviceRegistry {
 
     /// Verify every entry against the registry's own public keys.
     pub fn verify(&self) -> Result<(), VaultError> {
-        for record in self.devices.values() {
-            self.verify_record(record)?;
+        if self.devices.is_empty() {
+            return Ok(());
         }
+
+        let root = self.root_device_id()?.ok_or_else(|| {
+            VaultError::DeviceRegistry("registry has no self-admitted root Device".into())
+        })?;
+
+        for record in self.devices.values() {
+            self.verify_record_with_root(record, Some(root))?;
+        }
+
+        // Every admission must be signed by a Device that is itself reachable
+        // from the root. Presence alone is not enough: two Devices could admit
+        // each other and form an island no admitted Device ever signed for.
+        let mut admitted = BTreeSet::from([root]);
+        loop {
+            let before = admitted.len();
+            for record in self.devices.values() {
+                if admitted.contains(&record.device_id) {
+                    continue;
+                }
+                if admitted.contains(&record.admitted_by) {
+                    admitted.insert(record.device_id);
+                }
+            }
+            if admitted.len() == before {
+                break;
+            }
+        }
+
+        if let Some(unreachable) = self
+            .devices
+            .keys()
+            .find(|device_id| !admitted.contains(device_id))
+        {
+            return Err(VaultError::DeviceRegistry(format!(
+                "Device {unreachable} was admitted outside the root Device's admission chain"
+            )));
+        }
+
         Ok(())
+    }
+
+    /// The one Device that admitted itself. Trust on first use covers this
+    /// record and nothing else: a second self-admission would be a way for a
+    /// peer to introduce a Device without any admitted Device's signature.
+    fn root_device_id(&self) -> Result<Option<DeviceId>, VaultError> {
+        let mut roots = self
+            .devices
+            .values()
+            .filter(|record| record.admitted_by == record.device_id)
+            .map(|record| record.device_id);
+
+        match (roots.next(), roots.next()) {
+            (None, _) => Ok(None),
+            (Some(root), None) => Ok(Some(root)),
+            (Some(_), Some(_)) => Err(VaultError::DeviceRegistry(
+                "registry has more than one self-admitted Device".into(),
+            )),
+        }
     }
 
     /// Revoke a Device. Any admitted, unrevoked Device may do this, which is
@@ -283,6 +348,15 @@ impl DeviceRegistry {
     }
 
     fn verify_record(&self, record: &DeviceRecord) -> Result<(), VaultError> {
+        let root = self.root_device_id()?;
+        self.verify_record_with_root(record, root)
+    }
+
+    fn verify_record_with_root(
+        &self,
+        record: &DeviceRecord,
+        root: Option<DeviceId>,
+    ) -> Result<(), VaultError> {
         if !record.admission_signature_is_present() {
             return Err(VaultError::DeviceRegistry(format!(
                 "Device {} has no admission signature",
@@ -292,8 +366,14 @@ impl DeviceRegistry {
 
         let admitting_key = if record.admitted_by == record.device_id {
             // The first Device admits itself. This is trust on first use for
-            // the root record only; everything after it is admitted by a
-            // Device whose key is already known.
+            // the root record only: any other self-admission would let a peer
+            // introduce a Device no admitted Device ever signed for.
+            if root != Some(record.device_id) {
+                return Err(VaultError::DeviceRegistry(format!(
+                    "Device {} may not admit itself; only the root Device may",
+                    record.device_id
+                )));
+            }
             &record.public_key
         } else {
             let admitter = self.devices.get(&record.admitted_by).ok_or_else(|| {
@@ -320,6 +400,16 @@ impl DeviceRegistry {
                         record.device_id, revoked_by
                     ))
                 })?;
+                // Deliberately do not reject because `revoker` is now revoked.
+                // A revocation may have been signed while the revoker was
+                // still admitted, and the registry stores no trustworthy
+                // ordering between the two events: both timestamps are chosen
+                // by their signers. Rejecting here would invalidate legitimate
+                // history forever and make the shared registry unloadable.
+                // `revoke` still refuses to issue a new revocation from a
+                // revoked Device; the cost is that a malicious revoked Device
+                // can craft and sign one, which peers cannot distinguish from
+                // a historical revocation.
                 verify_signature(
                     &revoker.public_key,
                     &revocation_payload(&record.device_id, revoked_at, revoked_by),
@@ -652,6 +742,292 @@ mod tests {
     }
 
     #[test]
+    fn test_a_revocation_signed_before_its_signer_was_revoked_stays_valid() {
+        let root = Uuid::from_u128(1);
+        let signer = Uuid::from_u128(2);
+        let target = Uuid::from_u128(3);
+        let root_key = DeviceKeypair::generate();
+        let signer_key = DeviceKeypair::generate();
+        let target_key = DeviceKeypair::generate();
+
+        let mut registry = root_registry(root, &root_key);
+        registry
+            .admit(record(
+                signer,
+                signer_key.public_key(),
+                root,
+                at(2_000),
+                &root_key,
+            ))
+            .unwrap();
+        registry
+            .admit(record(
+                target,
+                target_key.public_key(),
+                root,
+                at(2_100),
+                &root_key,
+            ))
+            .unwrap();
+
+        // The signer is still admitted when it revokes the target.
+        registry
+            .revoke(&target, at(3_000), &signer, &signer_key)
+            .unwrap();
+        assert!(registry.is_revoked(&target));
+        registry.verify().unwrap();
+
+        // Later the signer is itself revoked. That must not retroactively
+        // invalidate the revocation it signed while admitted.
+        registry
+            .revoke(&signer, at(4_000), &root, &root_key)
+            .unwrap();
+
+        assert!(registry.is_revoked(&signer));
+        assert!(registry.is_revoked(&target));
+        registry
+            .verify()
+            .expect("a revocation signed while the signer was admitted must stay valid");
+
+        // The same must hold when the registry is loaded from its bytes.
+        let bytes = serde_json::to_vec(&registry).unwrap();
+        let parsed: DeviceRegistry = serde_json::from_slice(&bytes).unwrap();
+        parsed.verify().unwrap();
+        assert!(parsed.is_revoked(&target));
+        assert!(parsed.is_revoked(&signer));
+    }
+
+    #[test]
+    fn test_concurrent_mutual_revocation_resolves_to_both_revoked() {
+        let root = Uuid::from_u128(1);
+        let joiner = Uuid::from_u128(2);
+        let root_key = DeviceKeypair::generate();
+        let joiner_key = DeviceKeypair::generate();
+
+        let mut from_root = root_registry(root, &root_key);
+        from_root
+            .admit(record(
+                joiner,
+                joiner_key.public_key(),
+                root,
+                at(2_000),
+                &root_key,
+            ))
+            .unwrap();
+        let mut from_joiner = from_root.clone();
+
+        // Each Device revokes the other before it knows about the other's
+        // revocation. Neither signature was issued by an already-revoked
+        // Device, and ADR-0002 §8 says both revocations stand.
+        from_root
+            .revoke(&joiner, at(3_000), &root, &root_key)
+            .unwrap();
+        from_joiner
+            .revoke(&root, at(3_000), &joiner, &joiner_key)
+            .unwrap();
+
+        let merged = from_root.merge(&from_joiner).unwrap();
+
+        assert!(merged.is_revoked(&root));
+        assert!(merged.is_revoked(&joiner));
+        merged.verify().unwrap();
+    }
+
+    #[test]
+    fn test_a_revoked_device_cannot_issue_a_new_revocation() {
+        let root = Uuid::from_u128(1);
+        let lost = Uuid::from_u128(2);
+        let target = Uuid::from_u128(3);
+        let root_key = DeviceKeypair::generate();
+        let lost_key = DeviceKeypair::generate();
+        let target_key = DeviceKeypair::generate();
+
+        let mut registry = root_registry(root, &root_key);
+        registry
+            .admit(record(
+                lost,
+                lost_key.public_key(),
+                root,
+                at(2_000),
+                &root_key,
+            ))
+            .unwrap();
+        registry
+            .admit(record(
+                target,
+                target_key.public_key(),
+                root,
+                at(2_100),
+                &root_key,
+            ))
+            .unwrap();
+        registry.revoke(&lost, at(3_000), &root, &root_key).unwrap();
+
+        let result = registry.revoke(&target, at(4_000), &lost, &lost_key);
+
+        assert!(matches!(result, Err(VaultError::DeviceRegistry(_))));
+        assert!(!registry.is_revoked(&target));
+    }
+
+    #[test]
+    fn test_verification_cannot_order_a_revocation_against_its_signers_revocation() {
+        let root = Uuid::from_u128(1);
+        let signer = Uuid::from_u128(2);
+        let target = Uuid::from_u128(3);
+        let root_key = DeviceKeypair::generate();
+        let signer_key = DeviceKeypair::generate();
+        let target_key = DeviceKeypair::generate();
+
+        let mut registry = root_registry(root, &root_key);
+        registry
+            .admit(record(
+                signer,
+                signer_key.public_key(),
+                root,
+                at(2_000),
+                &root_key,
+            ))
+            .unwrap();
+        registry
+            .admit(record(
+                target,
+                target_key.public_key(),
+                root,
+                at(2_100),
+                &root_key,
+            ))
+            .unwrap();
+        registry
+            .revoke(&signer, at(3_000), &root, &root_key)
+            .unwrap();
+
+        // Craft the same record a revoked Device would produce after its own
+        // revocation. The registry has no trustworthy ordering between this
+        // signature and the signer's revocation (the timestamps are chosen by
+        // the signers), so it cannot distinguish this from a legitimate
+        // revocation signed while the signer was still admitted. Verification
+        // therefore accepts it; the local issuance path still refuses it.
+        let mut forged = registry.get(&target).unwrap().clone();
+        forged.revoked_at = Some(at(4_000));
+        forged.revoked_by = Some(signer);
+        forged.revocation_signature =
+            Some(signer_key.sign(&revocation_payload(&target, at(4_000), &signer)));
+        registry.devices.insert(target, forged);
+
+        registry.verify().unwrap();
+        assert!(registry.is_revoked(&target));
+    }
+
+    #[test]
+    fn test_only_the_root_device_may_admit_itself() {
+        let root = Uuid::from_u128(1);
+        let intruder = Uuid::from_u128(2);
+        let root_key = DeviceKeypair::generate();
+        let intruder_key = DeviceKeypair::generate();
+
+        let registry = root_registry(root, &root_key);
+        let self_admitted = record(
+            intruder,
+            intruder_key.public_key(),
+            intruder,
+            at(2_000),
+            &intruder_key,
+        );
+
+        // A peer cannot introduce a brand-new Device with only its own
+        // signature; pairing by an admitted Device is the only way in.
+        let mut target = registry.clone();
+        assert!(matches!(
+            target.admit(self_admitted.clone()),
+            Err(VaultError::DeviceRegistry(_))
+        ));
+        assert!(!target.contains(&intruder));
+
+        // The same rule holds when the forged registry arrives whole.
+        let mut forged = registry;
+        forged.devices.insert(intruder, self_admitted);
+        assert!(
+            matches!(forged.verify(), Err(VaultError::DeviceRegistry(_))),
+            "a registry with a second self-admitted Device must not verify"
+        );
+    }
+
+    #[test]
+    fn test_an_admission_must_chain_to_the_root_device() {
+        let root = Uuid::from_u128(1);
+        let first = Uuid::from_u128(2);
+        let second = Uuid::from_u128(3);
+        let root_key = DeviceKeypair::generate();
+        let first_key = DeviceKeypair::generate();
+        let second_key = DeviceKeypair::generate();
+
+        let mut registry = root_registry(root, &root_key);
+
+        // Neither Device is reachable from the root: they vouch for each
+        // other, which would otherwise smuggle both in without the root's
+        // (or any admitted Device's) signature.
+        registry.devices.insert(
+            first,
+            record(
+                first,
+                first_key.public_key(),
+                second,
+                at(2_000),
+                &second_key,
+            ),
+        );
+        registry.devices.insert(
+            second,
+            record(
+                second,
+                second_key.public_key(),
+                first,
+                at(3_000),
+                &first_key,
+            ),
+        );
+
+        assert!(
+            matches!(registry.verify(), Err(VaultError::DeviceRegistry(_))),
+            "an admission island must not verify"
+        );
+    }
+
+    #[test]
+    fn test_an_admitted_device_can_still_admit_a_new_one() {
+        let root = Uuid::from_u128(1);
+        let laptop = Uuid::from_u128(2);
+        let phone = Uuid::from_u128(3);
+        let root_key = DeviceKeypair::generate();
+        let laptop_key = DeviceKeypair::generate();
+        let phone_key = DeviceKeypair::generate();
+
+        let mut registry = root_registry(root, &root_key);
+        registry
+            .admit(record(
+                laptop,
+                laptop_key.public_key(),
+                root,
+                at(2_000),
+                &root_key,
+            ))
+            .unwrap();
+
+        // The laptop, not the root, admits the phone.
+        registry
+            .admit(record(
+                phone,
+                phone_key.public_key(),
+                laptop,
+                at(3_000),
+                &laptop_key,
+            ))
+            .unwrap();
+
+        registry.verify().unwrap();
+    }
+
+    #[test]
     fn test_revocation_must_be_signed_by_the_revoking_device() {
         let root = Uuid::from_u128(1);
         let laptop = Uuid::from_u128(2);
@@ -773,9 +1149,13 @@ mod tests {
             ),
         );
 
-        // Both shapes verify in isolation: a self-admitted record is trust on
-        // first use. The collision is only detectable by identity.
-        forged.verify().unwrap();
+        // A self-admitted Device is only valid as the root. Once an honest
+        // root exists, this copy is already rejected by verification; the
+        // merge additionally refuses the identity collision.
+        assert!(matches!(
+            forged.verify(),
+            Err(VaultError::DeviceRegistry(_))
+        ));
 
         let result = honest.merge(&forged);
 

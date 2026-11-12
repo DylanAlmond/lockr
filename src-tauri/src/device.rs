@@ -28,21 +28,33 @@ pub fn load_or_create_device_id(app_data_dir: &Path) -> Result<DeviceId, VaultEr
     let path = app_data_dir.join(DEVICE_ID_FILE);
 
     if path.exists() {
-        let raw = std::fs::read_to_string(&path)?;
-        return Uuid::parse_str(raw.trim()).map_err(|_| {
-            VaultError::DeviceIdentityDamaged(format!(
-                "{} is not a valid Device id. Lockr will not replace this installation's \
-                 identity automatically. Restore the file from a backup, or choose \
-                 'start with a new identity' — a one-way action that makes this a new \
-                 Device and leaves the old Device's entry revoked.",
-                path.display()
-            ))
-        });
+        let raw = std::fs::read_to_string(&path)
+            .map_err(|err| damaged_identity_error(&path, &format!("could not be read ({err}).")))?;
+        return Uuid::parse_str(raw.trim())
+            .map_err(|_| damaged_identity_error(&path, "is not a valid Device id."));
     }
 
     let device_id = Uuid::new_v4();
     write_atomic(&path, device_id.to_string().as_bytes())?;
     Ok(device_id)
+}
+
+/// What starting with a new identity actually does. Shared by the startup
+/// error and the command's confirmation prompt so neither can promise more
+/// than [`reset_device_id`] performs.
+pub const NEW_IDENTITY_EFFECT: &str = "Starting with a new identity is one-way: this \
+     installation becomes a new Device, other Devices will not recognise it, and the old \
+     Device's entry is not revoked. Revoke the old Device from another Device if it was lost.";
+
+/// The recoverable "this identity cannot be used" error. Kept in one place so
+/// an unreadable file and a malformed one take exactly the same recovery path.
+fn damaged_identity_error(path: &Path, detail: &str) -> VaultError {
+    VaultError::DeviceIdentityDamaged(format!(
+        "{} {detail} Lockr will not replace this installation's identity \
+         automatically. Restore the file from a backup, or choose 'start with a \
+         new identity'. {NEW_IDENTITY_EFFECT}",
+        path.display()
+    ))
 }
 
 /// Explicitly abandon a damaged Device identity and mint a fresh one.
@@ -52,6 +64,10 @@ pub fn load_or_create_device_id(app_data_dir: &Path) -> Result<DeviceId, VaultEr
 /// undo, so it must never happen because a file failed to parse. The damaged
 /// file is renamed, not deleted, so the old identity can be inspected or
 /// restored by hand.
+///
+/// It deliberately does not revoke the old Device: there is no master
+/// password or signing key at this point, and revocation is another Device's
+/// signed act. The copy in [`NEW_IDENTITY_EFFECT`] says so.
 pub fn reset_device_id(app_data_dir: &Path) -> Result<DeviceId, VaultError> {
     std::fs::create_dir_all(app_data_dir)?;
 
@@ -91,13 +107,13 @@ impl DeviceKeypair {
     /// device-local profile.
     pub fn from_wrapped(master_password: &str, wrapped: &str) -> Result<Self, VaultError> {
         let mut bytes = decrypt(master_password, wrapped)?;
-        let key_bytes: [u8; 32] = bytes
+        let mut key_bytes: [u8; 32] = bytes
             .as_slice()
             .try_into()
             .map_err(|_| VaultError::Decryption("Invalid device signing key length".into()))?;
         bytes.zeroize();
         Ok(Self {
-            signing_key: SigningKey::from_bytes(&key_bytes),
+            signing_key: signing_key_from_seed(&mut key_bytes),
         })
     }
 
@@ -121,6 +137,16 @@ impl DeviceKeypair {
     fn private_bytes(&self) -> &[u8; 32] {
         self.signing_key.as_bytes()
     }
+}
+
+/// Turn a raw seed into a signing key, wiping the caller's copy.
+///
+/// `SigningKey` keeps its own secret internally; the stack copy of the seed
+/// must not outlive this call.
+fn signing_key_from_seed(key_bytes: &mut [u8; 32]) -> SigningKey {
+    let signing_key = SigningKey::from_bytes(key_bytes);
+    key_bytes.zeroize();
+    signing_key
 }
 
 /// Verify a Base64 Ed25519 signature against a Base64 public key.
@@ -232,6 +258,48 @@ mod tests {
     }
 
     #[test]
+    fn test_unreadable_device_id_is_treated_as_a_damaged_identity() {
+        let app_data_dir = setup();
+        // A directory is a portable stand-in for a file the process cannot
+        // read: the path exists, but reading it fails at the OS level.
+        std::fs::create_dir(app_data_dir.join("device_id")).unwrap();
+
+        let result = load_or_create_device_id(&app_data_dir);
+
+        assert!(
+            matches!(result, Err(VaultError::DeviceIdentityDamaged(_))),
+            "an unreadable identity must take the same recovery path as a malformed one"
+        );
+        assert!(
+            app_data_dir.join("device_id").is_dir(),
+            "an unreadable identity must never be silently replaced"
+        );
+
+        std::fs::remove_dir_all(app_data_dir).ok();
+    }
+
+    #[test]
+    fn test_the_identity_reset_copy_does_not_promise_a_revocation_it_cannot_perform() {
+        let app_data_dir = setup();
+        std::fs::write(app_data_dir.join("device_id"), b"not-a-uuid").unwrap();
+
+        let error = load_or_create_device_id(&app_data_dir)
+            .expect_err("a corrupt identity must be reported")
+            .to_string();
+
+        assert!(
+            !error.contains("leaves the old Device's entry revoked"),
+            "the reset only renames the file and mints a new id; it cannot revoke: {error}"
+        );
+        assert!(
+            error.contains("not revoked") || error.contains("does not revoke"),
+            "the copy must say exactly what reset does: {error}"
+        );
+
+        std::fs::remove_dir_all(app_data_dir).ok();
+    }
+
+    #[test]
     fn test_device_identity_can_be_reset_explicitly_preserving_the_damaged_file() {
         let app_data_dir = setup();
         std::fs::write(app_data_dir.join("device_id"), b"not-a-uuid").unwrap();
@@ -288,6 +356,20 @@ mod tests {
         let result = DeviceKeypair::from_wrapped("WrongPassword", &wrapped);
 
         assert!(matches!(result, Err(VaultError::AuthenticationFailed)));
+    }
+
+    #[test]
+    fn test_recovering_a_keypair_zeroizes_the_stack_copy_of_the_seed() {
+        let mut key_bytes = [42u8; 32];
+        let expected_public = SigningKey::from_bytes(&key_bytes).verifying_key();
+
+        let signing_key = signing_key_from_seed(&mut key_bytes);
+
+        assert_eq!(
+            key_bytes, [0u8; 32],
+            "the stack copy of the private seed must be wiped"
+        );
+        assert_eq!(signing_key.verifying_key(), expected_public);
     }
 
     #[test]
