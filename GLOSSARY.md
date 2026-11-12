@@ -2,6 +2,12 @@
 
 The settled vocabulary of Lockr. Use these terms exactly as defined here — don't drift to synonyms. Terms in code use the exact identifiers noted.
 
+## User
+
+The owner of Vaults, who acts through one or more Devices. A User is not a Device, and not an Item. In code: `User`.
+
+**Avoid:** "account" for the User — "account" names only the login item kind (see [Item](#item)).
+
 ## Vault
 
 The top-level container a user owns. A vault holds items of every kind and the secrets belonging to those items. A user may own multiple vaults; each is stored as a separate encrypted file.
@@ -44,3 +50,47 @@ The rule that secrets never leave the backend except through an explicit per-fie
 - Nothing deletes or exposes secrets as a side effect: listing, searching, and editing metadata never touch secret values.
 
 The UI shows masked placeholders until a secret is explicitly revealed or copied.
+
+## Device
+
+A paired installation of Lockr that acts on a User's behalf. A User owns one or more Devices; every Device of the same User shares that User's identity and can decrypt the same Vaults. A Device is not a User — it is one place a User acts from.
+
+## Pairing
+
+The one-time act of admitting a new Device to a User, so that the Device shares the User's identity and may sync their Vaults. Pairing is the only grant of access: being on a network, or being discoverable, is never sufficient.
+
+## Tombstone
+
+What remains of a deleted Item or Vault, so the deletion can travel to the User's other Devices instead of the deleted thing reappearing on the next sync. A Tombstone carries no content and no secrets — only the identity of what was deleted, and enough information to know when every Device has seen the deletion.
+
+## Duplicate
+
+Two Items the User considers the same thing despite having been created separately, and so having different identities. The app may only *suggest* a Duplicate; it never acts on the suggestion. **Avoid:** "same item", "copy".
+
+## Merge
+
+Reconciling two copies of the same thing — the same Item or Vault identity — so that both Devices end up holding the same result. Merge is automatic wherever the copies do not contradict, and stops at a Conflict where they do. **Avoid:** "merge" for combining two *different* identities — that is **Combine**.
+
+## Combine
+
+The User's deliberate declaration that two distinct Items are one thing, retiring one identity in favour of the other. Never automatic, and never inferred from names. **Avoid:** Merge.
+
+## Conflict
+
+The state where two Devices independently changed the same field of the same Item, so that no ordering between the two changes exists. A Conflict is resolved by the User and blocks the sync that found it.
+
+## Device Registry
+
+The shared, signed record of every Device ever admitted to a User, and whether it has been revoked. A revoked Device stays in it permanently.
+
+## Vault Registry
+
+The shared record of which Vaults belong to a User, replacing the per-machine list of vault ids. It carries identities only — a Device that does not hold a Vault cannot even name it.
+
+## Sync Set
+
+The set of Vaults a particular Device participates in. It belongs to the Device rather than to the Vault, and removing a Vault from it never destroys anything.
+
+## Revocation
+
+Permanently barring a Device from syncing with the User's other Devices. Revocation cannot take back what the Device already holds, and no honest Device will sync with it again.
