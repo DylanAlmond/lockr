@@ -1,9 +1,15 @@
-use std::{collections::HashMap, fs::read_dir, path::PathBuf};
+use std::{
+    collections::HashMap,
+    fs::read_dir,
+    io::ErrorKind,
+    path::{Path, PathBuf},
+};
 
 use chrono::Utc;
 use uuid::Uuid;
 use zxcvbn::{zxcvbn, Entropy};
 
+use crate::atomic::write_atomic;
 use crate::crypto::{
     decrypt_with_key, derive_master_key, encrypt_with_key, generate_salt, MasterKey, SALT_LEN,
 };
@@ -18,6 +24,38 @@ fn normalize(value: Option<String>) -> Option<String> {
     value.filter(|s| !s.is_empty())
 }
 
+/// Refuse to save over a file whose contents no longer match what the
+/// manager last read or wrote. `None` means the file must not exist yet.
+fn ensure_file_unchanged(
+    path: &Path,
+    expected: Option<u64>,
+    vault_id: VaultId,
+) -> Result<(), VaultError> {
+    match std::fs::read(path) {
+        Ok(bytes) if expected == Some(fingerprint(&bytes)) => Ok(()),
+        Ok(_) => Err(VaultError::ExternalChange(vault_id.to_string())),
+        Err(err) if err.kind() == ErrorKind::NotFound => match expected {
+            None => Ok(()),
+            Some(_) => Err(VaultError::ExternalChange(vault_id.to_string())),
+        },
+        Err(err) => Err(err.into()),
+    }
+}
+
+/// A non-cryptographic content fingerprint used to notice that a vault file
+/// was replaced since it was last read or written. It guards against a second
+/// writer or an accidental hand edit; the file is encrypted and authenticated
+/// against deliberate tampering already.
+fn fingerprint(bytes: &[u8]) -> u64 {
+    // FNV-1a, 64-bit
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
 /// An unlocked vault held in RAM, along with its cached encryption key,
 /// salt, and dirty flag.
 ///
@@ -27,6 +65,9 @@ struct UnlockedVault {
     master_key: MasterKey,
     salt: [u8; SALT_LEN],
     dirty: bool,
+    /// Fingerprint of the encrypted file as last read from or written to
+    /// disk. `None` means the file is not expected to exist yet.
+    fingerprint: Option<u64>,
 }
 
 pub struct VaultManager {
@@ -165,6 +206,9 @@ impl VaultManager {
                 master_key,
                 salt,
                 dirty: false,
+                // The initial save writes the file; until then it must not
+                // exist.
+                fingerprint: None,
             },
         );
 
@@ -206,6 +250,7 @@ impl VaultManager {
         }
 
         let encrypted_string = std::fs::read_to_string(&path)?;
+        let file_fingerprint = fingerprint(encrypted_string.as_bytes());
 
         // Extract salt from the file so we can derive the key
         let salt = crate::crypto::extract_salt(&encrypted_string)?;
@@ -255,6 +300,10 @@ impl VaultManager {
                 master_key,
                 salt,
                 dirty: migrated,
+                // Fingerprint the bytes as they are on disk right now, even
+                // when the in-memory vault has been migrated: the first save
+                // must still detect a file that changed after this unlock.
+                fingerprint: Some(file_fingerprint),
             },
         );
 
@@ -289,10 +338,21 @@ impl VaultManager {
         // Immutable borrow ends here — NLL allows mutable borrow below
 
         let path = self.vault_path(vault_id);
-        std::fs::write(path, encrypted)?;
+        let expected = self
+            .unlocked_vaults
+            .get(&vault_id)
+            .ok_or(VaultError::VaultLocked)?
+            .fingerprint;
 
-        // Clear dirty flag
+        ensure_file_unchanged(&path, expected, vault_id)?;
+
+        // Atomic save: temp file + fsync + rename, so a crash leaves the
+        // previous vault readable.
+        write_atomic(&path, encrypted.as_bytes())?;
+
+        // Clear dirty flag and record the fingerprint of what we just wrote
         if let Some(uv) = self.unlocked_vaults.get_mut(&vault_id) {
+            uv.fingerprint = Some(fingerprint(encrypted.as_bytes()));
             uv.dirty = false;
         }
 
@@ -1057,6 +1117,48 @@ mod tests {
             .join("vaults")
             .join(format!("{}.vault.OLD", vault_id))
             .exists());
+    }
+
+    #[test]
+    fn test_save_refuses_when_vault_file_changed_externally() {
+        let temp_dir = setup();
+        let mut manager = VaultManager::new(temp_dir.clone()).unwrap();
+        let vault = manager
+            .create_vault("Test".to_string(), "#6240BF".to_string(), MASTER_PW, &KEY)
+            .unwrap();
+
+        // Reopen the vault so the manager records the fingerprint of the
+        // file it last read, as it would after a normal unlock.
+        manager.lock_vault(Some(vault.id));
+        manager.unlock_vault(vault.id, MASTER_PW, &KEY).unwrap();
+
+        // Something else replaces the vault file behind the manager's back
+        let vault_path = temp_dir.join("vaults").join(format!("{}.vault", vault.id));
+        let foreign_contents = b"a different writer's vault file";
+        std::fs::write(&vault_path, foreign_contents).unwrap();
+
+        // A mutation tries to save over the foreign file
+        let result = manager.update_vault(vault.id, Some("Renamed".to_string()), None);
+
+        match result {
+            Err(VaultError::ExternalChange(message)) => {
+                assert!(
+                    message.contains(&vault.id.to_string()),
+                    "the error must identify the vault: {message}"
+                );
+            }
+            other => panic!(
+                "expected an external-change error, got: {:?}",
+                other.map(|()| ())
+            ),
+        }
+
+        // The other writer's file is left exactly as it was
+        assert_eq!(
+            std::fs::read(&vault_path).unwrap(),
+            foreign_contents,
+            "an externally changed vault must never be overwritten"
+        );
     }
 
     #[test]

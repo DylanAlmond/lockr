@@ -23,6 +23,9 @@ pub enum VaultError {
     #[error("Decryption Error: {0}")]
     Decryption(String),
 
+    #[error("Vault file changed on disk since it was opened: {0}")]
+    ExternalChange(String),
+
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 
