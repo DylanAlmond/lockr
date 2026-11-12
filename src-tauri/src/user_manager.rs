@@ -247,7 +247,8 @@ impl UserManager {
 
         let json = serde_json::to_string_pretty(&user)?;
 
-        std::fs::write(path, json)?;
+        // Atomic save: temp file + fsync + rename
+        crate::atomic::write_atomic(path, json.as_bytes())?;
         Ok(())
     }
 }
