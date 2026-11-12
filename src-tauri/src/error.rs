@@ -26,6 +26,12 @@ pub enum VaultError {
     #[error("Vault file changed on disk since it was opened: {0}")]
     ExternalChange(String),
 
+    #[error("Device identity is damaged: {0}")]
+    DeviceIdentityDamaged(String),
+
+    #[error("Device registry error: {0}")]
+    DeviceRegistry(String),
+
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 

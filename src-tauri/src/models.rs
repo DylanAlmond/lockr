@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
+use crate::registry::{DeviceRegistry, SharedRegistries, VaultRegistry};
+
 pub type UserId = Uuid;
 pub type VaultId = Uuid;
 pub type ItemId = Uuid;
@@ -245,6 +247,8 @@ pub fn card_number_last4(card_number: &str) -> Option<String> {
     Some(digits[digits.len() - 4..].to_string())
 }
 
+/// The profile view returned to the UI: this Device's view of the User,
+/// assembled from the device-local and shared records.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct User {
     pub id: UserId,
@@ -255,8 +259,84 @@ pub struct User {
     /// Secret Key encrypted using the user's Master Password
     pub encrypted_secret_key: String,
 
-    /// IDs of all vaults this user owns
+    /// Derived from the shared Vault Registry, never a stored source of truth.
     pub vault_ids: Vec<VaultId>,
+}
+
+/// The device-local half of a profile: state that belongs to this
+/// installation and must never travel to another Device.
+///
+/// It keeps the secret key and the Device signing key wrapped under this
+/// Device's master password, with separate salts and nonces. Syncing it would
+/// overwrite one working wrapping with another for no benefit.
+///
+/// Fields marked `skip_serializing` exist only to read profiles written
+/// before the split; they are no longer written.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeviceProfile {
+    pub id: UserId,
+
+    /// The User's secret key, wrapped under this Device's master password.
+    pub encrypted_secret_key: String,
+
+    /// This installation's Device id, when it has been bound to this profile.
+    #[serde(default)]
+    pub device_id: Option<DeviceId>,
+
+    /// The Device signing key's private half, wrapped the same way as the
+    /// secret key.
+    #[serde(default)]
+    pub encrypted_signing_key: String,
+
+    /// The Device signing key's public half, Base64.
+    #[serde(default)]
+    pub signing_public_key: String,
+
+    // ---- Legacy pre-split fields: read for migration, never written. ----
+    #[serde(default, skip_serializing)]
+    pub name: String,
+    #[serde(default, skip_serializing)]
+    pub color: String,
+    #[serde(default, skip_serializing)]
+    pub icon: Option<String>,
+    #[serde(default, skip_serializing)]
+    pub vault_ids: Vec<VaultId>,
+}
+
+/// The shared half of a profile: state that syncs between the User's Devices.
+///
+/// User metadata lives here because two Devices showing different names for
+/// one User is a bug. Both registries live here because every Device must
+/// hold the same list of Vaults and admitted Devices.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SharedProfile {
+    pub user_id: UserId,
+    pub name: String,
+    pub color: String,
+    pub icon: Option<String>,
+
+    #[serde(default)]
+    pub devices: DeviceRegistry,
+
+    #[serde(default)]
+    pub vaults: VaultRegistry,
+}
+
+impl SharedProfile {
+    /// The identity list the UI treats as `User::vault_ids`.
+    pub fn vault_ids(&self) -> Vec<VaultId> {
+        self.vaults.ids()
+    }
+
+    /// The registries as they travel over the network seam. User metadata is
+    /// deliberately excluded: it is exchanged once during pairing, not on
+    /// every sync.
+    pub fn registries(&self) -> SharedRegistries {
+        SharedRegistries {
+            devices: self.devices.clone(),
+            vaults: self.vaults.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

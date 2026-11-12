@@ -6,6 +6,7 @@ mod error;
 mod merge;
 mod models;
 mod network;
+mod registry;
 mod user_manager;
 mod vault_manager;
 
@@ -15,9 +16,10 @@ pub use error::VaultError;
 pub use merge::*;
 pub use models::*;
 pub use network::*;
+pub use registry::*;
 use tauri::Manager;
 
-use crate::{commands::ManagerState, user_manager::UserManager, vault_manager::VaultManager};
+use crate::commands::ManagerState;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -28,20 +30,10 @@ pub fn run() {
                 .app_data_dir()
                 .expect("Failed to resolve app data dir");
 
-            // Initialize both managers
-            let vault_manager =
-                VaultManager::new(app_data_dir.clone()).expect("Failed to initialize VaultManager");
-
-            let user_manager =
-                UserManager::new(app_data_dir).expect("Failed to initialize UserManager");
-
-            // Bundle them into our shared state
-            let app_state = ManagerState {
-                vault_manager,
-                user_manager,
-                master_password: None,
-                secret_key: None,
-            };
+            // A damaged Device identity file must not panic the process. The
+            // state records a distinct error that the UI can surface, and
+            // `start_with_new_device_identity` is the explicit way out.
+            let app_state = ManagerState::initialize(app_data_dir);
 
             app.manage(Mutex::new(app_state));
 
@@ -58,6 +50,8 @@ pub fn run() {
             commands::update_profile,
             commands::logout,
             commands::delete_user,
+            commands::get_device_identity_error,
+            commands::start_with_new_device_identity,
             // Vaults
             commands::list_vault_ids,
             commands::get_unlocked_vaults,
