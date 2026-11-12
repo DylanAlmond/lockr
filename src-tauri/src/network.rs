@@ -52,6 +52,9 @@ pub enum NetworkError {
 
     #[error("Discovery failed: {0}")]
     DiscoveryFailed(String),
+
+    #[error("Peer transport is unavailable: {0}")]
+    TransportUnavailable(String),
 }
 
 /// What a Device advertises on the local network: a service type and an

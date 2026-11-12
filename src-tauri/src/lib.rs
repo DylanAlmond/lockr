@@ -3,6 +3,7 @@ mod commands;
 mod crypto;
 mod device;
 mod error;
+mod mdns;
 mod merge;
 mod models;
 mod network;
@@ -13,6 +14,7 @@ mod vault_manager;
 use std::sync::Mutex;
 
 pub use error::VaultError;
+pub use mdns::{DiscoverySession, MdnsDiscovery};
 pub use merge::*;
 pub use models::*;
 pub use network::*;
