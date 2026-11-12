@@ -15,7 +15,7 @@ use crate::crypto::{
 };
 use crate::device::load_or_create_device_id;
 use crate::{
-    allowed_secret_keys, item_to_safe, kind_field_keys, CURRENT_SCHEMA_VERSION, DeviceId,
+    allowed_secret_keys, item_to_safe, CURRENT_SCHEMA_VERSION, DeviceId,
     FieldVersion, IntoSafe, ItemFilter, ItemId, ItemKind, ItemSecrets, LegacyVault, NewItemData,
     SafeItem, SafeVault, SecretInput, Vault, VaultError, VaultId, VaultItem, VersionVector,
     SECRET_FIELD_PASSWORD,
@@ -24,6 +24,98 @@ use crate::{
 /// Normalizes an optional text field: empty strings mean "not set".
 fn normalize(value: Option<String>) -> Option<String> {
     value.filter(|s| !s.is_empty())
+}
+
+/// Rejects bad kind data before an update mutates anything. In particular,
+/// the lifecycle clock must not advance on a write that is about to fail.
+fn validate_kind_data(current: &ItemKind, data: &NewItemData) -> Result<(), VaultError> {
+    match (current, data) {
+        (ItemKind::Account(_), NewItemData::Account(_))
+        | (ItemKind::Note(_), NewItemData::Note(_))
+        | (ItemKind::Identity(_), NewItemData::Identity(_)) => Ok(()),
+        (ItemKind::Card(_), NewItemData::Card(card)) => {
+            if !(1..=12).contains(&card.expiry_month) {
+                return Err(VaultError::Validation(format!(
+                    "Card expiry month must be between 1 and 12, got {}",
+                    card.expiry_month
+                )));
+            }
+            Ok(())
+        }
+        _ => Err(VaultError::Validation(
+            "Changing an item's kind is not supported".to_string(),
+        )),
+    }
+}
+
+/// The kind-specific wire fields that actually differ between the current
+/// data and the proposed replacement. Stamping only these keeps per-field
+/// clocks honest: changing an account's username must not restamp its email.
+fn changed_kind_fields(current: &ItemKind, data: &NewItemData) -> Vec<&'static str> {
+    let mut changed = Vec::new();
+
+    match (current, data) {
+        (ItemKind::Account(current), NewItemData::Account(new)) => {
+            if current.username != new.username {
+                changed.push("username");
+            }
+            if current.email != new.email {
+                changed.push("email");
+            }
+        }
+        (ItemKind::Note(current), NewItemData::Note(new)) => {
+            if current.title != new.title {
+                changed.push("title");
+            }
+            if current.body != new.body {
+                changed.push("body");
+            }
+        }
+        (ItemKind::Card(current), NewItemData::Card(new)) => {
+            if current.cardholder_name != new.cardholder_name {
+                changed.push("cardholder_name");
+            }
+            if current.expiry_month != new.expiry_month {
+                changed.push("expiry_month");
+            }
+            if current.expiry_year != new.expiry_year {
+                changed.push("expiry_year");
+            }
+            if current.brand != new.brand {
+                changed.push("brand");
+            }
+        }
+        (ItemKind::Identity(current), NewItemData::Identity(new)) => {
+            if current.full_name != new.full_name {
+                changed.push("full_name");
+            }
+            if current.email != new.email {
+                changed.push("email");
+            }
+            if current.phone != new.phone {
+                changed.push("phone");
+            }
+            if current.address_line1 != new.address_line1 {
+                changed.push("address_line1");
+            }
+            if current.address_line2 != new.address_line2 {
+                changed.push("address_line2");
+            }
+            if current.city != new.city {
+                changed.push("city");
+            }
+            if current.postal_code != new.postal_code {
+                changed.push("postal_code");
+            }
+            if current.country != new.country {
+                changed.push("country");
+            }
+        }
+        // Kind mismatches are rejected by `validate_kind_data` first.
+        _ => {}
+    }
+
+    changed
 }
 
 /// Refuse to save over a file whose contents no longer match what the
@@ -602,6 +694,11 @@ impl VaultManager {
 
     /// Update an item's metadata, and for supported kinds its kind data.
     /// Kind data may not change an item's kind.
+    ///
+    /// All validation happens against an immutable view first. A rejected
+    /// update therefore neither advances the lifecycle clock nor marks the
+    /// vault dirty. Kind-data updates stamp only the fields that actually
+    /// changed, so per-field clocks describe the write they name.
     pub fn update_item(
         &mut self,
         vault_id: VaultId,
@@ -611,8 +708,47 @@ impl VaultManager {
         favourite: Option<bool>,
         tags: Option<Vec<String>>,
         color: Option<String>,
-        data: Option<NewItemData>,
+        mut data: Option<NewItemData>,
     ) -> Result<SafeItem, VaultError> {
+        // Account email follows the shared text-field rule before either
+        // comparison or assignment sees it.
+        if let Some(NewItemData::Account(account)) = data.as_mut() {
+            account.email = normalize(account.email.take());
+        }
+
+        let has_metadata_change = display_name.is_some()
+            || icon.is_some()
+            || favourite.is_some()
+            || tags.is_some()
+            || color.is_some();
+
+        // Validate before touching the vault: no clock bump, no dirty flag.
+        let changed_fields = {
+            let vault = self.get_vault(vault_id)?;
+            let item = vault
+                .items
+                .iter()
+                .find(|i| i.id == item_id && !i.is_tombstone())
+                .ok_or(VaultError::ItemNotFound(item_id.to_string()))?;
+
+            match &data {
+                Some(new_data) => {
+                    let kind = item
+                        .kind
+                        .as_ref()
+                        .ok_or(VaultError::ItemNotFound(item_id.to_string()))?;
+                    validate_kind_data(kind, new_data)?;
+                    changed_kind_fields(kind, new_data)
+                }
+                None => Vec::new(),
+            }
+        };
+
+        // An update that changes nothing is not a write at all.
+        if !has_metadata_change && changed_fields.is_empty() {
+            return self.safe_view_of(vault_id, item_id);
+        }
+
         {
             let device = self.device_id;
             let vault = self.get_vault_mut(vault_id)?;
@@ -648,35 +784,20 @@ impl VaultManager {
             }
 
             if let Some(data) = data {
-                let kind = item
-                    .kind
-                    .as_mut()
-                    .ok_or(VaultError::ItemNotFound(item_id.to_string()))?;
-
-                match (kind, data) {
-                    (ItemKind::Account(current), NewItemData::Account(mut new)) => {
-                        // Account email follows the shared text-field rule:
-                        // empty strings mean 'not set'
-                        new.email = normalize(new.email);
-                        *current = new;
-                    }
-                    (ItemKind::Note(current), NewItemData::Note(new)) => *current = new,
-                    (ItemKind::Identity(current), NewItemData::Identity(new)) => {
+                match (item.kind.as_mut(), data) {
+                    (Some(ItemKind::Account(current)), NewItemData::Account(new)) => {
                         *current = new
                     }
-                    (ItemKind::Card(current), NewItemData::Card(new)) => *current = new,
-                    (_, _) => {
-                        return Err(VaultError::Validation(
-                            "Changing an item's kind is not supported".to_string(),
-                        ))
+                    (Some(ItemKind::Note(current)), NewItemData::Note(new)) => *current = new,
+                    (Some(ItemKind::Identity(current)), NewItemData::Identity(new)) => {
+                        *current = new
                     }
+                    (Some(ItemKind::Card(current)), NewItemData::Card(new)) => *current = new,
+                    // Validated above; the item cannot lose its kind here.
+                    _ => unreachable!("kind data was validated before mutation"),
                 }
 
-                for key in kind_field_keys(
-                    item.kind
-                        .as_ref()
-                        .expect("a live item always carries a kind"),
-                ) {
+                for key in changed_fields {
                     item.record_field(key, version);
                 }
             }
@@ -710,7 +831,12 @@ impl VaultManager {
     }
 
     /// Move an item of any kind (and its secret entry, if any) to another
-    /// vault as one atomic mutation. The moved item gets a fresh id.
+    /// vault as one atomic mutation.
+    ///
+    /// The item keeps its identity: move is a lifecycle event on the same
+    /// UUID, not delete-plus-create. Because the lifecycle clock is bumped,
+    /// the move is causally visible to a later merge, which can tell it
+    /// apart from an unrelated item that merely happens to share a name.
     pub fn move_item(
         &mut self,
         vault_id: VaultId,
@@ -744,9 +870,9 @@ impl VaultManager {
                 .position(|s| s.item_id == item_id)
                 .map(|s_idx| source.secrets.remove(s_idx));
 
-            // A move is a lifecycle event on the same identity.
+            // A move is a lifecycle event on the same identity: preserve the
+            // id and record the event by advancing the item's clock.
             item.clock.increment(device);
-            item.id = Uuid::new_v4();
             item.vault_id = target_vault_id;
             item.updated_at = Utc::now();
 
@@ -1811,7 +1937,7 @@ mod tests {
             );
         }
 
-        // Replacing kind data stamps every field of the kind.
+        // Replacing kind data stamps the fields that actually changed.
         manager
             .update_item(
                 vault.id,
@@ -2208,10 +2334,15 @@ mod tests {
         let crate::SafeItem::Note(note_view) = &moved_note else {
             panic!("expected note view");
         };
+        assert_eq!(note_view.id, note_id, "a move keeps the item's identity");
         assert_eq!(note_view.vault_id, vault_b.id);
         assert!(note_view.favourite, "metadata must survive the move");
         assert_eq!(note_view.tags, vec!["kitchen".to_string()]);
-        assert!(manager.get_item_by_id(note_id).is_err());
+        // It is still findable - now in the target vault, not the source.
+        assert!(matches!(
+            manager.get_item_by_id(note_id).unwrap(),
+            SafeItem::Note(view) if view.vault_id == vault_b.id
+        ));
         assert!(manager
             .get_vault(vault_a.id)
             .unwrap()
@@ -2863,6 +2994,180 @@ mod tests {
             Err(VaultError::Validation(ref msg)) if msg.contains("between 1 and 12")
         ));
         assert_eq!(manager.get_vault(vault.id).unwrap().items.len(), 0);
+    }
+
+    #[test]
+    fn test_kind_update_stamps_only_fields_that_changed() {
+        let temp_dir = setup();
+        let mut manager = VaultManager::new(temp_dir.clone()).unwrap();
+        let vault = manager
+            .create_vault("Test".to_string(), "#6240BF".to_string(), MASTER_PW, &KEY)
+            .unwrap();
+        let device = manager.device_id();
+
+        let item = add_test_account_item(&mut manager, vault.id, "octocat", "hunter2");
+        let item_id = match item {
+            SafeItem::Account(view) => view.id,
+            _ => panic!("expected account view"),
+        };
+
+        // Change the username only: the email was not written by this edit.
+        manager
+            .update_item(
+                vault.id,
+                item_id,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(crate::NewItemData::Account(crate::AccountData {
+                    username: "newcat".to_string(),
+                    email: None,
+                })),
+            )
+            .unwrap();
+
+        let stored = manager
+            .get_vault(vault.id)
+            .unwrap()
+            .items
+            .iter()
+            .find(|stored| stored.id == item_id)
+            .unwrap();
+
+        assert_eq!(stored.clock.get(&device), 2);
+        assert_eq!(
+            stored.field_clocks.get("username"),
+            Some(&FieldVersion::new(device, 2)),
+            "the changed field carries the new version"
+        );
+        assert_eq!(
+            stored.field_clocks.get("email"),
+            Some(&FieldVersion::new(device, 1)),
+            "an untouched field must keep its earlier version"
+        );
+    }
+
+    #[test]
+    fn test_rejected_update_does_not_advance_the_clock_or_dirty_the_vault() {
+        let temp_dir = setup();
+        let mut manager = VaultManager::new(temp_dir.clone()).unwrap();
+        let vault = manager
+            .create_vault("Test".to_string(), "#6240BF".to_string(), MASTER_PW, &KEY)
+            .unwrap();
+        let device = manager.device_id();
+
+        let card = add_test_card(&mut manager, vault.id);
+        let card_id = match card {
+            SafeItem::Card(view) => view.id,
+            _ => panic!("expected card view"),
+        };
+
+        let (clock_before, field_clocks_before, updated_before) = {
+            let stored = manager
+                .get_vault(vault.id)
+                .unwrap()
+                .items
+                .iter()
+                .find(|stored| stored.id == card_id)
+                .unwrap();
+            (
+                stored.clock.clone(),
+                stored.field_clocks.clone(),
+                stored.updated_at,
+            )
+        };
+        assert!(!manager.is_dirty(vault.id));
+
+        let rejected = manager.update_item(
+            vault.id,
+            card_id,
+            Some("Should not apply".to_string()),
+            None,
+            Some(true),
+            None,
+            None,
+            Some(crate::NewItemData::Card(crate::CardData {
+                cardholder_name: "Alex Doe".to_string(),
+                expiry_month: 13,
+                expiry_year: 2030,
+                brand: Some("Visa".to_string()),
+            })),
+        );
+
+        assert!(
+            matches!(rejected, Err(VaultError::Validation(ref msg)) if msg.contains("between 1 and 12")),
+            "got {rejected:?}"
+        );
+
+        let stored = manager
+            .get_vault(vault.id)
+            .unwrap()
+            .items
+            .iter()
+            .find(|stored| stored.id == card_id)
+            .unwrap();
+        assert_eq!(stored.clock, clock_before, "a failed write must not tick");
+        assert_eq!(stored.clock.get(&device), 1);
+        assert_eq!(stored.field_clocks, field_clocks_before);
+        assert_eq!(stored.updated_at, updated_before);
+        assert_eq!(stored.display_name.as_deref(), Some("Travel card"));
+        assert!(!stored.favourite, "metadata must not be applied on failure");
+        assert!(
+            !manager.is_dirty(vault.id),
+            "a rejected update must not dirty the vault"
+        );
+    }
+
+    #[test]
+    fn test_move_preserves_item_identity() {
+        let temp_dir = setup();
+        let mut manager = VaultManager::new(temp_dir.clone()).unwrap();
+        let vault_a = manager
+            .create_vault("A".to_string(), "#6240BF".to_string(), MASTER_PW, &KEY)
+            .unwrap();
+        let vault_b = manager
+            .create_vault("B".to_string(), "#6240BF".to_string(), MASTER_PW, &KEY)
+            .unwrap();
+        let device = manager.device_id();
+
+        let note = add_test_note(&mut manager, vault_a.id, "Recipe", "Body");
+        let note_id = match &note {
+            SafeItem::Note(view) => view.id,
+            _ => panic!("expected note view"),
+        };
+        let clock_before = manager
+            .get_vault(vault_a.id)
+            .unwrap()
+            .items
+            .iter()
+            .find(|item| item.id == note_id)
+            .unwrap()
+            .clock
+            .clone();
+
+        let moved = manager.move_item(vault_a.id, note_id, vault_b.id).unwrap();
+        let moved_id = match moved {
+            SafeItem::Note(view) => view.id,
+            _ => panic!("expected note view"),
+        };
+
+        assert_eq!(moved_id, note_id, "move must preserve the item's UUID");
+
+        let moved_item = manager
+            .get_vault(vault_b.id)
+            .unwrap()
+            .items
+            .iter()
+            .find(|item| item.id == moved_id)
+            .unwrap();
+        assert_eq!(moved_item.vault_id, vault_b.id);
+        assert_eq!(
+            moved_item.clock.get(&device),
+            clock_before.get(&device) + 1,
+            "move advances the lifecycle clock on the same identity"
+        );
     }
 
     #[test]
