@@ -355,6 +355,39 @@ pub struct Vault {
 
     /// Per-field secrets for items, keyed by item id. Never sent to the UI.
     pub secrets: Vec<ItemSecrets>,
+
+    /// Duplicate pairs the User has resolved by keeping both. Stored in the
+    /// vault, not on this Device, so the decision travels on the next sync.
+    #[serde(default)]
+    pub duplicate_dismissals: Vec<DismissedDuplicate>,
+}
+
+/// A pair of Items the User has decided are *not* to be combined. The pair is
+/// canonical: `first < second`, so two Devices that dismiss the same pair in
+/// different orders still produce the same record and a merge is a set union.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DismissedDuplicate {
+    pub first: ItemId,
+    pub second: ItemId,
+}
+
+impl DismissedDuplicate {
+    /// Canonicalise the pair, so `(a, b)` and `(b, a)` are the same record.
+    pub fn new(first: ItemId, second: ItemId) -> Self {
+        if first <= second {
+            Self { first, second }
+        } else {
+            Self {
+                first: second,
+                second: first,
+            }
+        }
+    }
+
+    pub fn matches(&self, first: ItemId, second: ItemId) -> bool {
+        let pair = Self::new(first, second);
+        self.first == pair.first && self.second == pair.second
+    }
 }
 
 /// A vault entry of any kind: common metadata plus kind-specific fields.
@@ -792,6 +825,27 @@ impl Default for ItemFilter {
 }
 
 impl Vault {
+    /// Whether the User has already decided this pair should stay apart.
+    pub fn is_duplicate_dismissed(&self, first: ItemId, second: ItemId) -> bool {
+        self.duplicate_dismissals
+            .iter()
+            .any(|pair| pair.matches(first, second))
+    }
+
+    /// Record that this pair is not a Duplicate after all. Returns whether a
+    /// new record was added; dismissing the same pair twice is idempotent.
+    pub fn dismiss_duplicate(&mut self, first: ItemId, second: ItemId) -> bool {
+        if first == second || self.is_duplicate_dismissed(first, second) {
+            return false;
+        }
+
+        self.duplicate_dismissals
+            .push(DismissedDuplicate::new(first, second));
+        self.duplicate_dismissals
+            .sort_by_key(|pair| (pair.first, pair.second));
+        true
+    }
+
     /// Stamp every item and secret field in a freshly migrated vault with
     /// this Device at counter 1. Two Devices migrating the same v2 file
     /// therefore get concurrent clocks rather than identical ones.
@@ -907,6 +961,7 @@ impl LegacyVault {
                     )
                 })
                 .collect(),
+            duplicate_dismissals: Vec::new(),
         };
 
         vault.stamp_migrated_items(device_id);
@@ -1202,6 +1257,7 @@ mod tests {
                 "round_trip_pw".to_string(),
                 FieldVersion::default(),
             )],
+            duplicate_dismissals: Vec::new(),
         };
 
         let bytes = serde_json::to_vec(&vault).unwrap();
@@ -1289,6 +1345,7 @@ mod tests {
                 "round_trip_pw".to_string(),
                 FieldVersion::new(device, 1),
             )],
+            duplicate_dismissals: Vec::new(),
         };
 
         let bytes = serde_json::to_vec(&vault).unwrap();

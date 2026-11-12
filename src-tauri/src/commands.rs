@@ -9,7 +9,10 @@ use zxcvbn::{zxcvbn, Entropy};
 
 use crate::user_manager::UserManager;
 use crate::vault_manager::VaultManager;
-use crate::{IntoSafe, ItemFilter, NewItemData, SafeItem, SafeVault, SecretInput, User, UserId};
+use crate::{
+    DuplicateOutcome, DuplicateResolution, DuplicateSuggestion, IntoSafe, ItemFilter,
+    NewItemData, SafeItem, SafeVault, SecretInput, User, UserId,
+};
 
 pub struct ManagerState {
     /// Where the managers read and write. Kept so an explicit identity
@@ -623,6 +626,44 @@ pub fn update_item_secret(
 
     vault_manager
         .update_item_secret(vid, iid, &field_key, value)
+        .map_err(|e| e.to_string())
+}
+
+// ============ Duplicates ============
+
+/// Suggest Duplicate pairs in one vault. Read-only: nothing is applied.
+#[tauri::command]
+pub fn get_duplicate_suggestions(
+    state: AppState,
+    vault_id: String,
+) -> Result<Vec<DuplicateSuggestion>, String> {
+    let state = state.lock().map_err(|e| e.to_string())?;
+    let (vault_manager, _) = state.ready()?;
+    let vid = Uuid::parse_str(&vault_id).map_err(|e| e.to_string())?;
+
+    vault_manager
+        .duplicate_suggestions(vid)
+        .map_err(|e| e.to_string())
+}
+
+/// Resolve a suggested pair: keep both, keep either identity, or Combine
+/// with an explicit choice for every colliding field.
+#[tauri::command]
+pub fn resolve_duplicate(
+    state: AppState,
+    vault_id: String,
+    first: String,
+    second: String,
+    resolution: DuplicateResolution,
+) -> Result<DuplicateOutcome, String> {
+    let mut state = state.lock().map_err(|e| e.to_string())?;
+    let (vault_manager, _) = state.ready_mut()?;
+    let vid = Uuid::parse_str(&vault_id).map_err(|e| e.to_string())?;
+    let first = Uuid::parse_str(&first).map_err(|e| e.to_string())?;
+    let second = Uuid::parse_str(&second).map_err(|e| e.to_string())?;
+
+    vault_manager
+        .resolve_duplicate(vid, first, second, resolution)
         .map_err(|e| e.to_string())
 }
 

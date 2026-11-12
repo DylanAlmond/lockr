@@ -82,9 +82,10 @@ pub struct ConflictSide {
     pub value: Option<Value>,
 }
 
-/// A field value as it exists in one vault copy.
+/// A field value as it exists in one vault copy. Shared with Combine, which
+/// needs the same field-key read/write surface as merge.
 #[derive(Debug, Clone, PartialEq)]
-enum FieldValue {
+pub(crate) enum FieldValue {
     /// An optional text field; `None` means "not set".
     Text(Option<String>),
 
@@ -102,7 +103,7 @@ enum FieldValue {
 }
 
 impl FieldValue {
-    fn conflict_value(&self) -> Option<Value> {
+    pub(crate) fn conflict_value(&self) -> Option<Value> {
         match self {
             FieldValue::Secret(_) => None,
             FieldValue::Text(value) => {
@@ -217,6 +218,12 @@ pub fn merge_vaults(left: &Vault, right: &Vault) -> MergeOutcome {
         color,
         items,
         secrets,
+        // A decision is a set of pairs, so reconciling two Devices is a
+        // union. Dismissing on either side silences both.
+        duplicate_dismissals: union_dismissals(
+            &left.duplicate_dismissals,
+            &right.duplicate_dismissals,
+        ),
     };
 
     if conflicts.is_empty() {
@@ -224,6 +231,26 @@ pub fn merge_vaults(left: &Vault, right: &Vault) -> MergeOutcome {
     } else {
         MergeOutcome::Conflicts(ConflictReport { merged, conflicts })
     }
+}
+
+/// Set union of two Devices' Duplicate dismissals, in canonical order.
+fn union_dismissals(
+    left: &[crate::DismissedDuplicate],
+    right: &[crate::DismissedDuplicate],
+) -> Vec<crate::DismissedDuplicate> {
+    let mut union: Vec<crate::DismissedDuplicate> =
+        Vec::with_capacity(left.len() + right.len());
+
+    for pair in left.iter().chain(right.iter()) {
+        if !union.iter().any(|existing| {
+            existing.first == pair.first && existing.second == pair.second
+        }) {
+            union.push(*pair);
+        }
+    }
+
+    union.sort_by_key(|pair| (pair.first, pair.second));
+    union
 }
 
 fn vaults_are_identical(left: &Vault, right: &Vault) -> bool {
@@ -458,7 +485,7 @@ fn canonical_display_name(left: &Option<String>, right: &Option<String>) -> Opti
     }
 }
 
-fn kind_tag(kind: &ItemKind) -> &'static str {
+pub(crate) fn kind_tag(kind: &ItemKind) -> &'static str {
     match kind {
         ItemKind::Account(_) => "account",
         ItemKind::Card(_) => "card",
@@ -647,7 +674,7 @@ fn side_sort_key(side: &ConflictSide) -> (DeviceId, u64, String) {
     )
 }
 
-fn read_item_field(item: &VaultItem, key: &str) -> Option<FieldValue> {
+pub(crate) fn read_item_field(item: &VaultItem, key: &str) -> Option<FieldValue> {
     match key {
         "display_name" => Some(FieldValue::Text(item.display_name.clone())),
         "favourite" => Some(FieldValue::Bool(item.favourite)),
@@ -690,7 +717,7 @@ fn read_item_field(item: &VaultItem, key: &str) -> Option<FieldValue> {
     }
 }
 
-fn write_item_field(item: &mut VaultItem, key: &str, value: &FieldValue) -> bool {
+pub(crate) fn write_item_field(item: &mut VaultItem, key: &str, value: &FieldValue) -> bool {
     match key {
         "display_name" => {
             let FieldValue::Text(value) = value else {
@@ -841,6 +868,7 @@ mod tests {
                 "hunter2".to_string(),
                 FieldVersion::new(owner, 1),
             )],
+            duplicate_dismissals: Vec::new(),
         };
 
         (vault, item_id, owner)
@@ -1089,6 +1117,36 @@ mod tests {
             assert!(
                 merged.secrets.iter().all(|entry| entry.item_id != item_id),
                 "a tombstone carries no secrets"
+            );
+        }
+    }
+
+    #[test]
+    fn test_merge_unions_duplicate_dismissals_from_both_devices() {
+        let (base, _, _) = base_fixture();
+        let alpha_first = Uuid::from_u128(0xDD01);
+        let alpha_second = Uuid::from_u128(0xDD02);
+        let beta_first = Uuid::from_u128(0xDD03);
+        let beta_second = Uuid::from_u128(0xDD04);
+
+        let mut left = base.clone();
+        assert!(left.dismiss_duplicate(alpha_first, alpha_second));
+
+        let mut right = base.clone();
+        // The same decision recorded in reverse order is the same pair, so
+        // recording it again in canonical order is a no-op.
+        assert!(right.dismiss_duplicate(alpha_second, alpha_first));
+        assert!(!right.dismiss_duplicate(alpha_first, alpha_second));
+        assert!(right.dismiss_duplicate(beta_first, beta_second));
+
+        for (a, b) in [(&left, &right), (&right, &left)] {
+            let merged = expect_merged(merge_vaults(a, b));
+            assert!(merged.is_duplicate_dismissed(alpha_first, alpha_second));
+            assert!(merged.is_duplicate_dismissed(beta_first, beta_second));
+            assert_eq!(
+                merged.duplicate_dismissals.len(),
+                2,
+                "a dismissal recorded once must not multiply"
             );
         }
     }

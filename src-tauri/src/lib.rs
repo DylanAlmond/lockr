@@ -2,6 +2,7 @@ mod atomic;
 mod commands;
 mod crypto;
 mod device;
+mod duplicates;
 mod error;
 mod merge;
 mod models;
@@ -12,6 +13,7 @@ mod vault_manager;
 
 use std::sync::Mutex;
 
+pub use duplicates::*;
 pub use error::VaultError;
 pub use merge::*;
 pub use models::*;
@@ -71,6 +73,9 @@ pub fn run() {
             commands::get_item_secret,
             commands::update_item_secret,
             commands::get_item_password_strength,
+            // Duplicates
+            commands::get_duplicate_suggestions,
+            commands::resolve_duplicate,
             // Util
             commands::get_password_strength,
             commands::flush_vault,
