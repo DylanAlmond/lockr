@@ -19,11 +19,7 @@ use serde::Serialize;
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::VaultId;
-
-/// Stable identity of a Device. Minted by the installation itself, never
-/// derived from hardware, and opaque to the sync engine.
-pub type DeviceId = Uuid;
+use crate::{DeviceId, VaultId};
 
 /// The mDNS service type this app advertises. Paired with a [`DeviceId`] it
 /// is the entire advertised payload.
