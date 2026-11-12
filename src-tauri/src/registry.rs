@@ -400,16 +400,16 @@ impl DeviceRegistry {
                         record.device_id, revoked_by
                     ))
                 })?;
-                if revoker.is_revoked() {
-                    // A Device that has itself been revoked may still hold
-                    // its signing key and try to bar honest Devices. The
-                    // check belongs here, at verification, because a peer
-                    // can inject a revocation this Device produced earlier.
-                    return Err(VaultError::DeviceRegistry(format!(
-                        "Device {} was revoked by revoked Device {}",
-                        record.device_id, revoked_by
-                    )));
-                }
+                // Deliberately do not reject because `revoker` is now revoked.
+                // A revocation may have been signed while the revoker was
+                // still admitted, and the registry stores no trustworthy
+                // ordering between the two events: both timestamps are chosen
+                // by their signers. Rejecting here would invalidate legitimate
+                // history forever and make the shared registry unloadable.
+                // `revoke` still refuses to issue a new revocation from a
+                // revoked Device; the cost is that a malicious revoked Device
+                // can craft and sign one, which peers cannot distinguish from
+                // a historical revocation.
                 verify_signature(
                     &revoker.public_key,
                     &revocation_payload(&record.device_id, revoked_at, revoked_by),
@@ -742,11 +742,105 @@ mod tests {
     }
 
     #[test]
-    fn test_a_revoked_device_cannot_revoke_an_honest_one() {
+    fn test_a_revocation_signed_before_its_signer_was_revoked_stays_valid() {
+        let root = Uuid::from_u128(1);
+        let signer = Uuid::from_u128(2);
+        let target = Uuid::from_u128(3);
+        let root_key = DeviceKeypair::generate();
+        let signer_key = DeviceKeypair::generate();
+        let target_key = DeviceKeypair::generate();
+
+        let mut registry = root_registry(root, &root_key);
+        registry
+            .admit(record(
+                signer,
+                signer_key.public_key(),
+                root,
+                at(2_000),
+                &root_key,
+            ))
+            .unwrap();
+        registry
+            .admit(record(
+                target,
+                target_key.public_key(),
+                root,
+                at(2_100),
+                &root_key,
+            ))
+            .unwrap();
+
+        // The signer is still admitted when it revokes the target.
+        registry
+            .revoke(&target, at(3_000), &signer, &signer_key)
+            .unwrap();
+        assert!(registry.is_revoked(&target));
+        registry.verify().unwrap();
+
+        // Later the signer is itself revoked. That must not retroactively
+        // invalidate the revocation it signed while admitted.
+        registry
+            .revoke(&signer, at(4_000), &root, &root_key)
+            .unwrap();
+
+        assert!(registry.is_revoked(&signer));
+        assert!(registry.is_revoked(&target));
+        registry
+            .verify()
+            .expect("a revocation signed while the signer was admitted must stay valid");
+
+        // The same must hold when the registry is loaded from its bytes.
+        let bytes = serde_json::to_vec(&registry).unwrap();
+        let parsed: DeviceRegistry = serde_json::from_slice(&bytes).unwrap();
+        parsed.verify().unwrap();
+        assert!(parsed.is_revoked(&target));
+        assert!(parsed.is_revoked(&signer));
+    }
+
+    #[test]
+    fn test_concurrent_mutual_revocation_resolves_to_both_revoked() {
+        let root = Uuid::from_u128(1);
+        let joiner = Uuid::from_u128(2);
+        let root_key = DeviceKeypair::generate();
+        let joiner_key = DeviceKeypair::generate();
+
+        let mut from_root = root_registry(root, &root_key);
+        from_root
+            .admit(record(
+                joiner,
+                joiner_key.public_key(),
+                root,
+                at(2_000),
+                &root_key,
+            ))
+            .unwrap();
+        let mut from_joiner = from_root.clone();
+
+        // Each Device revokes the other before it knows about the other's
+        // revocation. Neither signature was issued by an already-revoked
+        // Device, and ADR-0002 §8 says both revocations stand.
+        from_root
+            .revoke(&joiner, at(3_000), &root, &root_key)
+            .unwrap();
+        from_joiner
+            .revoke(&root, at(3_000), &joiner, &joiner_key)
+            .unwrap();
+
+        let merged = from_root.merge(&from_joiner).unwrap();
+
+        assert!(merged.is_revoked(&root));
+        assert!(merged.is_revoked(&joiner));
+        merged.verify().unwrap();
+    }
+
+    #[test]
+    fn test_a_revoked_device_cannot_issue_a_new_revocation() {
         let root = Uuid::from_u128(1);
         let lost = Uuid::from_u128(2);
+        let target = Uuid::from_u128(3);
         let root_key = DeviceKeypair::generate();
         let lost_key = DeviceKeypair::generate();
+        let target_key = DeviceKeypair::generate();
 
         let mut registry = root_registry(root, &root_key);
         registry
@@ -758,31 +852,70 @@ mod tests {
                 &root_key,
             ))
             .unwrap();
+        registry
+            .admit(record(
+                target,
+                target_key.public_key(),
+                root,
+                at(2_100),
+                &root_key,
+            ))
+            .unwrap();
         registry.revoke(&lost, at(3_000), &root, &root_key).unwrap();
 
-        // The revoked Device still holds its signing key. It signs a
-        // revocation of the honest root and a peer forwards it.
-        let mut forged = registry.get(&root).unwrap().clone();
+        let result = registry.revoke(&target, at(4_000), &lost, &lost_key);
+
+        assert!(matches!(result, Err(VaultError::DeviceRegistry(_))));
+        assert!(!registry.is_revoked(&target));
+    }
+
+    #[test]
+    fn test_verification_cannot_order_a_revocation_against_its_signers_revocation() {
+        let root = Uuid::from_u128(1);
+        let signer = Uuid::from_u128(2);
+        let target = Uuid::from_u128(3);
+        let root_key = DeviceKeypair::generate();
+        let signer_key = DeviceKeypair::generate();
+        let target_key = DeviceKeypair::generate();
+
+        let mut registry = root_registry(root, &root_key);
+        registry
+            .admit(record(
+                signer,
+                signer_key.public_key(),
+                root,
+                at(2_000),
+                &root_key,
+            ))
+            .unwrap();
+        registry
+            .admit(record(
+                target,
+                target_key.public_key(),
+                root,
+                at(2_100),
+                &root_key,
+            ))
+            .unwrap();
+        registry
+            .revoke(&signer, at(3_000), &root, &root_key)
+            .unwrap();
+
+        // Craft the same record a revoked Device would produce after its own
+        // revocation. The registry has no trustworthy ordering between this
+        // signature and the signer's revocation (the timestamps are chosen by
+        // the signers), so it cannot distinguish this from a legitimate
+        // revocation signed while the signer was still admitted. Verification
+        // therefore accepts it; the local issuance path still refuses it.
+        let mut forged = registry.get(&target).unwrap().clone();
         forged.revoked_at = Some(at(4_000));
-        forged.revoked_by = Some(lost);
+        forged.revoked_by = Some(signer);
         forged.revocation_signature =
-            Some(lost_key.sign(&revocation_payload(&root, at(4_000), &lost)));
+            Some(signer_key.sign(&revocation_payload(&target, at(4_000), &signer)));
+        registry.devices.insert(target, forged);
 
-        let mut forged_registry = registry.clone();
-        forged_registry.devices.insert(root, forged.clone());
-
-        assert!(
-            matches!(forged_registry.verify(), Err(VaultError::DeviceRegistry(_))),
-            "verification must reject a revocation signed by a revoked Device"
-        );
-        assert!(matches!(
-            registry.admit(forged),
-            Err(VaultError::DeviceRegistry(_))
-        ));
-        assert!(
-            !registry.is_revoked(&root),
-            "the rejected revocation must leave the honest Device unrevoked"
-        );
+        registry.verify().unwrap();
+        assert!(registry.is_revoked(&target));
     }
 
     #[test]

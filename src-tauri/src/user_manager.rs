@@ -539,7 +539,10 @@ fn user_view(local: &DeviceProfile, shared: &SharedProfile) -> User {
 mod tests {
     use super::*;
     use crate::crypto::encrypt;
+    use crate::device::DeviceKeypair;
+    use crate::registry::DeviceRecord;
     use crate::User;
+    use chrono::DateTime;
     use uuid::Uuid;
 
     fn setup() -> PathBuf {
@@ -914,6 +917,67 @@ mod tests {
             manager.get_user(&user.id).is_err(),
             "the UI-facing profile must not be assembled from an unverified registry"
         );
+
+        std::fs::remove_dir_all(temp_dir).ok();
+    }
+
+    #[test]
+    fn test_a_shared_profile_with_a_historical_revocation_still_loads() {
+        let temp_dir = setup();
+        let mut manager = UserManager::new(temp_dir.clone()).unwrap();
+        let user = manager
+            .register("Revocation History".to_string(), "Password")
+            .unwrap();
+
+        let at = |seconds| DateTime::from_timestamp(seconds, 0).unwrap();
+        let root = Uuid::new_v4();
+        let signer = Uuid::new_v4();
+        let target = Uuid::new_v4();
+        let root_key = DeviceKeypair::generate();
+        let signer_key = DeviceKeypair::generate();
+        let target_key = DeviceKeypair::generate();
+
+        let admit = |device_id, public_key, admitted_at, key: &DeviceKeypair| {
+            DeviceRecord::admit(
+                device_id,
+                public_key,
+                "Test Device".to_string(),
+                "windows".to_string(),
+                root,
+                admitted_at,
+                key,
+            )
+        };
+
+        let mut devices = DeviceRegistry::new();
+        devices
+            .admit(admit(root, root_key.public_key(), at(1_000), &root_key))
+            .unwrap();
+        devices
+            .admit(admit(signer, signer_key.public_key(), at(2_000), &root_key))
+            .unwrap();
+        devices
+            .admit(admit(target, target_key.public_key(), at(2_100), &root_key))
+            .unwrap();
+
+        // The signer revokes the target while still admitted, then is itself
+        // revoked by the root.
+        devices
+            .revoke(&target, at(3_000), &signer, &signer_key)
+            .unwrap();
+        devices
+            .revoke(&signer, at(4_000), &root, &root_key)
+            .unwrap();
+
+        let mut shared = manager.get_shared_profile(&user.id).unwrap();
+        shared.devices = devices;
+        manager.save_shared_profile(&shared).unwrap();
+
+        let loaded = manager
+            .get_shared_profile(&user.id)
+            .expect("a legitimate historical revocation must not make the profile unloadable");
+        assert!(loaded.devices.is_revoked(&target));
+        assert!(loaded.devices.is_revoked(&signer));
 
         std::fs::remove_dir_all(temp_dir).ok();
     }
