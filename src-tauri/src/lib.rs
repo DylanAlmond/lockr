@@ -4,6 +4,7 @@ mod crypto;
 mod device;
 mod duplicates;
 mod error;
+mod mdns;
 mod merge;
 mod models;
 mod network;
@@ -15,6 +16,7 @@ use std::sync::Mutex;
 
 pub use duplicates::*;
 pub use error::VaultError;
+pub use mdns::{DiscoverySession, MdnsDiscovery};
 pub use merge::*;
 pub use models::*;
 pub use network::*;
