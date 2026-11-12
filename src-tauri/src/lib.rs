@@ -3,6 +3,7 @@ mod commands;
 mod crypto;
 mod error;
 mod models;
+mod network;
 mod user_manager;
 mod vault_manager;
 
@@ -10,6 +11,7 @@ use std::sync::Mutex;
 
 pub use error::VaultError;
 pub use models::*;
+pub use network::*;
 use tauri::Manager;
 
 use crate::{commands::ManagerState, user_manager::UserManager, vault_manager::VaultManager};
