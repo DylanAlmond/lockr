@@ -145,6 +145,16 @@ A revoked Device can ignore the ban, and it keeps read access to everything it
 already holds. The registry enforces "no honest Device will sync with this DeviceId
 again" — nothing more, and the UI must say exactly that.
 
+**Known limitation: a revocation cannot be ordered against its signer's own
+revocation.** A revocation carries no causal context, so verification cannot tell a
+revocation signed while its signer was still admitted from one forged afterwards by
+a revoked Device. Verification accepts both; the guarantee is limited to issuance —
+the local API will not let a revoked Device sign, but a modified client can. Closing
+this needs a signed causal context in the revocation payload. It is accepted for now
+because the alternative — rejecting every revocation whose signer is later revoked —
+would silently resurrect Devices that were legitimately revoked earlier and make the
+whole registry fail to load.
+
 ### 9. Shared registry, device-local profile
 
 The profile file stops being "the user" and becomes "this Device's view of the
