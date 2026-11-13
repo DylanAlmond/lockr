@@ -339,7 +339,7 @@ impl SharedProfile {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Vault {
     /// On-disk schema version. Files written before versioning omit this
     /// field; serde defaults it to 1 so `unlock_vault` knows to migrate.
@@ -349,6 +349,21 @@ pub struct Vault {
     pub id: VaultId,
     pub name: String,
     pub color: String,
+
+    /// The vault's own lifecycle clock: created, renamed, recoloured. It
+    /// gives the metadata field clocks the same causality as item fields
+    /// without making wall clocks participate in ordering.
+    #[serde(default)]
+    pub clock: VersionVector,
+
+    /// Last writer of this vault's name and colour. They merge per field, so
+    /// a rename on one Device survives a sync with a Device that never
+    /// touched it, and a rename concurrent with a recolour merges cleanly.
+    #[serde(default)]
+    pub name_clock: FieldVersion,
+
+    #[serde(default)]
+    pub color_clock: FieldVersion,
 
     /// All items in the vault, regardless of kind.
     pub items: Vec<VaultItem>,
@@ -395,7 +410,7 @@ impl DismissedDuplicate {
 /// A deleted item survives as a Tombstone: `deleted` is true, `kind` is
 /// `None`, and only identity plus clock are serialized. Clocks are additive
 /// so v2 content (which has neither) still parses.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct VaultItem {
     pub id: ItemId,
 
@@ -419,6 +434,11 @@ pub struct VaultItem {
     /// True for a Tombstone. A live item always carries a `kind`.
     pub deleted: bool,
 
+    /// Set on a content-free move record left in the vault the item left.
+    /// It names the destination so a move is distinguishable from a deletion
+    /// and a stale peer copy in the source vault cannot resurrect the item.
+    pub moved_to: Option<VaultId>,
+
     /// Kind-specific fields, flattened into the item on the wire
     /// (`{"kind": "account", "username": ...}`). `None` for a Tombstone.
     pub kind: Option<ItemKind>,
@@ -427,6 +447,27 @@ pub struct VaultItem {
 impl VaultItem {
     /// A retained, content-free record of a deleted item.
     pub fn tombstone(id: ItemId, vault_id: VaultId, clock: VersionVector) -> Self {
+        Self::content_free(id, vault_id, clock, None)
+    }
+
+    /// A retained, content-free record of an item that moved to another
+    /// vault. It is deliberately *not* a Tombstone: it says "it is over
+    /// there", not "it is gone", which is what lets a move back win.
+    pub fn move_record(
+        id: ItemId,
+        vault_id: VaultId,
+        clock: VersionVector,
+        destination: VaultId,
+    ) -> Self {
+        Self::content_free(id, vault_id, clock, Some(destination))
+    }
+
+    fn content_free(
+        id: ItemId,
+        vault_id: VaultId,
+        clock: VersionVector,
+        moved_to: Option<VaultId>,
+    ) -> Self {
         let epoch = DateTime::from_timestamp(0, 0).expect("unix epoch is valid");
         Self {
             id,
@@ -440,13 +481,26 @@ impl VaultItem {
             updated_at: epoch,
             clock,
             field_clocks: BTreeMap::new(),
-            deleted: true,
+            deleted: moved_to.is_none(),
+            moved_to,
             kind: None,
         }
     }
 
+    /// True for any content-free record: a deleted Tombstone or a move
+    /// record. Such an item is never listed and never carries secrets.
     pub fn is_tombstone(&self) -> bool {
         self.deleted || self.kind.is_none()
+    }
+
+    /// True only for a deletion. A move record is a distinct lifecycle state.
+    pub fn is_deleted(&self) -> bool {
+        self.deleted
+    }
+
+    /// True for the record left behind in the vault an item moved out of.
+    pub fn is_move_record(&self) -> bool {
+        !self.deleted && self.moved_to.is_some()
     }
 
     /// Stamp every mutable field of this item at one `(device, counter)`
@@ -532,9 +586,12 @@ struct LiveVaultItemWire<'a> {
 }
 
 #[derive(Serialize)]
-struct TombstoneVaultItemWire<'a> {
+struct RemovedVaultItemWire<'a> {
     id: &'a ItemId,
     vault_id: &'a VaultId,
+    /// Present only on a move record; absent on a deletion Tombstone.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    moved_to: Option<&'a VaultId>,
     deleted: bool,
     clock: &'a VersionVector,
 }
@@ -563,16 +620,19 @@ struct LiveVaultItemPayload {
     kind: ItemKind,
 }
 
-/// A Tombstone's wire shape. `deny_unknown_fields` is deliberate: a
-/// tombstone with a stray payload would otherwise lose that payload silently,
-/// and a merge must resolve such a copy before serialising it.
+/// A content-free item's wire shape: either a deletion Tombstone or a move
+/// record. `deny_unknown_fields` is deliberate: a record with a stray payload
+/// would otherwise lose that payload silently, and a merge must resolve such
+/// a copy before serialising it.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct TombstoneVaultItemPayload {
+struct RemovedVaultItemPayload {
     id: ItemId,
     vault_id: VaultId,
-    #[allow(dead_code)] // Presence is what matters; the branch already checked it
+    #[serde(default)]
     deleted: bool,
+    #[serde(default)]
+    moved_to: Option<VaultId>,
     #[serde(default)]
     clock: VersionVector,
 }
@@ -583,10 +643,11 @@ impl Serialize for VaultItem {
         S: serde::Serializer,
     {
         if self.is_tombstone() {
-            TombstoneVaultItemWire {
+            RemovedVaultItemWire {
                 id: &self.id,
                 vault_id: &self.vault_id,
-                deleted: true,
+                moved_to: self.moved_to.as_ref(),
+                deleted: self.deleted,
                 clock: &self.clock,
             }
             .serialize(serializer)
@@ -625,39 +686,56 @@ impl<'de> Deserialize<'de> for VaultItem {
             .get("deleted")
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false);
+        let carries_destination = value.get("moved_to").is_some_and(|to| !to.is_null());
 
-        if deleted {
-            let payload: TombstoneVaultItemPayload =
+        if deleted || carries_destination {
+            let payload: RemovedVaultItemPayload =
                 serde_json::from_value(value).map_err(D::Error::custom)?;
-            Ok(VaultItem::tombstone(
-                payload.id,
-                payload.vault_id,
-                payload.clock,
-            ))
-        } else {
-            let payload: LiveVaultItemPayload =
-                serde_json::from_value(value).map_err(D::Error::custom)?;
-            Ok(VaultItem {
-                id: payload.id,
-                vault_id: payload.vault_id,
-                display_name: payload.display_name,
-                favourite: payload.favourite,
-                tags: payload.tags,
-                icon: payload.icon,
-                color: payload.color,
-                created_at: payload.created_at,
-                updated_at: payload.updated_at,
-                clock: payload.clock,
-                field_clocks: payload.field_clocks,
-                deleted: false,
-                kind: Some(payload.kind),
-            })
+
+            return match (payload.deleted, payload.moved_to) {
+                (true, None) => Ok(VaultItem::tombstone(
+                    payload.id,
+                    payload.vault_id,
+                    payload.clock,
+                )),
+                (false, Some(destination)) => Ok(VaultItem::move_record(
+                    payload.id,
+                    payload.vault_id,
+                    payload.clock,
+                    destination,
+                )),
+                (true, Some(_)) => Err(D::Error::custom(
+                    "an item cannot be both deleted and moved out",
+                )),
+                (false, None) => Err(D::Error::custom(
+                    "a content-free item must be deleted or name a move destination",
+                )),
+            };
         }
+
+        let payload: LiveVaultItemPayload =
+            serde_json::from_value(value).map_err(D::Error::custom)?;
+        Ok(VaultItem {
+            id: payload.id,
+            vault_id: payload.vault_id,
+            display_name: payload.display_name,
+            favourite: payload.favourite,
+            tags: payload.tags,
+            icon: payload.icon,
+            color: payload.color,
+            created_at: payload.created_at,
+            updated_at: payload.updated_at,
+            clock: payload.clock,
+            field_clocks: payload.field_clocks,
+            deleted: false,
+            moved_to: None,
+            kind: Some(payload.kind),
+        })
     }
 }
 
 /// The kind of a [`VaultItem`] and its item-specific data.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ItemKind {
     Account(AccountData),
@@ -722,7 +800,7 @@ pub struct IdentityData {
 }
 
 /// One secret field of an [`ItemSecrets`] entry.
-#[derive(Clone, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
+#[derive(Clone, PartialEq, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
 pub struct SecretField {
     pub key: String,
     pub value: String,
@@ -737,7 +815,7 @@ pub struct SecretField {
 /// All secret fields of an item. Stored in the vault blob but never sent to
 /// the UI except through the on-demand secret command. `Debug` is implemented
 /// manually (keys only, never values).
-#[derive(Clone, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
+#[derive(Clone, PartialEq, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
 pub struct ItemSecrets {
     #[zeroize(skip)]
     pub item_id: ItemId,
@@ -846,11 +924,16 @@ impl Vault {
         true
     }
 
-    /// Stamp every item and secret field in a freshly migrated vault with
-    /// this Device at counter 1. Two Devices migrating the same v2 file
-    /// therefore get concurrent clocks rather than identical ones.
+    /// Stamp every item, secret field and the vault metadata in a freshly
+    /// migrated vault with this Device at counter 1. Two Devices migrating
+    /// the same v2 file therefore get concurrent clocks rather than identical
+    /// ones, and the first sync flags whatever actually differs.
     pub fn stamp_migrated_items(&mut self, device_id: DeviceId) {
         let version = FieldVersion::new(device_id, 1);
+
+        self.clock = VersionVector::from_version(device_id, 1);
+        self.name_clock = version;
+        self.color_clock = version;
 
         for item in &mut self.items {
             item.clock = VersionVector::from_version(device_id, 1);
@@ -927,6 +1010,9 @@ impl LegacyVault {
             id: self.id,
             name: self.name.clone(),
             color: self.color.clone(),
+            clock: VersionVector::new(),
+            name_clock: FieldVersion::default(),
+            color_clock: FieldVersion::default(),
             items: self
                 .accounts
                 .iter()
@@ -943,6 +1029,7 @@ impl LegacyVault {
                     clock: VersionVector::new(),
                     field_clocks: BTreeMap::new(),
                     deleted: false,
+                    moved_to: None,
                     kind: Some(ItemKind::Account(AccountData {
                         username: a.username.clone(),
                         email: a.email.clone(),
@@ -1234,6 +1321,7 @@ mod tests {
             clock: VersionVector::new(),
             field_clocks: BTreeMap::new(),
             deleted: false,
+            moved_to: None,
             kind: Some(ItemKind::Account(AccountData {
                 username: username.to_string(),
                 email: Some("dev@example.com".to_string()),
@@ -1250,6 +1338,9 @@ mod tests {
             id: vault_id,
             name: "Round Trip".to_string(),
             color: "#6240BF".to_string(),
+            clock: VersionVector::new(),
+            name_clock: FieldVersion::default(),
+            color_clock: FieldVersion::default(),
             items: vec![item.clone()],
             secrets: vec![ItemSecrets::new(
                 item.id,
@@ -1327,6 +1418,7 @@ mod tests {
             clock,
             field_clocks,
             deleted: false,
+            moved_to: None,
             kind: Some(ItemKind::Account(AccountData {
                 username: "octocat".to_string(),
                 email: Some("dev@example.com".to_string()),
@@ -1338,6 +1430,9 @@ mod tests {
             id: vault_id,
             name: "Round Trip".to_string(),
             color: "#6240BF".to_string(),
+            clock: VersionVector::from_version(device, 1),
+            name_clock: FieldVersion::new(device, 1),
+            color_clock: FieldVersion::new(device, 1),
             items: vec![item],
             secrets: vec![ItemSecrets::new(
                 item_id,
@@ -1352,6 +1447,10 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         let device_key = device.to_string();
         assert_eq!(json["schema_version"], 3);
+        assert_eq!(json["clock"][&device_key], 1);
+        assert_eq!(json["name_clock"]["device"], device_key);
+        assert_eq!(json["name_clock"]["counter"], 1);
+        assert_eq!(json["color_clock"]["device"], device_key);
         assert_eq!(json["items"][0]["kind"], "account");
         assert_eq!(json["items"][0]["clock"][&device_key], 1);
         assert_eq!(
@@ -1366,6 +1465,9 @@ mod tests {
 
         let parsed: Vault = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(parsed.schema_version, 3);
+        assert_eq!(parsed.clock.get(&device), 1);
+        assert_eq!(parsed.name_clock, FieldVersion::new(device, 1));
+        assert_eq!(parsed.color_clock, FieldVersion::new(device, 1));
         let parsed_item = &parsed.items[0];
         assert_eq!(parsed_item.clock.get(&device), 1);
         assert_eq!(
@@ -1411,9 +1513,13 @@ mod tests {
 
         let parsed: Vault = serde_json::from_str(&raw).unwrap();
         assert_eq!(parsed.schema_version, 2);
+        assert!(parsed.clock.is_empty());
+        assert_eq!(parsed.name_clock, FieldVersion::default());
+        assert_eq!(parsed.color_clock, FieldVersion::default());
         assert!(!parsed.items[0].is_tombstone());
         assert!(parsed.items[0].clock.is_empty());
         assert!(parsed.items[0].field_clocks.is_empty());
+        assert_eq!(parsed.items[0].moved_to, None);
         assert_eq!(parsed.secrets[0].fields[0].clock, FieldVersion::default());
         assert_eq!(
             parsed.items[0].kind.as_ref().unwrap().as_account().unwrap().username,
@@ -1450,6 +1556,56 @@ mod tests {
         assert!(parsed.is_tombstone());
         assert_eq!(parsed.id, item_id);
         assert_eq!(parsed.clock.get(&device), 2);
+    }
+
+    #[test]
+    fn test_move_record_round_trips_identity_clock_and_destination() {
+        let device = Uuid::from_u128(7);
+        let vault_id = Uuid::new_v4();
+        let destination = Uuid::new_v4();
+        let item_id = Uuid::new_v4();
+
+        let record = VaultItem::move_record(
+            item_id,
+            vault_id,
+            VersionVector::from_version(device, 2),
+            destination,
+        );
+
+        let json = serde_json::to_value(&record).unwrap();
+        assert_eq!(json["id"], item_id.to_string());
+        assert_eq!(json["vault_id"], vault_id.to_string());
+        assert_eq!(json["moved_to"], destination.to_string());
+        assert_eq!(json["deleted"], false);
+        assert_eq!(json["clock"][&device.to_string()], 2);
+        assert!(json.get("kind").is_none());
+        assert!(json.get("display_name").is_none());
+
+        let parsed: VaultItem = serde_json::from_value(json).unwrap();
+        assert!(parsed.is_move_record());
+        assert!(!parsed.is_deleted(), "a move record is not a Tombstone");
+        assert_eq!(parsed.id, item_id);
+        assert_eq!(parsed.moved_to, Some(destination));
+        assert_eq!(parsed.clock.get(&device), 2);
+    }
+
+    #[test]
+    fn test_a_record_cannot_be_both_deleted_and_moved() {
+        let vault_id = Uuid::new_v4();
+        let item_id = Uuid::new_v4();
+        let destination = Uuid::new_v4();
+
+        let raw = format!(
+            r##"{{
+                "id": "{item_id}",
+                "vault_id": "{vault_id}",
+                "deleted": true,
+                "moved_to": "{destination}",
+                "clock": {{}}
+            }}"##
+        );
+
+        assert!(serde_json::from_str::<VaultItem>(&raw).is_err());
     }
 
     #[test]

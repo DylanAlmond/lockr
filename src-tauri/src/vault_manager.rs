@@ -292,11 +292,16 @@ impl VaultManager {
             std::fs::create_dir_all(&self.vaults_dir)?;
         }
 
+        let device = self.device_id;
         let vault = Vault {
             schema_version: CURRENT_SCHEMA_VERSION,
             id: Uuid::new_v4(),
             name: name,
             color,
+            // The creator is the first writer of both metadata fields.
+            clock: VersionVector::from_version(device, 1),
+            name_clock: FieldVersion::new(device, 1),
+            color_clock: FieldVersion::new(device, 1),
             items: Vec::new(),
             secrets: Vec::new(),
             duplicate_dismissals: Vec::new(),
@@ -509,6 +514,10 @@ impl VaultManager {
 
     /// Update a specific vault's metadata. Saves immediately if autosave
     /// is enabled; otherwise marks dirty.
+    ///
+    /// Name and colour are independent fields with their own last-writer
+    /// versions, so a rename and a recolour made on different Devices merge
+    /// instead of one silently discarding the other.
     pub fn update_vault(
         &mut self,
         vault_id: VaultId,
@@ -516,12 +525,17 @@ impl VaultManager {
         color: Option<String>,
     ) -> Result<(), VaultError> {
         {
+            let device = self.device_id;
             let vault = self.get_vault_mut(vault_id)?;
             if let Some(n) = name {
+                let counter = vault.clock.increment(device);
                 vault.name = n;
+                vault.name_clock = FieldVersion::new(device, counter);
             }
             if let Some(c) = color {
+                let counter = vault.clock.increment(device);
                 vault.color = c;
+                vault.color_clock = FieldVersion::new(device, counter);
             }
         }
 
@@ -655,6 +669,7 @@ impl VaultManager {
             clock: item_clock,
             field_clocks: Default::default(),
             deleted: false,
+            moved_to: None,
             kind: Some(kind),
         };
         item.stamp_all_fields(device, counter);
@@ -874,15 +889,36 @@ impl VaultManager {
             // A move is a lifecycle event on the same identity: preserve the
             // id and record the event by advancing the item's clock.
             item.clock.increment(device);
+
+            // Leave a causal record in the source vault naming the
+            // destination. Without it a peer still holding this copy would
+            // see a live item against absence and resurrect a duplicate in
+            // both vaults. It is not a Tombstone: moving back must be able to
+            // win over it.
+            source.items.retain(|existing| existing.id != item.id);
+            source.items.push(VaultItem::move_record(
+                item.id,
+                vault_id,
+                item.clock.clone(),
+                target_vault_id,
+            ));
+
             item.vault_id = target_vault_id;
             item.updated_at = Utc::now();
 
             (item, secret)
         };
 
-        // Insert into the target vault with the secret entry remapped
+        // Insert into the target vault with the secret entry remapped. An old
+        // move record for this identity may already be here from a previous
+        // move out; the live item replaces it, so one identity never has two
+        // entries in one vault.
         {
             let target = self.get_vault_mut(target_vault_id)?;
+            target.items.retain(|existing| existing.id != item.id);
+            target
+                .secrets
+                .retain(|existing| existing.item_id != item.id);
             if let Some(secret) = secret.as_mut() {
                 secret.item_id = item.id;
                 target.secrets.push(secret.clone());
@@ -1405,6 +1441,9 @@ mod tests {
 
         // The migrated content is stamped by this installation's Device.
         let device = manager.device_id();
+        assert_eq!(migrated.clock.get(&device), 1);
+        assert_eq!(migrated.name_clock, FieldVersion::new(device, 1));
+        assert_eq!(migrated.color_clock, FieldVersion::new(device, 1));
         let item = &migrated.items[0];
         assert_eq!(item.clock.get(&device), 1);
         assert_eq!(
@@ -1474,6 +1513,18 @@ mod tests {
             ClockOrder::Concurrent,
             "independently migrated copies must not look identical"
         );
+
+        // Vault metadata is stamped the same way, so a later rename on one
+        // Device is causally after the migration it saw.
+        assert_eq!(
+            first_vault.name_clock,
+            FieldVersion::new(first.device_id(), 1)
+        );
+        assert_eq!(
+            second_vault.name_clock,
+            FieldVersion::new(second.device_id(), 1)
+        );
+        assert_ne!(first_vault.name_clock, second_vault.name_clock);
     }
 
     #[test]
@@ -2393,7 +2444,9 @@ mod tests {
             .unwrap()
             .items
             .iter()
-            .all(|i| i.id != note_id));
+            .find(|i| i.id == note_id)
+            .is_some_and(|record| record.is_move_record() && record.moved_to == Some(vault_b.id)),
+            "the source vault keeps only a move record for the item");
 
         // Move the account: its secret must be remapped, not dropped
         let moved_account = manager.move_item(vault_a.id, account_id, vault_b.id).unwrap();
@@ -2409,7 +2462,15 @@ mod tests {
         assert_eq!(secret.as_deref(), Some("hunter2"), "secret entry must move with the item");
 
         let vault_ref = manager.get_vault(vault_a.id).unwrap();
-        assert!(vault_ref.items.is_empty(), "source vault is emptied out");
+        assert!(
+            vault_ref.items.iter().all(|item| item.is_move_record()),
+            "the source vault keeps move records, not live items"
+        );
+        assert_eq!(vault_ref.items.len(), 2, "one record per moved item");
+        assert!(vault_ref
+            .items
+            .iter()
+            .all(|item| item.moved_to == Some(vault_b.id)));
         assert!(vault_ref.secrets.is_empty());
     }
 
@@ -2576,7 +2637,12 @@ mod tests {
 
         let moved = manager.move_item(vault_a.id, identity_id, vault_b.id).unwrap();
         assert!(matches!(moved, crate::SafeItem::Identity(_)));
-        assert_eq!(manager.get_vault(vault_a.id).unwrap().items.len(), 0);
+        assert_eq!(
+            manager.get_vault(vault_a.id).unwrap().items.len(),
+            1,
+            "the source vault keeps a move record"
+        );
+        assert!(manager.get_vault(vault_a.id).unwrap().items[0].is_move_record());
 
         let new_id = match &moved {
             crate::SafeItem::Identity(i) => i.id,
@@ -3204,6 +3270,74 @@ mod tests {
         }));
     }
 
+    fn two_managers_with_vaults(names: &[&str]) -> (VaultManager, VaultManager, Vec<VaultId>) {
+        let first_dir = setup();
+        let second_dir = setup();
+
+        let mut first = VaultManager::new(first_dir.clone()).unwrap();
+        let ids: Vec<VaultId> = names
+            .iter()
+            .map(|name| {
+                first
+                    .create_vault((*name).to_string(), "#6240BF".to_string(), MASTER_PW, &KEY)
+                    .unwrap()
+                    .id
+            })
+            .collect();
+        first.lock_vault(None);
+
+        let second_vaults = second_dir.join("vaults");
+        std::fs::create_dir_all(&second_vaults).unwrap();
+        for vault_id in &ids {
+            copy_vault_file(&first_dir, &second_dir, *vault_id);
+        }
+
+        let mut second = VaultManager::new(second_dir).unwrap();
+        for vault_id in &ids {
+            first.unlock_vault(*vault_id, MASTER_PW, &KEY).unwrap();
+            second.unlock_vault(*vault_id, MASTER_PW, &KEY).unwrap();
+        }
+
+        (first, second, ids)
+    }
+
+    /// Whole-file exchange reduced to its observable result: both managers
+    /// compute the same merge and adopt it, exactly as a sync would.
+    fn sync_vault(first: &mut VaultManager, second: &mut VaultManager, vault_id: VaultId) {
+        let merged = match crate::merge_vaults(
+            first.get_vault(vault_id).unwrap(),
+            second.get_vault(vault_id).unwrap(),
+        )
+        .expect("both copies belong to the same vault")
+        {
+            crate::MergeOutcome::Merged(vault) => vault,
+            crate::MergeOutcome::Conflicts(report) => {
+                panic!("expected a clean sync, got {:?}", report.conflicts)
+            }
+        };
+
+        first.unlocked_vaults.get_mut(&vault_id).unwrap().vault = merged.clone();
+        second.unlocked_vaults.get_mut(&vault_id).unwrap().vault = merged;
+    }
+
+    fn live_items_with_id(manager: &VaultManager, item_id: ItemId) -> Vec<SafeItem> {
+        manager
+            .get_all_items(ItemFilter::default())
+            .unwrap()
+            .into_iter()
+            .filter(|item| safe_item_id(item) == item_id)
+            .collect()
+    }
+
+    fn safe_item_vault_id(item: &SafeItem) -> VaultId {
+        match item {
+            SafeItem::Account(view) => view.vault_id,
+            SafeItem::Card(view) => view.vault_id,
+            SafeItem::Note(view) => view.vault_id,
+            SafeItem::Identity(view) => view.vault_id,
+        }
+    }
+
     fn two_managers_sharing_a_vault() -> (
         VaultManager,
         VaultManager,
@@ -3235,6 +3369,124 @@ mod tests {
         let source = from.join("vaults").join(format!("{}.vault", vault_id));
         let target = to.join("vaults").join(format!("{}.vault", vault_id));
         std::fs::write(target, std::fs::read(source).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn test_vault_metadata_edits_tick_only_the_field_they_change() {
+        let temp_dir = setup();
+        let mut manager = VaultManager::new(temp_dir.clone()).unwrap();
+        let device = manager.device_id();
+        let created = manager
+            .create_vault(
+                "Original".to_string(),
+                "#6240BF".to_string(),
+                MASTER_PW,
+                &KEY,
+            )
+            .unwrap();
+
+        {
+            let vault = manager.get_vault(created.id).unwrap();
+            assert_eq!(vault.name_clock, FieldVersion::new(device, 1));
+            assert_eq!(vault.color_clock, FieldVersion::new(device, 1));
+            assert_eq!(vault.clock.get(&device), 1);
+        }
+
+        manager
+            .update_vault(created.id, Some("Renamed".to_string()), None)
+            .unwrap();
+        {
+            let vault = manager.get_vault(created.id).unwrap();
+            assert_eq!(vault.name, "Renamed");
+            assert_eq!(vault.name_clock, FieldVersion::new(device, 2));
+            assert_eq!(
+                vault.color_clock,
+                FieldVersion::new(device, 1),
+                "a rename must not restamp the colour"
+            );
+        }
+
+        manager
+            .update_vault(created.id, None, Some("#FF0000".to_string()))
+            .unwrap();
+        {
+            let vault = manager.get_vault(created.id).unwrap();
+            assert_eq!(vault.color, "#FF0000");
+            assert_eq!(vault.name_clock, FieldVersion::new(device, 2));
+            assert_eq!(vault.color_clock, FieldVersion::new(device, 3));
+        }
+    }
+
+    #[test]
+    fn test_vault_rename_survives_a_sync_with_the_untouched_device() {
+        let (mut first, mut second, vault_id, _, _) = two_managers_sharing_a_vault();
+
+        first
+            .update_vault(vault_id, Some("Renamed".to_string()), None)
+            .unwrap();
+        sync_vault(&mut first, &mut second, vault_id);
+
+        for manager in [&first, &second] {
+            let vault = manager.get_vault(vault_id).unwrap();
+            assert_eq!(
+                vault.name, "Renamed",
+                "the untouched Device must adopt the rename, not its own old pair"
+            );
+            assert_eq!(vault.color, "#6240BF");
+        }
+    }
+
+    #[test]
+    fn test_concurrent_vault_rename_and_recolour_sync_without_losing_either() {
+        let (mut first, mut second, vault_id, _, _) = two_managers_sharing_a_vault();
+
+        first
+            .update_vault(vault_id, Some("Renamed".to_string()), None)
+            .unwrap();
+        second
+            .update_vault(vault_id, None, Some("#FF0000".to_string()))
+            .unwrap();
+
+        sync_vault(&mut first, &mut second, vault_id);
+
+        for manager in [&first, &second] {
+            let vault = manager.get_vault(vault_id).unwrap();
+            assert_eq!(vault.name, "Renamed");
+            assert_eq!(vault.color, "#FF0000");
+        }
+    }
+
+    #[test]
+    fn test_concurrent_vault_renames_surface_a_vault_conflict() {
+        let (mut first, mut second, vault_id, _, _) = two_managers_sharing_a_vault();
+
+        first
+            .update_vault(vault_id, Some("First name".to_string()), None)
+            .unwrap();
+        second
+            .update_vault(vault_id, Some("Second name".to_string()), None)
+            .unwrap();
+
+        let report = match crate::merge_vaults(
+            first.get_vault(vault_id).unwrap(),
+            second.get_vault(vault_id).unwrap(),
+        )
+        .unwrap()
+        {
+            crate::MergeOutcome::Conflicts(report) => report,
+            crate::MergeOutcome::Merged(_) => panic!("a concurrent rename must conflict"),
+        };
+
+        assert_eq!(report.conflicts.len(), 1);
+        let conflict = &report.conflicts[0];
+        assert!(conflict.is_vault_metadata());
+        assert_eq!(conflict.field_key, "name");
+        let devices: std::collections::BTreeSet<_> =
+            conflict.sides.iter().map(|side| side.device).collect();
+        assert_eq!(
+            devices,
+            std::collections::BTreeSet::from([first.device_id(), second.device_id()])
+        );
     }
 
     #[test]
@@ -3819,6 +4071,270 @@ mod tests {
             clock_before.get(&device) + 1,
             "move advances the lifecycle clock on the same identity"
         );
+    }
+
+    #[test]
+    fn test_move_leaves_a_causal_record_naming_the_destination() {
+        let temp_dir = setup();
+        let mut manager = VaultManager::new(temp_dir.clone()).unwrap();
+        let vault_a = manager
+            .create_vault("A".to_string(), "#6240BF".to_string(), MASTER_PW, &KEY)
+            .unwrap();
+        let vault_b = manager
+            .create_vault("B".to_string(), "#6240BF".to_string(), MASTER_PW, &KEY)
+            .unwrap();
+        let device = manager.device_id();
+
+        let account = add_test_account_item(&mut manager, vault_a.id, "octocat", "hunter2");
+        let account_id = safe_item_id(&account);
+        manager
+            .move_item(vault_a.id, account_id, vault_b.id)
+            .unwrap();
+
+        // The source vault keeps a content-free record that names where the
+        // item went, so a peer still holding the old copy cannot resurrect it
+        // and so a move is distinguishable from a deletion.
+        let source = manager.get_vault(vault_a.id).unwrap();
+        let record = source
+            .items
+            .iter()
+            .find(|item| item.id == account_id)
+            .expect("the source vault keeps a move record");
+        assert!(record.kind.is_none(), "a move record carries no content");
+        assert!(!record.deleted, "moving out of a vault is not a deletion");
+        assert_eq!(record.moved_to, Some(vault_b.id));
+        assert!(record.display_name.is_none());
+        assert!(record.field_clocks.is_empty());
+        assert_eq!(record.clock.get(&device), 2);
+        assert!(source
+            .secrets
+            .iter()
+            .all(|entry| entry.item_id != account_id));
+
+        // It never appears as a live item in the source vault.
+        assert!(manager
+            .get_all_items(ItemFilter {
+                vault_id: Some(vault_a.id),
+                ..Default::default()
+            })
+            .unwrap()
+            .iter()
+            .all(|item| safe_item_id(item) != account_id));
+        assert!(manager
+            .get_vault(vault_b.id)
+            .unwrap()
+            .items
+            .iter()
+            .any(|item| item.id == account_id && !item.is_tombstone()));
+    }
+
+    #[test]
+    fn test_moving_back_leaves_one_record_per_vault() {
+        let temp_dir = setup();
+        let mut manager = VaultManager::new(temp_dir.clone()).unwrap();
+        let vault_a = manager
+            .create_vault("A".to_string(), "#6240BF".to_string(), MASTER_PW, &KEY)
+            .unwrap();
+        let vault_b = manager
+            .create_vault("B".to_string(), "#6240BF".to_string(), MASTER_PW, &KEY)
+            .unwrap();
+
+        let note = add_test_note(&mut manager, vault_a.id, "Recipe", "Body");
+        let item_id = safe_item_id(&note);
+
+        manager.move_item(vault_a.id, item_id, vault_b.id).unwrap();
+        manager.move_item(vault_b.id, item_id, vault_a.id).unwrap();
+
+        for vault_id in [vault_a.id, vault_b.id] {
+            let vault = manager.get_vault(vault_id).unwrap();
+            let records: Vec<_> = vault
+                .items
+                .iter()
+                .filter(|item| item.id == item_id)
+                .collect();
+            assert_eq!(
+                records.len(),
+                1,
+                "an identity has exactly one record per vault after moving back"
+            );
+
+            if vault_id == vault_a.id {
+                assert!(!records[0].is_tombstone(), "the item is live here again");
+            } else {
+                assert!(records[0].is_move_record());
+                assert_eq!(records[0].moved_to, Some(vault_a.id));
+            }
+        }
+        assert!(manager
+            .get_vault(vault_a.id)
+            .unwrap()
+            .items
+            .iter()
+            .any(|item| item.id == item_id && !item.is_tombstone()));
+    }
+
+    #[test]
+    fn test_syncing_a_move_with_a_peer_holding_the_source_copy_leaves_one_live_copy() {
+        let (mut first, mut second, ids) = two_managers_with_vaults(&["A", "B"]);
+        let (source, destination) = (ids[0], ids[1]);
+
+        let account = add_test_account_item(&mut first, source, "octocat", "hunter2");
+        let item_id = safe_item_id(&account);
+
+        first.move_item(source, item_id, destination).unwrap();
+        // The peer still holds the pre-move live copy in the source vault.
+        sync_vault(&mut first, &mut second, source);
+        sync_vault(&mut first, &mut second, destination);
+
+        for manager in [&first, &second] {
+            let live = live_items_with_id(manager, item_id);
+            assert_eq!(
+                live.len(),
+                1,
+                "the same identity must not exist live in both vaults"
+            );
+            assert_eq!(safe_item_vault_id(&live[0]), destination);
+
+            let source_vault = manager.get_vault(source).unwrap();
+            assert!(
+                source_vault.items.iter().any(|item| item.id == item_id
+                    && item.is_move_record()
+                    && item.moved_to == Some(destination)),
+                "the source vault records where the item went"
+            );
+            assert!(source_vault
+                .secrets
+                .iter()
+                .all(|entry| entry.item_id != item_id));
+            assert_eq!(
+                manager
+                    .get_item_secret(destination, item_id, SECRET_FIELD_PASSWORD)
+                    .unwrap()
+                    .as_deref(),
+                Some("hunter2"),
+                "the secret travels with the item exactly once"
+            );
+        }
+    }
+
+    #[test]
+    fn test_move_back_after_a_sync_converges_to_one_live_copy() {
+        let (mut first, mut second, ids) = two_managers_with_vaults(&["A", "B"]);
+        let (source, destination) = (ids[0], ids[1]);
+
+        let account = add_test_account_item(&mut first, source, "octocat", "hunter2");
+        let item_id = safe_item_id(&account);
+
+        first.move_item(source, item_id, destination).unwrap();
+        sync_vault(&mut first, &mut second, source);
+        sync_vault(&mut first, &mut second, destination);
+
+        // The other Device moves it back after that sync.
+        second.move_item(destination, item_id, source).unwrap();
+        sync_vault(&mut first, &mut second, destination);
+        sync_vault(&mut first, &mut second, source);
+
+        for manager in [&first, &second] {
+            let live = live_items_with_id(manager, item_id);
+            assert_eq!(live.len(), 1, "moving back must converge, not duplicate");
+            assert_eq!(safe_item_vault_id(&live[0]), source);
+
+            let destination_vault = manager.get_vault(destination).unwrap();
+            assert!(
+                destination_vault.items.iter().any(|item| item.id == item_id
+                    && item.is_move_record()
+                    && item.moved_to == Some(source)),
+                "the destination records the move back"
+            );
+            assert!(manager
+                .get_vault(source)
+                .unwrap()
+                .items
+                .iter()
+                .any(|item| item.id == item_id && !item.is_tombstone()));
+        }
+    }
+
+    #[test]
+    fn test_moving_after_a_sync_converges_to_one_live_copy() {
+        let (mut first, mut second, ids) = two_managers_with_vaults(&["A", "B", "C"]);
+        let (first_vault, second_vault, third_vault) = (ids[0], ids[1], ids[2]);
+
+        let note = add_test_note(&mut first, first_vault, "Recipe", "Body");
+        let item_id = safe_item_id(&note);
+
+        first.move_item(first_vault, item_id, second_vault).unwrap();
+        sync_vault(&mut first, &mut second, first_vault);
+        sync_vault(&mut first, &mut second, second_vault);
+
+        // Move again, from the Device that learned about the first move by
+        // syncing rather than by performing it.
+        second
+            .move_item(second_vault, item_id, third_vault)
+            .unwrap();
+        sync_vault(&mut first, &mut second, second_vault);
+        sync_vault(&mut first, &mut second, third_vault);
+
+        for manager in [&first, &second] {
+            let live = live_items_with_id(manager, item_id);
+            assert_eq!(live.len(), 1, "a second move must not duplicate");
+            assert_eq!(safe_item_vault_id(&live[0]), third_vault);
+            for source in [first_vault, second_vault] {
+                assert!(manager
+                    .get_vault(source)
+                    .unwrap()
+                    .items
+                    .iter()
+                    .all(|item| item.id != item_id || item.is_move_record()));
+            }
+        }
+    }
+
+    #[test]
+    fn test_deleting_after_a_move_reaches_the_source_vault() {
+        let (mut first, mut second, ids) = two_managers_with_vaults(&["A", "B"]);
+        let (source, destination) = (ids[0], ids[1]);
+
+        let account = add_test_account_item(&mut first, source, "octocat", "hunter2");
+        let item_id = safe_item_id(&account);
+
+        first.move_item(source, item_id, destination).unwrap();
+        sync_vault(&mut first, &mut second, source);
+        sync_vault(&mut first, &mut second, destination);
+
+        // Delete it in the vault it moved to, then sync both vaults.
+        first.delete_item(destination, item_id).unwrap();
+        sync_vault(&mut first, &mut second, destination);
+        sync_vault(&mut first, &mut second, source);
+
+        for manager in [&first, &second] {
+            assert!(
+                live_items_with_id(manager, item_id).is_empty(),
+                "a deletion after a move must not be undone by the source copy"
+            );
+            assert!(matches!(
+                manager.get_item_by_id(item_id),
+                Err(VaultError::ItemNotFound(_))
+            ));
+            assert!(
+                manager
+                    .get_vault(destination)
+                    .unwrap()
+                    .items
+                    .iter()
+                    .any(|item| item.id == item_id && item.is_deleted()),
+                "the deletion is retained as a Tombstone in the destination"
+            );
+            assert!(
+                manager
+                    .get_vault(source)
+                    .unwrap()
+                    .items
+                    .iter()
+                    .all(|item| item.id != item_id || !item.is_deleted()),
+                "the source vault's record still says 'moved', not 'deleted'"
+            );
+        }
     }
 
     #[test]

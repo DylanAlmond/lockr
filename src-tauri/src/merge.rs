@@ -11,8 +11,15 @@
 //! instead of being silently resolved. A Tombstone always wins, so a deleted
 //! Item cannot resurrect from a stale live copy.
 //!
-//! Conflict payloads follow the Safe View Pattern: they name the Item, the
-//! field key, and both writers, but a secret field's value is always withheld.
+//! A move is a lifecycle state of its own, not a deletion: the vault the item
+//! left keeps a content-free record naming the destination. That record beats
+//! the stale live copy a peer may still hold (so a move cannot duplicate the
+//! identity across vaults), while a causally later live copy — a move back —
+//! beats it.
+//!
+//! Conflict payloads follow the Safe View Pattern: they name the Item (or the
+//! Vault), the field key, and both writers, but a secret field's value is
+//! always withheld.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -23,6 +30,16 @@ use crate::{
     allowed_secret_keys, item_field_keys, ClockOrder, DeviceId, FieldVersion, ItemId, ItemKind,
     ItemSecrets, SecretField, Vault, VaultId, VaultItem, VersionVector,
 };
+
+/// Why two vault copies cannot be merged.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum MergeError {
+    /// The copies name different vaults. Merging them would silently
+    /// relabel one vault's contents as the other's; replication must never
+    /// be able to do that, so this is refused rather than resolved.
+    #[error("cannot merge vaults with different ids: {left} and {right}")]
+    VaultIdMismatch { left: VaultId, right: VaultId },
+}
 
 /// The result of merging two copies of a vault.
 #[derive(Debug, Clone)]
@@ -43,7 +60,8 @@ pub struct ConflictReport {
     /// deterministic preview and must not be persisted until resolved.
     pub merged: Vault,
 
-    /// One entry per contested field, ordered by Item and field key.
+    /// One entry per contested field: Item fields ordered by Item and field
+    /// key, followed by any Vault metadata fields.
     pub conflicts: Vec<Conflict>,
 }
 
@@ -52,12 +70,11 @@ pub struct ConflictReport {
 /// Safe to send to the UI: secret values are never present in `value`.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Conflict {
-    pub item_id: ItemId,
+    /// What the contested field belongs to: one Item, or the Vault itself.
+    #[serde(flatten)]
+    pub scope: ConflictScope,
 
-    /// Display name of the Item, for the prompt. It is a safe view field.
-    pub item_display_name: Option<String>,
-
-    /// The wire field key, e.g. `password` or `display_name`.
+    /// The wire field key, e.g. `password`, `display_name` or `name`.
     pub field_key: String,
 
     /// True when the contested field is a secret. In that case both sides'
@@ -67,6 +84,36 @@ pub struct Conflict {
     /// Both writers, ordered canonically so either Device reports the same
     /// conflict.
     pub sides: [ConflictSide; 2],
+}
+
+impl Conflict {
+    /// The Item this conflict belongs to, or `None` for vault metadata.
+    pub fn item_id(&self) -> Option<ItemId> {
+        match &self.scope {
+            ConflictScope::Item { item_id, .. } => Some(*item_id),
+            ConflictScope::Vault => None,
+        }
+    }
+
+    /// Whether this conflict is about the Vault's own name or colour.
+    pub fn is_vault_metadata(&self) -> bool {
+        self.scope == ConflictScope::Vault
+    }
+}
+
+/// The owner of a contested field.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "scope", rename_all = "snake_case")]
+pub enum ConflictScope {
+    Item {
+        item_id: ItemId,
+
+        /// Display name of the Item, for the prompt. It is a safe view field.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        display_name: Option<String>,
+    },
+
+    Vault,
 }
 
 /// The provenance of one side of a [`Conflict`].
@@ -136,6 +183,76 @@ struct FieldMerge {
     conflict: Option<[ConflictSide; 2]>,
 }
 
+/// The clean result of reconciling one vault metadata field, or the conflict
+/// it produced.
+struct VaultFieldMerge {
+    value: String,
+    version: FieldVersion,
+    conflict: Option<[ConflictSide; 2]>,
+}
+
+/// Merge one of the Vault's own fields. Vault fields are simple values, so
+/// this mirrors [`merge_field`] without the optional/secret variants.
+fn merge_vault_field(
+    left_value: &str,
+    left_version: FieldVersion,
+    left_clock: &VersionVector,
+    right_value: &str,
+    right_version: FieldVersion,
+    right_clock: &VersionVector,
+) -> VaultFieldMerge {
+    if left_value == right_value {
+        return VaultFieldMerge {
+            value: left_value.to_string(),
+            version: join_versions(left_version, right_version),
+            conflict: None,
+        };
+    }
+
+    let left_side = ConflictSide {
+        device: left_version.device,
+        counter: left_version.counter,
+        value: Some(Value::String(left_value.to_string())),
+    };
+    let right_side = ConflictSide {
+        device: right_version.device,
+        counter: right_version.counter,
+        value: Some(Value::String(right_value.to_string())),
+    };
+
+    match choose_side(left_clock, left_version, right_clock, right_version) {
+        Some(true) => VaultFieldMerge {
+            value: left_value.to_string(),
+            version: left_version,
+            conflict: None,
+        },
+        Some(false) => VaultFieldMerge {
+            value: right_value.to_string(),
+            version: right_version,
+            conflict: None,
+        },
+        None => {
+            let left_is_first = side_sort_key(&left_side) <= side_sort_key(&right_side);
+            let (value, version, first, second) = if left_is_first {
+                (left_value.to_string(), left_version, left_side, right_side)
+            } else {
+                (
+                    right_value.to_string(),
+                    right_version,
+                    right_side,
+                    left_side,
+                )
+            };
+
+            VaultFieldMerge {
+                value,
+                version,
+                conflict: Some([first, second]),
+            }
+        }
+    }
+}
+
 /// One Item reconciled with its optional secret entry.
 struct MergedItem {
     item: VaultItem,
@@ -145,13 +262,24 @@ struct MergedItem {
 
 /// Merge two copies of the same vault.
 ///
+/// Refuses copies that name different vault ids: a merge is only meaningful
+/// for two copies of one identity, and replication must never relabel one
+/// vault under another's id.
+///
 /// The function is commutative and associative for clean merges, and reports
 /// the same conflict set whichever way round its arguments are passed.
-pub fn merge_vaults(left: &Vault, right: &Vault) -> MergeOutcome {
+pub fn merge_vaults(left: &Vault, right: &Vault) -> Result<MergeOutcome, MergeError> {
+    if left.id != right.id {
+        return Err(MergeError::VaultIdMismatch {
+            left: left.id,
+            right: right.id,
+        });
+    }
+
     // The common idempotent case: hand back the input untouched, preserving
     // its item order exactly.
     if vaults_are_identical(left, right) {
-        return MergeOutcome::Merged(left.clone());
+        return Ok(MergeOutcome::Merged(left.clone()));
     }
 
     let left_items = index_items(left);
@@ -197,25 +325,47 @@ pub fn merge_vaults(left: &Vault, right: &Vault) -> MergeOutcome {
         conflicts.extend(merged.conflicts);
     }
 
-    // Vault metadata has no clock in schema v3, so choose a whole label pair
-    // deterministically rather than mixing the two sides.
-    let (name, color) = if (&left.name, &left.color) <= (&right.name, &right.color) {
-        (left.name.clone(), left.color.clone())
-    } else {
-        (right.name.clone(), right.color.clone())
-    };
+    // Vault metadata merges per field, exactly like an item's fields. A
+    // rename on one Device therefore survives a sync with a Device that never
+    // touched it, and a rename concurrent with a recolour keeps both.
+    let name = merge_vault_field(
+        &left.name,
+        left.name_clock,
+        &left.clock,
+        &right.name,
+        right.name_clock,
+        &right.clock,
+    );
+    let color = merge_vault_field(
+        &left.color,
+        left.color_clock,
+        &left.clock,
+        &right.color,
+        right.color_clock,
+        &right.clock,
+    );
+    for (field_key, sides) in [("name", &name.conflict), ("color", &color.conflict)] {
+        if let Some(sides) = sides {
+            conflicts.push(Conflict {
+                scope: ConflictScope::Vault,
+                field_key: field_key.to_string(),
+                is_secret: false,
+                sides: sides.clone(),
+            });
+        }
+    }
 
-    let vault_id = if left.id == right.id {
-        left.id
-    } else {
-        left.id.min(right.id)
-    };
+    let mut vault_clock = left.clock.clone();
+    vault_clock.merge(&right.clock);
 
     let merged = Vault {
         schema_version: left.schema_version.max(right.schema_version),
-        id: vault_id,
-        name,
-        color,
+        id: left.id,
+        name: name.value,
+        color: color.value,
+        clock: vault_clock,
+        name_clock: name.version,
+        color_clock: color.version,
         items,
         secrets,
         // A decision is a set of pairs, so reconciling two Devices is a
@@ -227,9 +377,12 @@ pub fn merge_vaults(left: &Vault, right: &Vault) -> MergeOutcome {
     };
 
     if conflicts.is_empty() {
-        MergeOutcome::Merged(merged)
+        Ok(MergeOutcome::Merged(merged))
     } else {
-        MergeOutcome::Conflicts(ConflictReport { merged, conflicts })
+        Ok(MergeOutcome::Conflicts(ConflictReport {
+            merged,
+            conflicts,
+        }))
     }
 }
 
@@ -253,11 +406,11 @@ fn union_dismissals(
     union
 }
 
+/// Structural equality, compared in place. Secrets are compared by reference
+/// and never serialised into a temporary plaintext buffer, so an identical
+/// merge cannot create an un-zeroized copy of a password.
 fn vaults_are_identical(left: &Vault, right: &Vault) -> bool {
-    match (serde_json::to_vec(left), serde_json::to_vec(right)) {
-        (Ok(left), Ok(right)) => left == right,
-        _ => false,
-    }
+    left == right
 }
 
 fn index_items(vault: &Vault) -> BTreeMap<ItemId, &VaultItem> {
@@ -289,38 +442,125 @@ fn merge_items(
 ) -> MergedItem {
     debug_assert_eq!(left.id, right.id, "merge_items needs the same identity");
 
-    // Deletion is permanent for an identity. A Tombstone wins even against a
-    // concurrent live edit, whose clock is absorbed so the next merge does not
-    // re-litigate the deletion.
-    if left.is_tombstone() || right.is_tombstone() {
-        let mut clock = left.clock.clone();
-        clock.merge(&right.clock);
-        let vault_id = if left.vault_id == right.vault_id {
-            left.vault_id
-        } else {
-            left.vault_id.min(right.vault_id)
-        };
-        return MergedItem {
-            item: VaultItem::tombstone(left.id, vault_id, clock),
+    match (lifecycle(left), lifecycle(right)) {
+        // Deletion is permanent for an identity. A Tombstone wins even
+        // against a concurrent live edit or a move record, whose clocks are
+        // absorbed so the next merge does not re-litigate the deletion.
+        (ItemLifecycle::Deleted, _) | (_, ItemLifecycle::Deleted) => MergedItem {
+            item: VaultItem::tombstone(
+                left.id,
+                merged_item_vault_id(left, right),
+                joined_clock(left, right),
+            ),
             secrets: None,
             conflicts: Vec::new(),
-        };
-    }
+        },
 
-    match left.clock.compare(&right.clock) {
-        ClockOrder::Dominates => MergedItem {
-            item: left.clone(),
-            secrets: left_secrets.cloned(),
-            conflicts: Vec::new(),
-        },
-        ClockOrder::Dominated => MergedItem {
-            item: right.clone(),
-            secrets: right_secrets.cloned(),
-            conflicts: Vec::new(),
-        },
-        ClockOrder::Equal | ClockOrder::Concurrent => {
-            merge_live_items(left, left_secrets, right, right_secrets)
+        // Two move records for one identity: either the same event reaching
+        // this vault twice, or two Devices moved the item out of it
+        // concurrently. Pick the smaller destination so both sides compute
+        // the same answer; the item itself lives on in that vault.
+        (ItemLifecycle::Moved(left_destination), ItemLifecycle::Moved(right_destination)) => {
+            MergedItem {
+                item: VaultItem::move_record(
+                    left.id,
+                    merged_item_vault_id(left, right),
+                    joined_clock(left, right),
+                    left_destination.min(right_destination),
+                ),
+                secrets: None,
+                conflicts: Vec::new(),
+            }
         }
+
+        // A move record beats the stale live copy it left behind. A live
+        // copy only wins when it is causally *later*: that is a move back,
+        // where the same identity was deliberately brought here again.
+        (ItemLifecycle::Moved(destination), ItemLifecycle::Live) => {
+            if right.clock.compare(&left.clock) == ClockOrder::Dominates {
+                MergedItem {
+                    item: right.clone(),
+                    secrets: right_secrets.cloned(),
+                    conflicts: Vec::new(),
+                }
+            } else {
+                merged_move_record(left, right, destination)
+            }
+        }
+        (ItemLifecycle::Live, ItemLifecycle::Moved(destination)) => {
+            if left.clock.compare(&right.clock) == ClockOrder::Dominates {
+                MergedItem {
+                    item: left.clone(),
+                    secrets: left_secrets.cloned(),
+                    conflicts: Vec::new(),
+                }
+            } else {
+                merged_move_record(left, right, destination)
+            }
+        }
+
+        (ItemLifecycle::Live, ItemLifecycle::Live) => match left.clock.compare(&right.clock) {
+            ClockOrder::Dominates => MergedItem {
+                item: left.clone(),
+                secrets: left_secrets.cloned(),
+                conflicts: Vec::new(),
+            },
+            ClockOrder::Dominated => MergedItem {
+                item: right.clone(),
+                secrets: right_secrets.cloned(),
+                conflicts: Vec::new(),
+            },
+            ClockOrder::Equal | ClockOrder::Concurrent => {
+                merge_live_items(left, left_secrets, right, right_secrets)
+            }
+        },
+    }
+}
+
+/// The lifecycle state a stored item represents. Move records are
+/// deliberately distinct from Tombstones: "it is over there" must be able to
+/// lose to a later move back, while "it is deleted" never can.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ItemLifecycle {
+    Live,
+    Deleted,
+    Moved(VaultId),
+}
+
+fn lifecycle(item: &VaultItem) -> ItemLifecycle {
+    if item.deleted {
+        ItemLifecycle::Deleted
+    } else if let Some(destination) = item.moved_to {
+        ItemLifecycle::Moved(destination)
+    } else if item.kind.is_none() {
+        // Defensive: a content-free record that names no move is a
+        // Tombstone written by an older/corrupt writer.
+        ItemLifecycle::Deleted
+    } else {
+        ItemLifecycle::Live
+    }
+}
+
+fn joined_clock(left: &VaultItem, right: &VaultItem) -> VersionVector {
+    let mut clock = left.clock.clone();
+    clock.merge(&right.clock);
+    clock
+}
+
+fn merged_item_vault_id(left: &VaultItem, right: &VaultItem) -> VaultId {
+    left.vault_id.min(right.vault_id)
+}
+
+fn merged_move_record(left: &VaultItem, right: &VaultItem, destination: VaultId) -> MergedItem {
+    MergedItem {
+        item: VaultItem::move_record(
+            left.id,
+            merged_item_vault_id(left, right),
+            joined_clock(left, right),
+            destination,
+        ),
+        secrets: None,
+        conflicts: Vec::new(),
     }
 }
 
@@ -354,16 +594,17 @@ fn merge_live_items(
         };
         item.clock = clock.clone();
 
-        let version = latest_clock_version(&clock);
+        let left_version = latest_clock_version(&left.clock);
+        let right_version = latest_clock_version(&right.clock);
         let mut sides = [
             ConflictSide {
-                device: version.device,
-                counter: version.counter,
+                device: left_version.device,
+                counter: left_version.counter,
                 value: Some(Value::String(kind_tag(left_kind).to_string())),
             },
             ConflictSide {
-                device: version.device,
-                counter: version.counter,
+                device: right_version.device,
+                counter: right_version.counter,
                 value: Some(Value::String(kind_tag(right_kind).to_string())),
             },
         ];
@@ -377,8 +618,10 @@ fn merge_live_items(
                 right_secrets.cloned()
             },
             conflicts: vec![Conflict {
-                item_id: left.id,
-                item_display_name: display_name,
+                scope: ConflictScope::Item {
+                    item_id: left.id,
+                    display_name,
+                },
                 field_key: "kind".to_string(),
                 is_secret: false,
                 sides,
@@ -402,6 +645,7 @@ fn merge_live_items(
         left.vault_id.min(right.vault_id)
     };
     merged.deleted = false;
+    merged.moved_to = None;
     merged.field_clocks = BTreeMap::new();
 
     let secret_keys = allowed_secret_keys(left_kind);
@@ -430,8 +674,10 @@ fn merge_live_items(
 
         if let Some(sides) = &resolved.conflict {
             conflicts.push(Conflict {
-                item_id: left.id,
-                item_display_name: display_name.clone(),
+                scope: ConflictScope::Item {
+                    item_id: left.id,
+                    display_name: display_name.clone(),
+                },
                 field_key: key.to_string(),
                 is_secret,
                 sides: sides.clone(),
@@ -818,7 +1064,8 @@ mod tests {
 
     use crate::vault_manager::VaultManager;
     use crate::{
-        AccountData, NewItemData, SecretInput, CURRENT_SCHEMA_VERSION, SECRET_FIELD_PASSWORD,
+        AccountData, CardData, NewItemData, SecretInput, CURRENT_SCHEMA_VERSION,
+        SECRET_FIELD_PASSWORD,
     };
 
     fn device(n: u128) -> DeviceId {
@@ -848,6 +1095,7 @@ mod tests {
             clock: VersionVector::from_version(owner, 1),
             field_clocks: BTreeMap::new(),
             deleted: false,
+            moved_to: None,
             kind: Some(ItemKind::Account(AccountData {
                 username: "octocat".to_string(),
                 email: Some("octo@example.com".to_string()),
@@ -861,6 +1109,9 @@ mod tests {
             id: vault_id,
             name: "Test".to_string(),
             color: "#6240BF".to_string(),
+            clock: VersionVector::from_version(owner, 1),
+            name_clock: FieldVersion::new(owner, 1),
+            color_clock: FieldVersion::new(owner, 1),
             items: vec![item],
             secrets: vec![ItemSecrets::new(
                 item_id,
@@ -930,8 +1181,8 @@ mod tests {
         item.record_field("favourite", version);
     }
 
-    fn expect_merged(outcome: MergeOutcome) -> Vault {
-        match outcome {
+    fn expect_merged(outcome: Result<MergeOutcome, MergeError>) -> Vault {
+        match outcome.expect("the fixture copies name one vault") {
             MergeOutcome::Merged(vault) => vault,
             MergeOutcome::Conflicts(report) => {
                 panic!("expected a clean merge, got {:?}", report.conflicts)
@@ -939,8 +1190,8 @@ mod tests {
         }
     }
 
-    fn expect_conflicts(outcome: MergeOutcome) -> ConflictReport {
-        match outcome {
+    fn expect_conflicts(outcome: Result<MergeOutcome, MergeError>) -> ConflictReport {
+        match outcome.expect("the fixture copies name one vault") {
             MergeOutcome::Merged(_) => panic!("expected conflicts, got a clean merge"),
             MergeOutcome::Conflicts(report) => report,
         }
@@ -995,7 +1246,7 @@ mod tests {
         assert_eq!(report.conflicts.len(), 1);
 
         let conflict = &report.conflicts[0];
-        assert_eq!(conflict.item_id, item_id);
+        assert_eq!(conflict.item_id(), Some(item_id));
         assert_eq!(conflict.field_key, "display_name");
         assert!(!conflict.is_secret);
         assert_eq!(conflict.sides.len(), 2);
@@ -1044,6 +1295,347 @@ mod tests {
         let payload = serde_json::to_string(&report.conflicts).unwrap();
         assert!(!payload.contains("left-secret-value"));
         assert!(!payload.contains("right-secret-value"));
+    }
+
+    #[test]
+    fn test_move_record_beats_a_stale_live_copy_in_the_source_vault() {
+        let (base, item_id, owner) = base_fixture();
+        let destination = Uuid::from_u128(0xCCCC);
+
+        let moved = moved_out(&base, item_id, owner, destination);
+
+        for (left, right) in [(&moved, &base), (&base, &moved)] {
+            let merged = expect_merged(merge_vaults(left, right));
+            let item = stored_item(&merged, item_id);
+            assert!(
+                item.is_move_record(),
+                "the move record must beat the stale live copy"
+            );
+            assert!(!item.is_deleted(), "moving out is not a deletion");
+            assert_eq!(item.moved_to, Some(destination));
+            assert!(item.kind.is_none(), "a move record carries no content");
+            assert!(
+                merged.secrets.iter().all(|entry| entry.item_id != item_id),
+                "a move record carries no secrets"
+            );
+        }
+    }
+
+    #[test]
+    fn test_moving_back_wins_over_the_earlier_move_record() {
+        let (base, item_id, owner) = base_fixture();
+        let destination = Uuid::from_u128(0xCCCC);
+
+        let moved = moved_out(&base, item_id, owner, destination);
+
+        // The item came back to this vault: same identity, a later clock and
+        // its content again.
+        let mut moved_back = base.clone();
+        {
+            let item = moved_back
+                .items
+                .iter_mut()
+                .find(|item| item.id == item_id)
+                .unwrap();
+            item.clock.increment(owner);
+            item.clock.increment(owner);
+        }
+
+        for (left, right) in [(&moved, &moved_back), (&moved_back, &moved)] {
+            let merged = expect_merged(merge_vaults(left, right));
+            let item = stored_item(&merged, item_id);
+            assert!(!item.is_tombstone(), "moving back must restore the item");
+            assert_eq!(
+                item.display_name.as_deref(),
+                Some("Octocat"),
+                "moving back must keep the item's content"
+            );
+            assert!(merged.secrets.iter().any(|entry| entry.item_id == item_id));
+        }
+    }
+
+    #[test]
+    fn test_deletion_after_a_move_beats_the_move_record_and_a_stale_live_copy() {
+        let (base, item_id, owner) = base_fixture();
+        let destination = Uuid::from_u128(0xCCCC);
+
+        let moved = moved_out(&base, item_id, owner, destination);
+        let deleted = {
+            let mut deleted = base.clone();
+            let clock = {
+                let item = deleted
+                    .items
+                    .iter_mut()
+                    .find(|item| item.id == item_id)
+                    .unwrap();
+                item.clock.increment(owner);
+                item.clock.increment(owner);
+                item.clock.clone()
+            };
+            deleted.items = vec![VaultItem::tombstone(item_id, deleted.id, clock)];
+            deleted.secrets.clear();
+            deleted
+        };
+
+        for (left, right) in [
+            (&deleted, &moved),
+            (&moved, &deleted),
+            (&deleted, &base),
+            (&base, &deleted),
+        ] {
+            let merged = expect_merged(merge_vaults(left, right));
+            assert!(
+                stored_item(&merged, item_id).is_deleted(),
+                "deletion must win over a move and over a stale live copy"
+            );
+            assert!(merged.secrets.iter().all(|entry| entry.item_id != item_id));
+        }
+    }
+
+    #[test]
+    fn test_move_lifecycle_merge_is_associative() {
+        let (base, item_id, owner) = base_fixture();
+        let destination = Uuid::from_u128(0xCCCC);
+
+        let stale = base.clone();
+        let moved = moved_out(&base, item_id, owner, destination);
+        let mut moved_back = base.clone();
+        {
+            let item = moved_back
+                .items
+                .iter_mut()
+                .find(|item| item.id == item_id)
+                .unwrap();
+            item.clock.increment(owner);
+            item.clock.increment(owner);
+        }
+
+        let left = expect_merged(merge_vaults(
+            &expect_merged(merge_vaults(&stale, &moved)),
+            &moved_back,
+        ));
+        let right = expect_merged(merge_vaults(
+            &stale,
+            &expect_merged(merge_vaults(&moved, &moved_back)),
+        ));
+        assert_eq!(
+            serde_json::to_value(&left).unwrap(),
+            serde_json::to_value(&right).unwrap()
+        );
+        assert!(!stored_item(&left, item_id).is_tombstone());
+    }
+
+    #[test]
+    fn test_move_record_moves_with_its_vault_metadata() {
+        let (base, item_id, owner) = base_fixture();
+        let destination = Uuid::from_u128(0xCCCC);
+
+        let moved = moved_out(&base, item_id, owner, destination);
+        let merged = expect_merged(merge_vaults(&moved, &moved));
+        assert_eq!(merged.id, base.id);
+        assert_eq!(stored_item(&merged, item_id).moved_to, Some(destination));
+    }
+
+    fn moved_out(base: &Vault, item_id: ItemId, writer: DeviceId, destination: VaultId) -> Vault {
+        let mut moved = base.clone();
+        let clock = {
+            let item = moved
+                .items
+                .iter_mut()
+                .find(|item| item.id == item_id)
+                .expect("fixture item exists");
+            item.clock.increment(writer);
+            item.clock.clone()
+        };
+        moved.items = vec![VaultItem::move_record(
+            item_id,
+            moved.id,
+            clock,
+            destination,
+        )];
+        moved.secrets.clear();
+        moved
+    }
+
+    #[test]
+    fn test_merge_refuses_two_different_vault_ids() {
+        let (base, _, _) = base_fixture();
+        let mut other = base.clone();
+        other.id = Uuid::from_u128(0xDDDD);
+
+        let error = merge_vaults(&base, &other).unwrap_err();
+        assert_eq!(
+            error,
+            MergeError::VaultIdMismatch {
+                left: base.id,
+                right: other.id,
+            }
+        );
+
+        // Refusing is symmetric: neither argument position is treated as the
+        // authoritative id.
+        let reverse = merge_vaults(&other, &base).unwrap_err();
+        assert_eq!(
+            reverse,
+            MergeError::VaultIdMismatch {
+                left: other.id,
+                right: base.id,
+            }
+        );
+    }
+
+    #[test]
+    fn test_vault_rename_survives_a_sync_with_an_untouched_copy() {
+        let (base, _, owner) = base_fixture();
+
+        let mut renamed = base.clone();
+        rename_vault(&mut renamed, owner, "Renamed");
+
+        for (left, right) in [(&renamed, &base), (&base, &renamed)] {
+            let merged = expect_merged(merge_vaults(left, right));
+            assert_eq!(
+                merged.name, "Renamed",
+                "an untouched copy must not win a rename by being lexicographically smaller"
+            );
+            assert_eq!(merged.color, base.color);
+        }
+    }
+
+    #[test]
+    fn test_concurrent_vault_rename_and_recolour_merge_without_conflict() {
+        let (base, _, owner) = base_fixture();
+        let other = device(2);
+
+        let mut renamed = base.clone();
+        rename_vault(&mut renamed, owner, "Renamed");
+
+        let mut recoloured = base.clone();
+        recolour_vault(&mut recoloured, other, "#FF0000");
+
+        for (left, right) in [(&renamed, &recoloured), (&recoloured, &renamed)] {
+            let merged = expect_merged(merge_vaults(left, right));
+            assert_eq!(merged.name, "Renamed", "the rename survives");
+            assert_eq!(merged.color, "#FF0000", "the recolour survives");
+        }
+    }
+
+    #[test]
+    fn test_concurrent_vault_rename_is_a_conflict_with_each_writer_named() {
+        let (base, _, owner) = base_fixture();
+        let other = device(2);
+
+        let mut left = base.clone();
+        rename_vault(&mut left, owner, "Left name");
+
+        let mut right = base.clone();
+        rename_vault(&mut right, other, "Right name");
+
+        let report = expect_conflicts(merge_vaults(&left, &right));
+        assert_eq!(report.conflicts.len(), 1);
+
+        let conflict = &report.conflicts[0];
+        assert!(conflict.is_vault_metadata());
+        assert_eq!(conflict.field_key, "name");
+        assert!(!conflict.is_secret);
+        let devices: BTreeSet<DeviceId> = conflict.sides.iter().map(|side| side.device).collect();
+        assert_eq!(
+            devices,
+            BTreeSet::from([owner, other]),
+            "each side must carry its own Device provenance"
+        );
+        let values: Vec<&str> = conflict
+            .sides
+            .iter()
+            .filter_map(|side| side.value.as_ref())
+            .filter_map(Value::as_str)
+            .collect();
+        assert!(values.contains(&"Left name"));
+        assert!(values.contains(&"Right name"));
+
+        // Canonical whichever way round the copies are passed.
+        let reverse = expect_conflicts(merge_vaults(&right, &left));
+        assert_eq!(
+            serde_json::to_value(&report.conflicts).unwrap(),
+            serde_json::to_value(&reverse.conflicts).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_value(&report.merged).unwrap(),
+            serde_json::to_value(&reverse.merged).unwrap()
+        );
+    }
+
+    #[test]
+    fn test_rename_after_a_sync_beats_the_old_name_on_both_sides() {
+        let (base, _, owner) = base_fixture();
+        let other = device(2);
+
+        let mut first_rename = base.clone();
+        rename_vault(&mut first_rename, owner, "First");
+
+        // The other Device adopts the first rename, then renames again.
+        let mut second_rename = first_rename.clone();
+        rename_vault(&mut second_rename, other, "Second");
+
+        let merged = expect_merged(merge_vaults(&first_rename, &second_rename));
+        assert_eq!(
+            merged.name, "Second",
+            "a rename made after seeing the first must win"
+        );
+    }
+
+    fn rename_vault(vault: &mut Vault, writer: DeviceId, name: &str) {
+        let counter = vault.clock.increment(writer);
+        vault.name = name.to_string();
+        vault.name_clock = FieldVersion::new(writer, counter);
+    }
+
+    fn recolour_vault(vault: &mut Vault, writer: DeviceId, color: &str) {
+        let counter = vault.clock.increment(writer);
+        vault.color = color.to_string();
+        vault.color_clock = FieldVersion::new(writer, counter);
+    }
+
+    #[test]
+    fn test_kind_mismatch_conflict_names_the_device_that_wrote_each_kind() {
+        let (base, item_id, owner) = base_fixture();
+        let other = device(2);
+
+        let left = base.clone();
+        let mut right = base.clone();
+        {
+            let item = right
+                .items
+                .iter_mut()
+                .find(|item| item.id == item_id)
+                .unwrap();
+            item.kind = Some(ItemKind::Card(CardData {
+                cardholder_name: "Alex Doe".to_string(),
+                expiry_month: 1,
+                expiry_year: 2030,
+                brand: None,
+            }));
+            item.clock = VersionVector::from_version(other, 1);
+        }
+
+        let report = expect_conflicts(merge_vaults(&left, &right));
+        let conflict = &report.conflicts[0];
+        assert_eq!(conflict.field_key, "kind");
+
+        let devices: BTreeSet<DeviceId> = conflict.sides.iter().map(|side| side.device).collect();
+        assert_eq!(
+            devices,
+            BTreeSet::from([owner, other]),
+            "the prompt must be able to say which Device wrote which kind"
+        );
+
+        let values: Vec<&str> = conflict
+            .sides
+            .iter()
+            .filter_map(|side| side.value.as_ref())
+            .filter_map(Value::as_str)
+            .collect();
+        assert!(values.contains(&"account"));
+        assert!(values.contains(&"card"));
     }
 
     #[test]
