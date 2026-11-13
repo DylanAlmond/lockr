@@ -506,6 +506,11 @@ impl PeerChannel for TlsChannel {
 
     fn close(&mut self) {
         if let Some(mut stream) = self.stream.take() {
+            // Closing must not inherit the frame deadline: a peer that has
+            // stopped reading should cost at most a second, not thirty.
+            let _ = stream
+                .socket()
+                .set_write_timeout(Some(Duration::from_secs(1)));
             stream.shutdown();
         }
     }
@@ -622,6 +627,11 @@ fn pairing_confirmation(
 /// close instead of an authentication failure. The drain is bounded, so a
 /// peer cannot keep a worker busy by streaming data.
 fn refuse_connection(stream: &mut TlsStream) {
+    // A peer that will not read must not hold the worker for the lifetime of
+    // the handshake deadline while we deliver a one-byte refusal.
+    let _ = stream
+        .socket()
+        .set_write_timeout(Some(Duration::from_secs(1)));
     let _ = stream
         .socket()
         .set_read_timeout(Some(Duration::from_millis(100)));
@@ -1450,8 +1460,10 @@ impl PeerNetwork for TlsNetwork {
         session.pairing_failures = 0;
         drop(session);
 
-        // Close anything already queued: a pairing secret is single use, and
-        // a channel waiting to be taken must not outlive the offer.
+        // Drop anything already queued: a pairing secret is single use, and a
+        // channel waiting to be taken must not outlive the offer. Dropping the
+        // socket is deliberate rather than sending a close_notify, so ending
+        // an offer can never block on a peer that has stopped reading.
         if let Some(receiver) = self
             .inbound
             .pairing
@@ -1459,9 +1471,7 @@ impl PeerNetwork for TlsNetwork {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .as_ref()
         {
-            while let Ok(mut channel) = receiver.try_recv() {
-                channel.close();
-            }
+            while receiver.try_recv().is_ok() {}
         }
         Ok(())
     }
