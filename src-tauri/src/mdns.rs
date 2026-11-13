@@ -27,9 +27,12 @@ use crate::network::{
 };
 use crate::DeviceId;
 
-/// The TLS peer transport will listen here once it lands. mDNS SRV records
-/// carry a port, so the discovery record has to name one even before the
-/// transport exists.
+/// The fallback port used by [`MdnsDiscovery::new`].
+///
+/// Production no longer uses a fixed port: the TLS transport binds port zero
+/// for the session and advertises the port the operating system assigned via
+/// [`MdnsDiscovery::with_port`]. This constant remains for callers that have no
+/// transport of their own (and for the discovery-only tests).
 pub const SYNC_TRANSPORT_PORT: u16 = 47821;
 
 /// The one TXT property Lockr publishes. Nothing else belongs in it.
@@ -47,6 +50,13 @@ pub(crate) struct ServiceRecord {
 }
 
 impl ServiceRecord {
+    /// The port this record advertises. The transport asserts this is the
+    /// port it actually bound before the session starts.
+    #[cfg(test)]
+    pub(crate) fn port(&self) -> u16 {
+        self.port
+    }
+
     pub(crate) fn from_advertisement(advertisement: &PeerAdvertisement, port: u16) -> Self {
         let device_id = advertisement.device_id();
         Self {
