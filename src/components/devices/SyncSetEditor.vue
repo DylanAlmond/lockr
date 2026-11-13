@@ -238,6 +238,9 @@ function confirmAdopt(vault: UnregisteredVault) {
         <span class="sync-indicator" :class="{ 'sync-indicator--off': !selectionOn(vault) }">
           {{ selectionLabel(vault) }}
         </span>
+        <span v-if="!vault.syncing && selectionOn(vault)" class="re-enable-warning">
+          Re-enabling merges this Vault’s divergence.
+        </span>
       </li>
     </ul>
 
@@ -410,6 +413,13 @@ function confirmAdopt(vault: UnregisteredVault) {
 .sync-indicator--off {
   background: var(--color-hover);
   color: var(--color-text-muted);
+}
+
+.re-enable-warning {
+  color: hsl(30 60% 32%);
+  font-size: 0.6875rem;
+  line-height: 1.3;
+  max-width: 14rem;
 }
 
 .removal-section,
