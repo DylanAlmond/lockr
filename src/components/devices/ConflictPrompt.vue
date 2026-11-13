@@ -90,24 +90,40 @@ const itemLabel = computed(() => {
 });
 
 interface SideEntry {
-  choice: ConflictChoice;
+  choice: ConflictChoice | null;
   side: SyncConflictSide;
   label: string;
 }
 
 /**
- * The backend orders Conflict sides canonically, not local-first. Identify
- * this Device's side so "local" and "remote" map to the right value.
+ * The backend orders Conflict sides canonically, not local-first, and does not
+ * mark which side is this Device's copy. When one side names this Device we can
+ * map it safely; when neither does, we must not guess which hidden value is
+ * local, so the prompt withholds both choices.
  */
+const localSideKnown = computed(() => {
+  const conflict = current.value;
+  if (!conflict || !props.thisDeviceId) return false;
+  return conflict.sides.some((side) => side.device === props.thisDeviceId);
+});
+
 const sideEntries = computed<SideEntry[]>(() => {
   const conflict = current.value;
   if (!conflict) return [];
 
   const [first, second] = conflict.sides;
+
+  if (!localSideKnown.value) {
+    return [
+      { choice: null, side: first, label: deviceLabel(first.device) },
+      { choice: null, side: second, label: deviceLabel(second.device) }
+    ];
+  }
+
   let local = first;
   let remote = second;
 
-  if (second.device === props.thisDeviceId && first.device !== props.thisDeviceId) {
+  if (second.device === props.thisDeviceId) {
     local = second;
     remote = first;
   }
@@ -140,8 +156,8 @@ function sideValue(side: SyncConflictSide): string {
   return formatValue(side.value);
 }
 
-function choose(choice: ConflictChoice) {
-  if (!current.value || props.busy) return;
+function choose(choice: ConflictChoice | null) {
+  if (!current.value || props.busy || !choice) return;
   emit('resolve', current.value, choice);
 }
 
@@ -203,7 +219,7 @@ function next() {
           <div class="side-grid">
             <section
               v-for="entry in sideEntries"
-              :key="entry.choice"
+              :key="`${entry.side.device}:${entry.side.counter}`"
               class="conflict-side"
               :class="{ 'conflict-side--local': entry.choice === 'local' }"
             >
@@ -217,6 +233,7 @@ function next() {
               </p>
 
               <Button
+                v-if="entry.choice"
                 :variant="entry.choice === 'local' ? 'accent' : 'outline'"
                 size="small"
                 :disabled="busy"
@@ -226,6 +243,14 @@ function next() {
               </Button>
             </section>
           </div>
+
+          <p v-if="!localSideKnown" class="ambiguity-note">
+            <TriangleAlert :size="16" aria-hidden="true" />
+            Neither value was written by this Device, so Lockr cannot tell which side is this
+            Device’s copy. Choosing here could keep the wrong hidden value. This conflict cannot be
+            resolved from this screen; leave it unresolved and resolve it from one of the Devices
+            named above.
+          </p>
 
           <p v-if="error" class="conflict-error">{{ error }}</p>
         </div>
@@ -365,6 +390,19 @@ function next() {
   background: hsl(38 90% 96%);
   border: 1px solid hsl(38 80% 85%);
   color: hsl(30 60% 28%);
+  font-size: 0.8125rem;
+  line-height: 1.5;
+}
+
+.ambiguity-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  padding: 0.75rem;
+  border-radius: 0.5rem;
+  background: hsl(0 70% 97%);
+  border: 1px solid hsl(0 70% 85%);
+  color: hsl(0 60% 30%);
   font-size: 0.8125rem;
   line-height: 1.5;
 }
