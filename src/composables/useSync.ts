@@ -37,6 +37,7 @@ export type SyncFailureKind =
   | 'discovery'
   | 'authentication'
   | 'not-logged-in'
+  | 'busy'
   | 'unknown';
 
 export interface SyncFailure {
@@ -199,6 +200,15 @@ export function classifySyncError(error: unknown): SyncFailure {
       'not-logged-in',
       'Sign in to sync',
       'Sync uses the credentials already resident in this session. Sign in and try again.',
+      false
+    );
+  }
+
+  if (raw.includes('already in progress')) {
+    return failure(
+      'busy',
+      'A sync is already running',
+      'Only one sync runs at a time on this Device. Wait for it to finish, or cancel it first.',
       false
     );
   }
