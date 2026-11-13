@@ -472,16 +472,45 @@ fn merge_records(first: &DeviceRecord, second: &DeviceRecord) -> Result<DeviceRe
     })
 }
 
+/// What remains of a deleted Vault: its identity, when it was deleted, and
+/// by which Device. It carries no content and no secrets.
+///
+/// A Vault Tombstone is kept **forever**, unlike an Item Tombstone (which
+/// ADR-0002 §6 allows to be compacted once every paired Device acknowledges a
+/// clock covering it). A Device that was switched off when the deletion
+/// happened must still learn it on its next sync; a compacted Vault Tombstone
+/// would let a stale copy's registry resurrect the Vault. They are tiny — an
+/// id, a timestamp, and a Device id — so retention costs nothing.
+///
+/// It is deliberately unsigned: only [`DeviceRecord`]s carry signatures, so
+/// any admitted Device can tombstone a Vault (and any admitted Device can add
+/// a membership id). See ADR-0002 §9 for why that is accepted for now.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VaultTombstone {
+    pub vault_id: VaultId,
+    pub deleted_at: DateTime<Utc>,
+    pub deleted_by: DeviceId,
+}
+
 /// The shared record of which Vaults belong to a User. It carries identities
 /// only — a Device that does not hold a Vault cannot even name it, because
 /// names live inside the encrypted file.
 ///
 /// This replaces the profile's stored `vault_ids`: the list is a view over
-/// this registry, never a second source of truth.
+/// this registry, never a second source of truth. Deleting a Vault removes its
+/// membership here and records a [`VaultTombstone`], which travels with the
+/// registry so the deletion reaches every Device instead of the Vault
+/// reappearing on the next sync.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VaultRegistry {
     #[serde(default)]
     vault_ids: BTreeSet<VaultId>,
+
+    /// Kept even when the id is not in `vault_ids`, so deleting a Vault is
+    /// permanent. Omitted from the wire form when empty, which keeps an
+    /// untouched registry an identity-only list.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    tombstones: BTreeMap<VaultId, VaultTombstone>,
 }
 
 impl VaultRegistry {
@@ -489,6 +518,7 @@ impl VaultRegistry {
         Self::default()
     }
 
+    /// The number of Vaults that currently exist.
     pub fn len(&self) -> usize {
         self.vault_ids.len()
     }
@@ -502,13 +532,67 @@ impl VaultRegistry {
     }
 
     /// Record a Vault's identity. Returns whether it was newly added.
+    ///
+    /// A tombstoned Vault is never re-added: deletion is permanent, and a
+    /// stale registry copy must not resurrect it.
     pub fn insert(&mut self, vault_id: VaultId) -> bool {
+        if self.tombstones.contains_key(&vault_id) {
+            return false;
+        }
         self.vault_ids.insert(vault_id)
     }
 
-    /// Forget a Vault's identity. Returns whether it was present.
+    /// Forget a Vault's identity without tombstoning it. Returns whether it
+    /// was present. This is the "this Device never registered that file"
+    /// path, not deletion.
     pub fn remove(&mut self, vault_id: &VaultId) -> bool {
         self.vault_ids.remove(vault_id)
+    }
+
+    /// Delete a Vault: drop its membership and record a Tombstone. Repeating
+    /// the same deletion is idempotent (the earliest Tombstone stands), which
+    /// matters because two Devices can delete one Vault concurrently.
+    pub fn delete(
+        &mut self,
+        vault_id: VaultId,
+        deleted_at: DateTime<Utc>,
+        deleted_by: DeviceId,
+    ) -> bool {
+        let was_live = self.vault_ids.remove(&vault_id);
+        let tombstone = VaultTombstone {
+            vault_id,
+            deleted_at,
+            deleted_by,
+        };
+        let changed = match self.tombstones.get(&vault_id) {
+            Some(existing) => {
+                if (tombstone.deleted_at, tombstone.deleted_by)
+                    < (existing.deleted_at, existing.deleted_by)
+                {
+                    self.tombstones.insert(vault_id, tombstone);
+                    true
+                } else {
+                    false
+                }
+            }
+            None => {
+                self.tombstones.insert(vault_id, tombstone);
+                true
+            }
+        };
+        was_live || changed
+    }
+
+    pub fn is_tombstoned(&self, vault_id: &VaultId) -> bool {
+        self.tombstones.contains_key(vault_id)
+    }
+
+    pub fn tombstone(&self, vault_id: &VaultId) -> Option<&VaultTombstone> {
+        self.tombstones.get(vault_id)
+    }
+
+    pub fn tombstones(&self) -> impl Iterator<Item = &VaultTombstone> {
+        self.tombstones.values()
     }
 
     /// The derived `vault_ids` view, in stable order.
@@ -518,6 +602,38 @@ impl VaultRegistry {
 
     pub fn iter(&self) -> impl Iterator<Item = &VaultId> {
         self.vault_ids.iter()
+    }
+
+    /// Set union with two asymmetric rules: a Vault Tombstone always wins over
+    /// a live membership, and two concurrent Tombstones for one Vault resolve
+    /// to the earlier `(deleted_at, deleted_by)` so both Devices compute the
+    /// same result. This is commutative and associative.
+    pub fn merge(&self, other: &Self) -> Self {
+        let mut merged = self.clone();
+
+        for (vault_id, tombstone) in &other.tombstones {
+            merged
+                .tombstones
+                .entry(*vault_id)
+                .and_modify(|existing| {
+                    if (tombstone.deleted_at, tombstone.deleted_by)
+                        < (existing.deleted_at, existing.deleted_by)
+                    {
+                        *existing = tombstone.clone();
+                    }
+                })
+                .or_insert_with(|| tombstone.clone());
+        }
+
+        for vault_id in &other.vault_ids {
+            merged.vault_ids.insert(*vault_id);
+        }
+
+        for vault_id in merged.tombstones.keys() {
+            merged.vault_ids.remove(vault_id);
+        }
+
+        merged
     }
 }
 
@@ -1186,6 +1302,90 @@ mod tests {
         let result = honest.merge(&forged);
 
         assert!(matches!(result, Err(VaultError::DeviceRegistry(_))));
+    }
+
+    #[test]
+    fn test_a_deleted_vault_leaves_a_tombstone_that_beats_an_older_membership() {
+        let first = Uuid::new_v4();
+        let second = Uuid::new_v4();
+        let deleter = Uuid::from_u128(7);
+
+        let mut registry = VaultRegistry::new();
+        registry.insert(first);
+        registry.insert(second);
+
+        assert!(registry.delete(first, at(3_000), deleter));
+        assert!(!registry.contains(&first));
+        assert!(registry.is_tombstoned(&first));
+        assert_eq!(registry.len(), 1);
+        assert_eq!(registry.tombstone(&first).unwrap().deleted_by, deleter);
+        assert_eq!(registry.tombstone(&first).unwrap().deleted_at, at(3_000));
+
+        // Deletion is idempotent, including a second, later one.
+        assert!(!registry.delete(first, at(4_000), deleter));
+        assert_eq!(registry.tombstone(&first).unwrap().deleted_at, at(3_000));
+
+        // A stale copy that still lists the Vault cannot resurrect it,
+        // whichever way round the merge runs.
+        let mut older_copy = VaultRegistry::new();
+        older_copy.insert(first);
+        older_copy.insert(second);
+
+        let merged = registry.merge(&older_copy);
+        assert!(!merged.contains(&first));
+        assert!(merged.is_tombstoned(&first));
+        assert_eq!(merged, older_copy.merge(&registry));
+    }
+
+    #[test]
+    fn test_a_tombstoned_vault_cannot_be_reinserted_by_a_stale_copy() {
+        let vault_id = Uuid::new_v4();
+        let mut registry = VaultRegistry::new();
+        registry.insert(vault_id);
+        registry.delete(vault_id, at(3_000), Uuid::from_u128(1));
+
+        assert!(
+            !registry.insert(vault_id),
+            "re-adding a deleted Vault would resurrect it"
+        );
+        assert!(!registry.contains(&vault_id));
+    }
+
+    #[test]
+    fn test_two_concurrent_vault_deletions_choose_the_same_tombstone() {
+        let vault_id = Uuid::new_v4();
+        let laptop = Uuid::from_u128(2);
+        let phone = Uuid::from_u128(3);
+
+        let mut from_laptop = VaultRegistry::new();
+        from_laptop.insert(vault_id);
+        from_laptop.delete(vault_id, at(5_000), laptop);
+
+        let mut from_phone = VaultRegistry::new();
+        from_phone.insert(vault_id);
+        from_phone.delete(vault_id, at(6_000), phone);
+
+        let merged = from_laptop.merge(&from_phone);
+        assert_eq!(merged.tombstone(&vault_id).unwrap().deleted_at, at(5_000));
+        assert_eq!(merged.tombstone(&vault_id).unwrap().deleted_by, laptop);
+        assert_eq!(merged, from_phone.merge(&from_laptop));
+    }
+
+    #[test]
+    fn test_a_vault_registry_with_tombstones_still_roundtrips_as_shared_state() {
+        let live = Uuid::new_v4();
+        let deleted = Uuid::new_v4();
+        let mut registry = VaultRegistry::new();
+        registry.insert(live);
+        registry.insert(deleted);
+        registry.delete(deleted, at(3_000), Uuid::from_u128(9));
+
+        let bytes = serde_json::to_vec(&registry).unwrap();
+        let parsed: VaultRegistry = serde_json::from_slice(&bytes).unwrap();
+
+        assert_eq!(parsed, registry);
+        assert!(parsed.is_tombstoned(&deleted));
+        assert_eq!(parsed.ids(), vec![live]);
     }
 
     #[test]
