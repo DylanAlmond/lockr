@@ -160,6 +160,13 @@ fn typed_prefix(code: &str) -> Result<[u8; 5], VaultError> {
 #[derive(Clone)]
 pub struct PairingClaim {
     kind: ClaimKind,
+    /// When the offer that produced this claim stops being usable.
+    ///
+    /// The full form comes from a QR payload and always carries an expiry. The
+    /// typed fallback is only a prefix and an address, so it cannot know the
+    /// offer's TTL; the source Device's registered claim is the one that
+    /// enforces expiry for those channels.
+    expires_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Clone)]
@@ -169,16 +176,32 @@ enum ClaimKind {
 }
 
 impl PairingClaim {
-    fn full(secret: PairingSecret) -> Self {
+    fn full(secret: PairingSecret, expires_at: DateTime<Utc>) -> Self {
         Self {
             kind: ClaimKind::Full(secret),
+            expires_at: Some(expires_at),
         }
     }
 
     fn typed(code: &str) -> Result<Self, VaultError> {
         Ok(Self {
             kind: ClaimKind::Typed(typed_prefix(code)?),
+            expires_at: None,
         })
+    }
+
+    /// Whether the offer behind this claim has expired.
+    ///
+    /// The transport checks this independently of the application-level host:
+    /// an expired claim must not authenticate a channel even if the caller
+    /// never consults the host's TTL. A claim with no expiry (the typed
+    /// fallback) is bounded by the source's registered claim instead.
+    pub fn is_expired(&self, now: DateTime<Utc>) -> bool {
+        self.expires_at.is_some_and(|expires_at| now >= expires_at)
+    }
+
+    pub fn expires_at(&self) -> Option<DateTime<Utc>> {
+        self.expires_at
     }
 
     /// Whether this claim authenticates `secret`. Constant-time for the full
@@ -327,7 +350,7 @@ fn parse_qr_payload(payload: &str) -> Result<ParsedCode, VaultError> {
 
     Ok(ParsedCode {
         source_device_id,
-        claim: PairingClaim::full(secret),
+        claim: PairingClaim::full(secret, expires_at),
         expires_at: Some(expires_at),
     })
 }
@@ -707,6 +730,28 @@ mod tests {
             offer.is_expired(now + TimeDelta::seconds(PAIRING_TTL_SECS)),
             "the offer must not outlive its TTL"
         );
+    }
+
+    #[test]
+    fn test_a_claim_carries_the_offer_expiry_to_the_transport() {
+        let now = Utc::now();
+        let (_, offer) = PairingHost::start(Uuid::new_v4(), Uuid::new_v4(), 3, [7u8; 32], now);
+        let claim = PairingCode::qr(offer.qr_payload.clone()).claim().unwrap();
+
+        assert!(!claim.is_expired(now));
+        assert!(claim.is_expired(offer.expires_at));
+        assert!(
+            claim.is_expired(now + TimeDelta::seconds(PAIRING_TTL_SECS + 1)),
+            "the transport must be able to refuse an expired offer without the host"
+        );
+
+        // The typed fallback has no expiry of its own: the source's registered
+        // claim is what bounds it.
+        let typed = PairingCode::typed(offer.source_device_id, offer.typed_code)
+            .claim()
+            .unwrap();
+        assert!(typed.expires_at().is_none());
+        assert!(!typed.is_expired(now + TimeDelta::seconds(PAIRING_TTL_SECS + 1)));
     }
 
     fn join(device_id: DeviceId, schema_version: u32) -> PairingMessage {

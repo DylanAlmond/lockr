@@ -195,43 +195,27 @@ export interface PairingApprovalPrompt {
   platform: string;
 }
 
-/** What the joining Device announces. Identity metadata only. */
-export interface PairingRequest {
+/** The source's report after the live channel completed. */
+export interface PairingOutcome {
   device_id: string;
   name: string;
   platform: string;
-  public_key: string;
-  schema_version: number;
+}
+
+/**
+ * The joining side's report once the source approved it. The transfer itself
+ * stays in the backend; the next step is the local master password.
+ */
+export interface PairingJoinReady {
+  source_device_id: string;
+  user_id: string;
+  user_name: string;
 }
 
 /** A scanned QR payload, or the 8-character fallback plus the Device it belongs to. */
 export type PairingCode =
   | { kind: 'qr'; payload: string }
   | { kind: 'typed'; source_device_id: string; code: string };
-
-/**
- * A wire frame for the already-authenticated pairing channel. The `transfer`
- * frame carries key material to the joining Device; it is never rendered (see
- * the Safe View Pattern) and never contains the master password.
- */
-export type PairingMessage =
-  | ({ kind: 'join' } & PairingRequest)
-  | {
-      kind: 'transfer';
-      schema_version: number;
-      shared_profile: {
-        user_id: string;
-        name: string;
-        color: string;
-        icon: string | null;
-        devices: unknown;
-        vaults: unknown;
-      };
-      secret_key: number[];
-      /** The source's pre-checked Sync Set for the joining Device. Absent or
-       * null means the default: every Vault in the shared registry. */
-      sync_set?: string[] | null;
-    };
 
 /** One Vault in the device-local Sync Set. `syncing: false` keeps the local
  * copy and its contents; it only stops offering and requesting it. */

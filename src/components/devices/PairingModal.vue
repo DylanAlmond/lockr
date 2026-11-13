@@ -1,13 +1,14 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, shallowRef } from 'vue';
+import { computed, onMounted, onUnmounted, ref } from 'vue';
 import { Check, Copy, KeyRound, LoaderCircle, QrCode, ShieldCheck } from '@lucide/vue';
 import Button from '../ui/Button.vue';
 import Input from '../ui/Input.vue';
 import { useSync } from '../../composables/useSync';
 import type {
   PairingApprovalPrompt,
-  PairingMessage,
+  PairingJoinReady,
   PairingOffer,
+  PairingOutcome,
   SyncSetVault
 } from '../../types';
 
@@ -29,6 +30,7 @@ const {
   joinPairing,
   receivePairingRequest,
   approvePairing,
+  completePairing,
   getSyncSet
 } = useSync();
 
@@ -41,11 +43,9 @@ const offer = ref<PairingOffer | null>(null);
 const vaults = ref<SyncSetVault[]>([]);
 const syncSetLoaded = ref(false);
 const checked = ref<Set<string>>(new Set());
-const joinFrameText = ref('');
+const waitingForJoin = ref(false);
 const approval = ref<PairingApprovalPrompt | null>(null);
-// The transfer frame carries the User's secret key. It is held shallowly and
-// only ever checked for presence; it is never rendered or copied to display.
-const transfer = shallowRef<PairingMessage | null>(null);
+const outcome = ref<PairingOutcome | null>(null);
 const copied = ref(false);
 
 // Joining Device
@@ -53,10 +53,14 @@ const codeMode = ref<'typed' | 'qr'>('typed');
 const sourceDeviceId = ref('');
 const typedCode = ref('');
 const qrPayload = ref('');
-const joinMessage = shallowRef<PairingMessage | null>(null);
+const joinStage = ref<'idle' | 'waiting' | 'approved' | 'done'>('idle');
+const joinReady = ref<PairingJoinReady | null>(null);
+const joinPassword = ref('');
+const joinAborted = ref(false);
 
 const now = ref(Date.now());
 let timer: ReturnType<typeof setInterval> | null = null;
+let disposed = false;
 
 onMounted(() => {
   timer = setInterval(() => {
@@ -65,24 +69,11 @@ onMounted(() => {
 });
 
 onUnmounted(() => {
+  disposed = true;
   if (timer) clearInterval(timer);
-  if (offer.value && !transfer.value) {
+  if (offer.value || waitingForJoin.value || joinStage.value === 'waiting' || joinStage.value === 'approved') {
     void cancelPairing();
   }
-  if (joinMessage.value) {
-    void cancelPairing();
-  }
-});
-
-const joinInfo = computed(() => {
-  const message = joinMessage.value;
-  if (!message || message.kind !== 'join') return null;
-  return {
-    device_id: message.device_id,
-    name: message.name,
-    platform: message.platform,
-    schema_version: message.schema_version
-  };
 });
 
 const secondsLeft = computed(() => {
@@ -110,7 +101,7 @@ function toggleVault(vaultId: string) {
 async function switchMode(next: 'source' | 'join') {
   if (mode.value === next) return;
 
-  if (offer.value || joinMessage.value) {
+  if (offer.value || waitingForJoin.value || joinStage.value !== 'idle') {
     await cancelPairing();
   }
 
@@ -118,16 +109,19 @@ async function switchMode(next: 'source' | 'join') {
   localError.value = null;
   offer.value = null;
   approval.value = null;
-  transfer.value = null;
-  joinMessage.value = null;
-  joinFrameText.value = '';
+  outcome.value = null;
+  joinStage.value = 'idle';
+  joinReady.value = null;
+  joinPassword.value = '';
+  waitingForJoin.value = false;
+  joinAborted.value = false;
   syncSetLoaded.value = false;
 }
 
 async function beginOffer() {
   busy.value = true;
   localError.value = null;
-  transfer.value = null;
+  outcome.value = null;
   approval.value = null;
 
   const created = await startPairing();
@@ -144,6 +138,29 @@ async function beginOffer() {
   syncSetLoaded.value = !!set;
   vaults.value = set?.vaults ?? [];
   checked.value = new Set(vaults.value.map((vault) => vault.vault_id));
+
+  // The backend owns the transport. This command blocks until a joining
+  // Device actually announces itself; the UI never sees a handshake frame.
+  void waitForApproval();
+}
+
+async function waitForApproval() {
+  waitingForJoin.value = true;
+  localError.value = null;
+
+  const prompt = await receivePairingRequest();
+  waitingForJoin.value = false;
+
+  if (disposed || !offer.value) return;
+
+  if (!prompt) {
+    localError.value = offerExpired.value
+      ? 'The pairing code expired. Start again.'
+      : error.value ?? 'The joining Device could not be approved.';
+    return;
+  }
+
+  approval.value = prompt;
 }
 
 async function copyPayload() {
@@ -159,63 +176,33 @@ async function copyPayload() {
   }
 }
 
-async function reviewJoinFrame() {
-  const text = joinFrameText.value.trim();
-  if (!text) {
-    localError.value = 'Paste the joining Device’s announcement first.';
-    return;
-  }
-
-  let parsed: PairingMessage;
-  try {
-    parsed = JSON.parse(text) as PairingMessage;
-  } catch {
-    localError.value = 'That is not a pairing announcement.';
-    return;
-  }
-
-  if (parsed.kind !== 'join') {
-    localError.value = 'That frame is not a joining Device’s announcement.';
-    return;
-  }
-
-  busy.value = true;
-  localError.value = null;
-  const prompt = await receivePairingRequest(parsed);
-  busy.value = false;
-
-  if (!prompt) {
-    localError.value = error.value;
-    return;
-  }
-
-  approval.value = prompt;
-}
-
 async function approve() {
   if (!approval.value) return;
 
   busy.value = true;
   localError.value = null;
-  const frame = await approvePairing(
+  const result = await approvePairing(
     approval.value.device_id,
     syncSetLoaded.value ? [...checked.value] : null
   );
   busy.value = false;
 
-  if (!frame) {
+  if (!result) {
     localError.value = error.value;
     return;
   }
 
-  transfer.value = frame;
+  outcome.value = result;
+  approval.value = null;
   offer.value = null;
 }
 
 async function beginJoin() {
   busy.value = true;
   localError.value = null;
-  joinMessage.value = null;
+  joinAborted.value = false;
+  joinStage.value = 'waiting';
+  joinReady.value = null;
 
   const code =
     codeMode.value === 'qr'
@@ -226,26 +213,49 @@ async function beginJoin() {
           code: typedCode.value.trim()
         } as const);
 
-  const message = await joinPairing(code);
+  const ready = await joinPairing(code);
   busy.value = false;
 
-  if (!message) {
+  if (joinAborted.value || disposed) return;
+
+  if (!ready) {
+    joinStage.value = 'idle';
     localError.value = error.value;
     return;
   }
 
-  joinMessage.value = message;
+  joinReady.value = ready;
+  joinStage.value = 'approved';
+}
+
+async function finishJoin() {
+  busy.value = true;
+  localError.value = null;
+
+  const user = await completePairing(joinPassword.value);
+  busy.value = false;
+
+  if (!user) {
+    localError.value = error.value;
+    return;
+  }
+
+  joinPassword.value = '';
+  joinStage.value = 'done';
 }
 
 async function reset() {
+  joinAborted.value = true;
   busy.value = true;
   await cancelPairing();
   busy.value = false;
   offer.value = null;
   approval.value = null;
-  transfer.value = null;
-  joinMessage.value = null;
-  joinFrameText.value = '';
+  outcome.value = null;
+  waitingForJoin.value = false;
+  joinStage.value = 'idle';
+  joinReady.value = null;
+  joinPassword.value = '';
   qrPayload.value = '';
   typedCode.value = '';
   sourceDeviceId.value = '';
@@ -292,7 +302,7 @@ async function reset() {
 
     <!-- Source Device: offer, human approval, pre-checked Sync Set -->
     <section v-if="mode === 'source'" class="pairing-panel">
-      <template v-if="!offer && !transfer">
+      <template v-if="!offer && !outcome">
         <p class="panel-copy">
           Start a single-use offer here, then read or scan it on the new Device. The code expires
           after about a minute and can be used once.
@@ -329,24 +339,25 @@ async function reset() {
           </details>
         </div>
 
-        <div v-if="!approval" class="channel-step">
-          <h3>Joining Device announcement</h3>
+        <div v-if="waitingForJoin && !approval" class="channel-step">
+          <h3>Waiting for the new Device</h3>
           <p class="panel-copy">
-            A secure pairing channel normally carries this identity-only frame. Paste it here when
-            your build provides one.
+            <LoaderCircle :size="15" class="spin" aria-hidden="true" />
+            This Device is listening over the secure pairing channel. The announcement appears
+            here as soon as the new Device connects.
           </p>
-          <textarea
-            v-model="joinFrameText"
-            class="frame-input thin-scrollbar"
-            rows="4"
-            spellcheck="false"
-            placeholder='{"kind":"join","device_id":"…","name":"…","platform":"…","public_key":"…","schema_version":3}'
-          ></textarea>
           <div class="panel-actions">
-            <Button variant="outline" :disabled="busy || offerExpired" @click="reviewJoinFrame">
-              Review Device
-            </Button>
             <Button variant="label" :disabled="busy" @click="reset">Cancel pairing</Button>
+          </div>
+        </div>
+
+        <div v-else-if="!approval" class="channel-step">
+          <h3>Pairing code expired</h3>
+          <p class="panel-copy">
+            Nothing was exchanged. Start a new code to try again.
+          </p>
+          <div class="panel-actions">
+            <Button variant="label" :disabled="busy" @click="reset">Start over</Button>
           </div>
         </div>
 
@@ -411,11 +422,11 @@ async function reset() {
         <div class="transfer-ready">
           <ShieldCheck :size="24" aria-hidden="true" />
           <div>
-            <h3>Access prepared for {{ approval?.name ?? 'the new Device' }}</h3>
+            <h3>Paired with {{ outcome?.name ?? 'the new Device' }}</h3>
             <p class="panel-copy">
-              The encrypted transfer exists, but this build does not expose the secure pairing
-              channel that delivers it. Nothing has been sent, and the new Device cannot finish
-              pairing yet.
+              The approval was delivered over the secure pairing channel and the new Device now
+              holds the User id, shared profile metadata, and the secret key. The master password
+              was never sent.
             </p>
           </div>
         </div>
@@ -423,9 +434,9 @@ async function reset() {
       </template>
     </section>
 
-    <!-- Joining Device: code entry, then wait for source approval -->
+    <!-- Joining Device: code entry, wait for source approval, then password -->
     <section v-else class="pairing-panel">
-      <template v-if="!joinMessage">
+      <template v-if="joinStage === 'idle'">
         <div class="code-mode">
           <label>
             <input v-model="codeMode" type="radio" value="typed" />
@@ -465,7 +476,7 @@ async function reset() {
             class="frame-input thin-scrollbar"
             rows="4"
             spellcheck="false"
-            placeholder="lockr:1:…"
+            placeholder="lockr-pair:v1:…"
           ></textarea>
         </template>
 
@@ -480,29 +491,67 @@ async function reset() {
         </div>
       </template>
 
-      <template v-else>
+      <template v-else-if="joinStage === 'waiting'">
         <div class="approval-card">
           <header>
             <LoaderCircle :size="20" class="spin" aria-hidden="true" />
             <h3>Waiting for the source Device</h3>
           </header>
 
-          <p v-if="joinInfo" class="panel-copy">
-            This Device announced itself as <strong>{{ joinInfo.name }}</strong> on
-            {{ joinInfo.platform }}. A human on the source Device must approve it by name and
-            platform before any key material moves.
-          </p>
-
           <p class="panel-copy">
-            This build does not expose the secure pairing channel that carries the approval and
-            key transfer, so pairing cannot complete from here yet. Nothing has been written.
+            This Device announced itself over the secure pairing channel. A human on the source
+            Device must approve it by name and platform before any key material moves.
           </p>
 
           <div class="panel-actions">
-            <Button variant="label" :disabled="busy" @click="reset">Start over</Button>
-            <Button variant="outline" @click="emit('close')">Close</Button>
+            <Button variant="label" @click="reset">Cancel</Button>
           </div>
         </div>
+      </template>
+
+      <template v-else-if="joinStage === 'approved'">
+        <div class="approval-card">
+          <header>
+            <ShieldCheck :size="20" aria-hidden="true" />
+            <h3>Approved by the source Device</h3>
+          </header>
+
+          <p class="panel-copy">
+            <strong>{{ joinReady?.user_name || 'Your account' }}</strong> approved this Device.
+            Enter the master password for that account to finish pairing. It is used only on this
+            Device.
+          </p>
+
+          <label class="field-label" for="pairing-password">Master password</label>
+          <Input
+            id="pairing-password"
+            v-model="joinPassword"
+            type="password"
+            autocomplete="current-password"
+            placeholder="Master password"
+          />
+
+          <div class="panel-actions">
+            <Button variant="label" :disabled="busy" @click="reset">Cancel</Button>
+            <Button variant="accent" :disabled="busy || !joinPassword" @click="finishJoin">
+              Finish pairing
+            </Button>
+          </div>
+        </div>
+      </template>
+
+      <template v-else>
+        <div class="transfer-ready">
+          <ShieldCheck :size="24" aria-hidden="true" />
+          <div>
+            <h3>This Device is paired</h3>
+            <p class="panel-copy">
+              The secret key was re-wrapped under the password typed here. Open the Devices screen
+              to sync, or close this dialog.
+            </p>
+          </div>
+        </div>
+        <Button variant="label" @click="emit('close')">Close</Button>
       </template>
     </section>
   </article>

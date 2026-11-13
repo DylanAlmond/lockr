@@ -552,6 +552,17 @@ pub struct SyncAccepted {
     intersection: BTreeSet<VaultId>,
 }
 
+impl SyncAccepted {
+    /// Close a channel that will not be served, without running the exchange.
+    ///
+    /// This is how the server refuses a second inbound sync while one is in
+    /// flight: the transport authenticated it, and this Device immediately
+    /// tears it down instead of queueing it.
+    pub fn reject(mut self) {
+        self.channel.close();
+    }
+}
+
 /// One sync engine over the single network seam.
 pub struct SyncEngine<'a> {
     network: &'a dyn PeerNetwork,
@@ -612,7 +623,7 @@ impl<'a> SyncEngine<'a> {
             .map_err(Self::map_connect_error)?;
 
         // The channel must really lead to the Device that was asked for.
-        if channel.peer_device_id() != peer.device_id() {
+        if channel.peer_device_id() != Some(peer.device_id()) {
             channel.close();
             return Err(VaultError::SyncWrongPeer);
         }
@@ -745,7 +756,12 @@ impl<'a> SyncEngine<'a> {
             return Ok(None);
         };
 
-        let peer_device_id = channel.peer_device_id();
+        // A channel that cannot name the peer is not a sync channel. Fail
+        // closed rather than inventing an identity.
+        let Some(peer_device_id) = channel.peer_device_id() else {
+            channel.close();
+            return Err(VaultError::SyncWrongPeer);
+        };
 
         // Fail closed before reading anything: an inbound channel from a
         // Device this User never paired with gets no registry state and no
@@ -2333,7 +2349,7 @@ mod tests {
     }
 
     impl PeerChannel for DroppingChannel {
-        fn peer_device_id(&self) -> DeviceId {
+        fn peer_device_id(&self) -> Option<DeviceId> {
             self.inner.peer_device_id()
         }
 
@@ -2501,8 +2517,8 @@ mod tests {
     }
 
     impl PeerChannel for ImpersonatingChannel {
-        fn peer_device_id(&self) -> DeviceId {
-            self.claims
+        fn peer_device_id(&self) -> Option<DeviceId> {
+            Some(self.claims)
         }
 
         fn send(&mut self, message: SyncMessage) -> Result<(), NetworkError> {
@@ -2578,7 +2594,7 @@ mod tests {
     }
 
     impl PeerChannel for SilentChannel {
-        fn peer_device_id(&self) -> DeviceId {
+        fn peer_device_id(&self) -> Option<DeviceId> {
             self.inner.peer_device_id()
         }
 
@@ -2676,7 +2692,7 @@ mod tests {
     }
 
     impl PeerChannel for GatedChannel {
-        fn peer_device_id(&self) -> DeviceId {
+        fn peer_device_id(&self) -> Option<DeviceId> {
             self.inner.peer_device_id()
         }
 
@@ -4162,7 +4178,7 @@ mod tests {
     }
 
     impl PeerChannel for TamperingChannel {
-        fn peer_device_id(&self) -> DeviceId {
+        fn peer_device_id(&self) -> Option<DeviceId> {
             self.inner.peer_device_id()
         }
 
@@ -4354,7 +4370,7 @@ mod tests {
     }
 
     impl PeerChannel for RecordingChannel {
-        fn peer_device_id(&self) -> DeviceId {
+        fn peer_device_id(&self) -> Option<DeviceId> {
             self.inner.peer_device_id()
         }
 

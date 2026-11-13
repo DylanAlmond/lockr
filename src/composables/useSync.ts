@@ -7,8 +7,9 @@ import type {
   DiscoveredPeer,
   PairingApprovalPrompt,
   PairingCode,
-  PairingMessage,
+  PairingJoinReady,
   PairingOffer,
+  PairingOutcome,
   PairedDevice,
   SyncConflict,
   SyncProgress,
@@ -267,40 +268,34 @@ export function useSync() {
     }
   }
 
-  async function joinPairing(code: PairingCode): Promise<PairingMessage | null> {
+  async function joinPairing(code: PairingCode): Promise<PairingJoinReady | null> {
     error.value = null;
     try {
-      return await invoke<PairingMessage>('join_pairing', { code });
+      return await invoke<PairingJoinReady>('join_pairing', { code });
     } catch (e) {
       error.value = String(e);
       return null;
     }
   }
 
-  async function receivePairingRequest(
-    message: PairingMessage
-  ): Promise<PairingApprovalPrompt | null> {
+  async function receivePairingRequest(): Promise<PairingApprovalPrompt | null> {
     error.value = null;
     try {
-      return await invoke<PairingApprovalPrompt>('receive_pairing_request', { message });
+      return await invoke<PairingApprovalPrompt>('receive_pairing_request');
     } catch (e) {
       error.value = String(e);
       return null;
     }
   }
 
-  /**
-   * Returns the transfer frame. It carries the User's secret key and is
-   * deliberately never rendered or stored in display state: the caller only
-   * hands it straight to the authenticated pairing channel.
-   */
+  /** The transfer stays in the backend; only the outcome is returned. */
   async function approvePairing(
     deviceId: string,
     syncSet: string[] | null
-  ): Promise<PairingMessage | null> {
+  ): Promise<PairingOutcome | null> {
     error.value = null;
     try {
-      return await invoke<PairingMessage>('approve_pairing', { deviceId, syncSet });
+      return await invoke<PairingOutcome>('approve_pairing', { deviceId, syncSet });
     } catch (e) {
       error.value = String(e);
       return null;
@@ -309,18 +304,37 @@ export function useSync() {
 
   /**
    * Joining Device: re-wrap the transferred secret key under the password
-   * typed on this Device. The frame never reaches display state.
+   * typed on this Device. The transfer never reaches the frontend.
    */
-  async function completePairing(
-    message: PairingMessage,
-    masterPassword: string
-  ): Promise<User | null> {
+  async function completePairing(masterPassword: string): Promise<User | null> {
     error.value = null;
     try {
-      return await invoke<User>('complete_pairing', { message, masterPassword });
+      return await invoke<User>('complete_pairing', { masterPassword });
     } catch (e) {
       error.value = String(e);
       return null;
+    }
+  }
+
+  /** Serve inbound sync. Advertising remains owned by the discovery session. */
+  async function startServing(): Promise<boolean> {
+    error.value = null;
+    try {
+      await invoke('start_serving');
+      return true;
+    } catch (e) {
+      error.value = String(e);
+      return false;
+    }
+  }
+
+  async function stopServing(): Promise<boolean> {
+    try {
+      await invoke('stop_serving');
+      return true;
+    } catch (e) {
+      error.value = String(e);
+      return false;
     }
   }
 
@@ -602,6 +616,8 @@ export function useSync() {
     stopDiscovery,
     listDiscoveredPeers,
     revokeDevice,
+    startServing,
+    stopServing,
 
     // Sync
     syncWithDevice,
