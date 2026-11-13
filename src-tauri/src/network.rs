@@ -423,12 +423,11 @@ pub trait PeerChannel: Send {
 
     fn receive(&mut self) -> Result<SyncMessage, NetworkError>;
 
-    /// Receive with a deadline. A blocking transport must override this so a
-    /// silent peer cannot freeze the caller; the default is the unbounded
-    /// receive, which is correct only for transports that never block (the
-    /// in-memory pipe).
+    /// Receive with a deadline. Transports that can block must override this;
+    /// the default refuses rather than waits, so forgetting the override makes
+    /// the sync fail closed instead of silently blocking forever.
     fn receive_timeout(&mut self, _timeout: Duration) -> Result<SyncMessage, NetworkError> {
-        self.receive()
+        Err(NetworkError::Timeout)
     }
 
     fn close(&mut self);
@@ -584,6 +583,12 @@ impl PeerChannel for InMemoryChannel {
             .pop_front()
             .ok_or(NetworkError::ConnectionClosed)?;
         decode_frame(&frame)
+    }
+
+    fn receive_timeout(&mut self, _timeout: Duration) -> Result<SyncMessage, NetworkError> {
+        // The in-memory pipe never blocks: a missing frame is a closed
+        // connection, not a deadline.
+        self.receive()
     }
 
     fn close(&mut self) {
@@ -1213,6 +1218,37 @@ mod tests {
             decode_frame(truncated),
             Err(NetworkError::MalformedFrame(_))
         ));
+    }
+
+    /// A transport that forgot to implement a deadline. Its unbounded
+    /// `receive` must never be reached through `receive_timeout`.
+    struct ForgetsDeadlineChannel;
+
+    impl PeerChannel for ForgetsDeadlineChannel {
+        fn peer_device_id(&self) -> DeviceId {
+            uuid::Uuid::new_v4()
+        }
+
+        fn send(&mut self, _message: SyncMessage) -> Result<(), NetworkError> {
+            Ok(())
+        }
+
+        fn receive(&mut self) -> Result<SyncMessage, NetworkError> {
+            panic!("receive_timeout must not fall back to an unbounded receive")
+        }
+
+        fn close(&mut self) {}
+    }
+
+    #[test]
+    fn test_receive_timeout_fails_closed_when_a_transport_forgets_its_deadline() {
+        let mut channel = ForgetsDeadlineChannel;
+
+        assert_eq!(
+            channel.receive_timeout(Duration::from_millis(10)),
+            Err(NetworkError::Timeout),
+            "a transport without a deadline must fail, not block forever"
+        );
     }
 
     #[test]
