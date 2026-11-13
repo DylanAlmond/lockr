@@ -308,7 +308,7 @@ pub struct DeviceProfile {
 /// User metadata lives here because two Devices showing different names for
 /// one User is a bug. Both registries live here because every Device must
 /// hold the same list of Vaults and admitted Devices.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SharedProfile {
     pub user_id: UserId,
     pub name: String,

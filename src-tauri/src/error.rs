@@ -32,6 +32,21 @@ pub enum VaultError {
     #[error("Device registry error: {0}")]
     DeviceRegistry(String),
 
+    #[error("Pairing code is stale or has already been used")]
+    PairingSecretStale,
+
+    #[error("Pairing refused: incompatible vault schema (local {local}, remote {remote})")]
+    PairingSchemaMismatch { local: u32, remote: u32 },
+
+    #[error("Pairing refused: too many attempts, start again")]
+    PairingRateLimited,
+
+    #[error("No pairing is in progress")]
+    PairingNotStarted,
+
+    #[error("Pairing error: {0}")]
+    Pairing(String),
+
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 

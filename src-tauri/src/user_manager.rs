@@ -1,5 +1,5 @@
 use argon2::password_hash::rand_core::{OsRng, RngCore};
-use chrono::Utc;
+use chrono::{DateTime, TimeDelta, Utc};
 use std::path::PathBuf;
 use uuid::Uuid;
 use zeroize::Zeroize;
@@ -7,6 +7,10 @@ use zeroize::Zeroize;
 use crate::atomic::write_atomic;
 use crate::crypto::{decrypt, encrypt};
 use crate::device::{device_name, device_platform, load_or_create_device_id, DeviceKeypair};
+use crate::pairing::{
+    PairingApprovalPrompt, PairingCode, PairingHost, PairingMessage, PairingOffer, PairingRequest,
+    PairingTransfer, PendingJoin, PAIRING_TTL_SECS,
+};
 use crate::registry::{DeviceRecord, DeviceRegistry, VaultRegistry};
 use crate::{DeviceId, DeviceProfile, SharedProfile, User, UserId, VaultError, VaultId};
 
@@ -20,6 +24,17 @@ pub struct UserManager {
     /// this Device.
     device_id: DeviceId,
 
+    /// The Device signing key, unwrapped for the current session. Pairing and
+    /// revocation sign with it; it is dropped on logout.
+    session_keypair: Option<DeviceKeypair>,
+
+    /// The live offer this Device is hosting, if any.
+    pairing_host: Option<PairingHost>,
+
+    /// The joining side's state between announcing itself and receiving the
+    /// transfer.
+    pending_join: Option<PendingJoin>,
+
     pub active_user_id: Option<UserId>,
 }
 
@@ -30,6 +45,9 @@ impl UserManager {
         let manager = Self {
             app_data_dir,
             device_id,
+            session_keypair: None,
+            pairing_host: None,
+            pending_join: None,
             active_user_id: None,
         };
 
@@ -207,6 +225,9 @@ impl UserManager {
         };
 
         self.active_user_id = Some(user_id);
+        self.session_keypair = Some(keypair);
+        self.pairing_host = None;
+        self.pending_join = None;
         self.save_local_profile(&local)?;
         self.save_shared_profile(&shared)?;
 
@@ -247,6 +268,9 @@ impl UserManager {
         }
 
         self.active_user_id = Some(local.id);
+        self.session_keypair = Some(keypair);
+        self.pairing_host = None;
+        self.pending_join = None;
 
         Ok(decrypted_key)
     }
@@ -331,8 +355,233 @@ impl UserManager {
         }
 
         self.active_user_id = None;
+        self.session_keypair = None;
+        self.pairing_host = None;
+        self.pending_join = None;
 
         Ok(())
+    }
+
+    // ============ Pairing ============
+
+    /// Start a pairing offer on the source Device.
+    ///
+    /// `secret_key` is the 32-byte secret key already resident for this
+    /// session; the master password is never passed to (or stored by) the
+    /// pairing state. `schema_version` is the vault schema this Device speaks,
+    /// announced so a mismatch can refuse the pairing before any transfer.
+    pub fn start_pairing(
+        &mut self,
+        secret_key: &[u8],
+        schema_version: u32,
+        now: DateTime<Utc>,
+    ) -> Result<PairingOffer, VaultError> {
+        let user_id = self
+            .active_user_id
+            .ok_or_else(|| VaultError::UserNotFound("No user is active".into()))?;
+
+        if self.session_keypair.is_none() {
+            return Err(VaultError::Pairing(
+                "this Device has no signing key for the session; sign in again".into(),
+            ));
+        }
+
+        let secret_key: [u8; 32] = secret_key
+            .try_into()
+            .map_err(|_| VaultError::Pairing("the secret key must be 32 bytes".into()))?;
+
+        let (host, offer) =
+            PairingHost::start(user_id, self.device_id, schema_version, secret_key, now);
+        self.pairing_host = Some(host);
+
+        Ok(offer)
+    }
+
+    /// Accept the joining Device's announcement. Returns what the human must
+    /// approve; releases no key material.
+    pub fn receive_pairing_request(
+        &mut self,
+        message: PairingMessage,
+        now: DateTime<Utc>,
+    ) -> Result<PairingApprovalPrompt, VaultError> {
+        let host = self
+            .pairing_host
+            .as_mut()
+            .ok_or(VaultError::PairingNotStarted)?;
+        let request = host.receive(message, now)?;
+
+        Ok(PairingApprovalPrompt {
+            device_id: request.device_id,
+            name: request.name,
+            platform: request.platform,
+        })
+    }
+
+    /// The human approved the joining Device shown in the prompt. Admits it to
+    /// the Device Registry and returns the one-time transfer.
+    pub fn approve_pairing(
+        &mut self,
+        device_id: DeviceId,
+        now: DateTime<Utc>,
+    ) -> Result<PairingMessage, VaultError> {
+        let host = self
+            .pairing_host
+            .as_mut()
+            .ok_or(VaultError::PairingNotStarted)?;
+        let (request, secret_key) = host.approve(device_id, now)?;
+        let schema_version = host.schema_version();
+        let user_id = host.user_id();
+
+        let keypair = self.session_keypair.as_ref().ok_or_else(|| {
+            VaultError::Pairing("this Device has no signing key for the session".into())
+        })?;
+
+        let mut shared = self.get_shared_profile(&user_id)?;
+        let record = DeviceRecord::admit(
+            request.device_id,
+            request.public_key,
+            request.name,
+            request.platform,
+            self.device_id,
+            now,
+            keypair,
+        );
+        shared.devices.admit(record)?;
+        self.save_shared_profile(&shared)?;
+
+        Ok(PairingMessage::Transfer(PairingTransfer {
+            schema_version,
+            shared_profile: shared,
+            secret_key,
+        }))
+    }
+
+    /// Abandon the live offer or the join in progress.
+    pub fn cancel_pairing(&mut self) {
+        if let Some(mut host) = self.pairing_host.take() {
+            host.cancel();
+        }
+        self.pending_join = None;
+    }
+
+    /// Announce this Device as the joining side. Nothing is written until the
+    /// transfer arrives and the password is typed locally.
+    pub fn join_pairing(
+        &mut self,
+        code: &PairingCode,
+        schema_version: u32,
+        now: DateTime<Utc>,
+    ) -> Result<PairingMessage, VaultError> {
+        if self.active_user_id.is_some() || self.is_registered() {
+            return Err(VaultError::Pairing(
+                "this Device already belongs to a User".into(),
+            ));
+        }
+
+        if code
+            .expires_at()?
+            .is_some_and(|expires_at| now >= expires_at)
+        {
+            return Err(VaultError::PairingSecretStale);
+        }
+
+        let source_device_id = code.source_device_id()?;
+        let keypair = DeviceKeypair::generate();
+        let request = PairingRequest {
+            device_id: self.device_id,
+            name: device_name(),
+            platform: device_platform(),
+            public_key: keypair.public_key(),
+            schema_version,
+        };
+
+        self.pending_join = Some(PendingJoin {
+            source_device_id,
+            schema_version,
+            expires_at: now + TimeDelta::seconds(PAIRING_TTL_SECS),
+            keypair,
+            request: request.clone(),
+        });
+
+        Ok(PairingMessage::Join(request))
+    }
+
+    /// Finish the join: verify the transfer, then re-wrap the secret key and
+    /// the Device signing key under the password typed on this Device.
+    pub fn complete_pairing(
+        &mut self,
+        message: PairingMessage,
+        master_password: &str,
+        now: DateTime<Utc>,
+    ) -> Result<User, VaultError> {
+        let pending = self
+            .pending_join
+            .as_ref()
+            .ok_or(VaultError::PairingNotStarted)?;
+
+        if now >= pending.expires_at {
+            self.pending_join = None;
+            return Err(VaultError::PairingSecretStale);
+        }
+
+        let transfer = match message {
+            PairingMessage::Transfer(transfer) => transfer,
+            PairingMessage::Join(_) => {
+                return Err(VaultError::Pairing(
+                    "the joining Device received a join request instead of a transfer".into(),
+                ));
+            }
+        };
+
+        if transfer.schema_version != pending.schema_version {
+            return Err(VaultError::PairingSchemaMismatch {
+                local: pending.schema_version,
+                remote: transfer.schema_version,
+            });
+        }
+
+        // The registry must be internally consistent, and it must contain the
+        // exact Device the human approved on the source side.
+        transfer.shared_profile.devices.verify()?;
+        let record = transfer
+            .shared_profile
+            .devices
+            .get(&self.device_id)
+            .ok_or_else(|| VaultError::Pairing("the transfer does not admit this Device".into()))?;
+        if record.public_key != pending.keypair.public_key()
+            || record.admitted_by != pending.source_device_id
+            || record.name != pending.request.name
+            || record.platform != pending.request.platform
+        {
+            return Err(VaultError::Pairing(
+                "the transfer admits a different Device than the one approved".into(),
+            ));
+        }
+
+        let pending = self.pending_join.take().expect("checked above");
+
+        let encrypted_secret_key = encrypt(master_password, transfer.secret_key.as_bytes())?;
+        let encrypted_signing_key = pending.keypair.wrap(master_password)?;
+        let shared = transfer.shared_profile;
+
+        let local = DeviceProfile {
+            id: shared.user_id,
+            encrypted_secret_key,
+            device_id: Some(self.device_id),
+            encrypted_signing_key,
+            signing_public_key: pending.keypair.public_key(),
+            name: String::new(),
+            color: String::new(),
+            icon: None,
+            vault_ids: Vec::new(),
+        };
+
+        self.save_local_profile(&local)?;
+        self.save_shared_profile(&shared)?;
+        self.active_user_id = Some(local.id);
+        self.session_keypair = Some(pending.keypair);
+
+        Ok(user_view(&local, &shared))
     }
 
     // ============ Device-local profile ============
@@ -517,6 +766,9 @@ impl UserManager {
         }
 
         self.active_user_id = None;
+        self.session_keypair = None;
+        self.pairing_host = None;
+        self.pending_join = None;
 
         Ok(())
     }
