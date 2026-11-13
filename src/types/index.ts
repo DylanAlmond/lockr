@@ -319,3 +319,45 @@ export type ConflictChoice = 'local' | 'remote';
 export interface ConflictResolutionResult {
   remaining: number;
 }
+
+/** One side of a suggested Duplicate, as the review screen needs it. */
+export interface DuplicateCandidate {
+  item_id: string;
+  display_name: string | null;
+}
+
+/** A non-secret field whose values differ, so Combine must ask about it.
+ * Secret values are always withheld (`null`) even though the backend holds both. */
+export interface DuplicateField {
+  field_key: string;
+  is_secret: boolean;
+  first_value: unknown;
+  second_value: unknown;
+}
+
+/** Two Items that look like the same thing but have separate identities.
+ * Safe View: no secret value appears in `colliding_fields`. */
+export interface DuplicateSuggestion {
+  first: DuplicateCandidate;
+  second: DuplicateCandidate;
+  /** Present for account pairs whose usernames also matched. */
+  username: string | null;
+  colliding_fields: DuplicateField[];
+}
+
+/** What the User decided about a suggested Duplicate. */
+export type DuplicateResolution =
+  | { resolution: 'keep_both' }
+  | { resolution: 'keep'; item_id: string }
+  | {
+      resolution: 'combine';
+      survivor: string;
+      /** Every colliding field key maps to the Item whose value survives. */
+      field_choices: Record<string, string>;
+    };
+
+/** Serde's externally-tagged shape for `DuplicateOutcome`. */
+export type DuplicateOutcome =
+  | 'kept_both'
+  | { kept: { item_id: string } }
+  | { combined: { survivor: string } };

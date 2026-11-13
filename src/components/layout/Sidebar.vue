@@ -1,7 +1,16 @@
 <script setup lang="ts">
 import { RouterLink, useRoute, useRouter } from 'vue-router';
 import Logo from '../../assets/logo-text.svg';
-import { Clock, EllipsisVertical, KeyRound, LogOut, Plus, Settings, Star } from '@lucide/vue';
+import {
+  Clock,
+  EllipsisVertical,
+  KeyRound,
+  LogOut,
+  MonitorSmartphone,
+  Plus,
+  Settings,
+  Star
+} from '@lucide/vue';
 import { useUser } from '../../composables/useUser';
 import Button from '../ui/Button.vue';
 import Dropdown, { DropdownItem } from '../ui/Dropdown.vue';
@@ -24,9 +33,10 @@ const { state, deleteVaultById } = useAppStore();
 const vaults = ref<Vault[]>([]);
 
 const navItems = [
-  { icon: KeyRound, title: 'All Items', filter: undefined },
-  { icon: Star, title: 'Favourites', filter: 'favourites' },
-  { icon: Clock, title: 'Recently Accessed', filter: 'recently-accessed' }
+  { icon: KeyRound, title: 'All Items', filter: undefined, route: undefined },
+  { icon: Star, title: 'Favourites', filter: 'favourites', route: undefined },
+  { icon: Clock, title: 'Recently Accessed', filter: 'recently-accessed', route: undefined },
+  { icon: MonitorSmartphone, title: 'Devices', filter: undefined, route: '/devices' }
 ];
 
 const topMenu: DropdownItem[] = [
@@ -46,9 +56,13 @@ const topMenu: DropdownItem[] = [
   }
 ];
 
-// Helper to determine if a nav item is strictly active based on the query parameter
-function isNavActive(filter: string | undefined) {
-  return route.name === 'all-items' && (route.query.filter as string | undefined) === filter;
+// Helper to determine if a nav item is strictly active based on its route or query parameter
+function isNavActive(item: (typeof navItems)[number]) {
+  if (item.route) {
+    return route.path.startsWith(item.route);
+  }
+
+  return route.name === 'all-items' && (route.query.filter as string | undefined) === item.filter;
 }
 
 async function refreshVaults() {
@@ -148,9 +162,9 @@ onMounted(refreshVaults);
       <ul class="link-list">
         <li v-for="item in navItems" :key="item.title">
           <RouterLink
-            :to="{ name: 'all-items', query: item.filter ? { filter: item.filter } : {} }"
+            :to="item.route ?? { name: 'all-items', query: item.filter ? { filter: item.filter } : {} }"
             class="nav-link"
-            :class="{ active: isNavActive(item.filter) }"
+            :class="{ active: isNavActive(item) }"
           >
             <component :is="item.icon" :size="20" aria-hidden="true" />
             <span>{{ item.title }}</span>

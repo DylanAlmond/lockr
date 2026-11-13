@@ -99,6 +99,20 @@ export function useVault() {
     }
   }
 
+  /**
+   * Remove this Device's copy only. Never a deletion: other Devices keep
+   * theirs and no Tombstone is recorded. Distinct from deleteVault.
+   */
+  async function removeLocalVault(vaultId: string): Promise<boolean> {
+    try {
+      await invoke('remove_local_vault', { vaultId });
+      return true;
+    } catch (e) {
+      error.value = String(e);
+      return false;
+    }
+  }
+
   // ============ Items (generic surface, all kinds) ============
 
   async function getItembyId(itemId: string): Promise<SafeItem | null> {
@@ -286,6 +300,7 @@ export function useVault() {
     createVault,
     updateVault,
     deleteVault,
+    removeLocalVault,
 
     // Items (the generic surface, all kinds)
     getItembyId,
