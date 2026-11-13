@@ -434,7 +434,13 @@ pub(crate) fn decode_frame(frame: &[u8]) -> Result<SyncMessage, NetworkError> {
 /// An authenticated channel to one peer. It exposes no address, no socket,
 /// and no transport type.
 pub trait PeerChannel: Send {
-    fn peer_device_id(&self) -> DeviceId;
+    /// The Device at the other end, once the channel has proven one.
+    ///
+    /// A pairing channel is authenticated by a one-time secret, not by a
+    /// Device identity: the joining Device is not known until its join frame
+    /// is read, and the source Device may not be in any registry yet. Those
+    /// channels therefore report `None` rather than a placeholder id.
+    fn peer_device_id(&self) -> Option<DeviceId>;
 
     fn send(&mut self, message: SyncMessage) -> Result<(), NetworkError>;
 
@@ -469,6 +475,21 @@ pub trait PeerNetwork: Send + Sync {
 
     /// Take the responder side of the next inbound connection, if any.
     fn accept(&self) -> Result<Option<Box<dyn PeerChannel>>, NetworkError>;
+
+    /// Start serving inbound sync connections for this session.
+    ///
+    /// While serving, at most one inbound channel may be in flight: a second
+    /// authenticated connection is refused rather than queued. A transport
+    /// that cannot enforce this may leave the default no-op; the serving loop
+    /// still takes channels one at a time.
+    fn begin_serving(&self) -> Result<(), NetworkError> {
+        Ok(())
+    }
+
+    /// Stop serving inbound sync connections and release the one-at-a-time
+    /// gate. This is deliberately separate from advertising: the discovery
+    /// session owns whether this Device is visible on the network.
+    fn end_serving(&self) {}
 
     /// Accept inbound pairing connections authenticated by `claim` until the
     /// offer ends. The production transport binds its ephemeral certificate to
@@ -619,14 +640,14 @@ struct InMemoryPipe {
 }
 
 struct InMemoryChannel {
-    peer_device_id: DeviceId,
+    peer_device_id: Option<DeviceId>,
     outbound: Arc<Mutex<VecDeque<Vec<u8>>>>,
     inbound: Arc<Mutex<VecDeque<Vec<u8>>>>,
     closed: Arc<AtomicBool>,
 }
 
 impl PeerChannel for InMemoryChannel {
-    fn peer_device_id(&self) -> DeviceId {
+    fn peer_device_id(&self) -> Option<DeviceId> {
         self.peer_device_id
     }
 
@@ -790,7 +811,7 @@ impl PeerNetwork for InMemoryNetwork {
         };
 
         let channel = InMemoryChannel {
-            peer_device_id: peer_id,
+            peer_device_id: Some(peer_id),
             outbound: Arc::clone(&pipe.to_responder),
             inbound: Arc::clone(&pipe.to_initiator),
             closed: Arc::clone(&pipe.closed),
@@ -813,7 +834,7 @@ impl PeerNetwork for InMemoryNetwork {
 
         Ok(local.inbound.pop_front().map(|pipe| {
             Box::new(InMemoryChannel {
-                peer_device_id: pipe.initiator,
+                peer_device_id: Some(pipe.initiator),
                 outbound: Arc::clone(&pipe.to_initiator),
                 inbound: Arc::clone(&pipe.to_responder),
                 closed: pipe.closed,
@@ -892,7 +913,7 @@ impl PeerNetwork for InMemoryNetwork {
         };
 
         let channel = InMemoryChannel {
-            peer_device_id: peer_id,
+            peer_device_id: None,
             outbound: Arc::clone(&pipe.to_responder),
             inbound: Arc::clone(&pipe.to_initiator),
             closed: Arc::clone(&pipe.closed),
@@ -926,7 +947,7 @@ impl PeerNetwork for InMemoryNetwork {
 
         Ok(local.pairing_inbound.pop_front().map(|pipe| {
             Box::new(InMemoryChannel {
-                peer_device_id: pipe.initiator,
+                peer_device_id: None,
                 outbound: Arc::clone(&pipe.to_initiator),
                 inbound: Arc::clone(&pipe.to_responder),
                 closed: pipe.closed,
@@ -1102,8 +1123,8 @@ mod tests {
         let peer = a_net.discover().unwrap().remove(0);
         let mut initiator = a_net.connect(&peer).unwrap();
         let mut responder = b_net.accept().unwrap().unwrap();
-        assert_eq!(initiator.peer_device_id(), b_id);
-        assert_eq!(responder.peer_device_id(), a_id);
+        assert_eq!(initiator.peer_device_id(), Some(b_id));
+        assert_eq!(responder.peer_device_id(), Some(a_id));
 
         initiator
             .send(SyncMessage::Vault {
@@ -1289,8 +1310,8 @@ mod tests {
     struct ForgetsDeadlineChannel;
 
     impl PeerChannel for ForgetsDeadlineChannel {
-        fn peer_device_id(&self) -> DeviceId {
-            uuid::Uuid::new_v4()
+        fn peer_device_id(&self) -> Option<DeviceId> {
+            Some(uuid::Uuid::new_v4())
         }
 
         fn send(&mut self, _message: SyncMessage) -> Result<(), NetworkError> {

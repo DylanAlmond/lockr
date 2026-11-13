@@ -455,12 +455,20 @@ impl Write for TlsStream {
 /// below is TLS.
 struct TlsChannel {
     stream: Option<TlsStream>,
-    peer: DeviceId,
+    peer: Option<DeviceId>,
     frame_timeout: Duration,
+    /// Holds the "one inbound sync at a time" claim for the lifetime of this
+    /// channel, so the next connection is admitted only once this one is gone.
+    _inbound_claim: Option<InboundClaim>,
 }
 
 impl TlsChannel {
-    fn new(stream: TlsStream, peer: DeviceId, frame_timeout: Duration) -> Self {
+    fn new(
+        stream: TlsStream,
+        peer: Option<DeviceId>,
+        frame_timeout: Duration,
+        inbound_claim: Option<InboundClaim>,
+    ) -> Self {
         // From here on the whole connection has per-frame deadlines. The
         // handshake deadline has already served its purpose.
         let _ = stream.socket().set_read_timeout(Some(frame_timeout));
@@ -469,6 +477,7 @@ impl TlsChannel {
             stream: Some(stream),
             peer,
             frame_timeout,
+            _inbound_claim: inbound_claim,
         }
     }
 
@@ -478,7 +487,7 @@ impl TlsChannel {
 }
 
 impl PeerChannel for TlsChannel {
-    fn peer_device_id(&self) -> DeviceId {
+    fn peer_device_id(&self) -> Option<DeviceId> {
         self.peer
     }
 
@@ -800,6 +809,9 @@ fn authenticate_client_pairing(
     claim: &PairingClaim,
     client_auth_override: Option<&[u8]>,
 ) -> Result<Vec<u8>, NetworkError> {
+    if claim.is_expired(chrono::Utc::now()) {
+        return Err(NetworkError::AuthenticationFailed);
+    }
     let (material, client_is_full) = claim.transport_material();
     let exporter = stream.exporter()?;
     let nonce_c = random_nonce();
@@ -847,6 +859,12 @@ fn authenticate_server_pairing(
     stream: &mut TlsStream,
     claim: &PairingClaim,
 ) -> Result<(), NetworkError> {
+    // An expired offer must not authenticate a channel even though the
+    // application-level host also checks its own TTL. The transport owns the
+    // socket, so it refuses first.
+    if claim.is_expired(chrono::Utc::now()) {
+        return Err(NetworkError::AuthenticationFailed);
+    }
     let (material, server_is_full) = claim.transport_material();
     let exporter = stream.exporter()?;
 
@@ -872,6 +890,12 @@ fn authenticate_server_pairing(
     )
     .is_err()
     {
+        return Err(NetworkError::AuthenticationFailed);
+    }
+
+    // The TTL check is repeated after the proof: a slow or deliberately
+    // stalled handshake must not outlive the offer it started under.
+    if claim.is_expired(chrono::Utc::now()) {
         return Err(NetworkError::AuthenticationFailed);
     }
 
@@ -907,6 +931,45 @@ struct Running {
     _pairing_sender: SyncSender<Box<dyn PeerChannel>>,
 }
 
+/// Enforces "one inbound sync at a time" while this Device is serving.
+///
+/// The serving loop takes one channel and runs the whole exchange on it. A
+/// second authenticated connection that arrives meanwhile is refused at the
+/// transport, not queued behind the first. The claim is released when the
+/// channel is dropped.
+#[derive(Default)]
+struct ServingGate {
+    serving: AtomicBool,
+    busy: Arc<AtomicBool>,
+}
+
+struct InboundClaim(Arc<AtomicBool>);
+
+impl Drop for InboundClaim {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
+enum GateDecision {
+    Deliver(Option<InboundClaim>),
+    Refuse,
+}
+
+impl ServingGate {
+    fn decision(self: &Arc<Self>) -> GateDecision {
+        if !self.serving.load(Ordering::SeqCst) {
+            // Not serving: preserve the old behaviour for any caller that
+            // accepts directly.
+            return GateDecision::Deliver(None);
+        }
+        if self.busy.swap(true, Ordering::SeqCst) {
+            return GateDecision::Refuse;
+        }
+        GateDecision::Deliver(Some(InboundClaim(Arc::clone(&self.busy))))
+    }
+}
+
 /// The production [`PeerNetwork`]: mDNS discovery plus a TLS 1.3 listener on
 /// the port the operating system assigned.
 ///
@@ -922,6 +985,8 @@ pub struct TlsNetwork {
     session: Arc<Mutex<SessionState>>,
     running: Mutex<Option<Running>>,
     inbound: Inbound,
+    /// One inbound sync at a time while serving.
+    gate: Arc<ServingGate>,
     /// Test-only observation points: the last negotiated TLS version, and the
     /// last client auth frame a successful connection sent, used to prove a
     /// captured proof cannot be replayed.
@@ -977,6 +1042,7 @@ impl TlsNetwork {
             session: Arc::new(Mutex::new(SessionState::default())),
             running: Mutex::new(None),
             inbound: Inbound::default(),
+            gate: Arc::new(ServingGate::default()),
             #[cfg(test)]
             last_protocol_version: Mutex::new(None),
             #[cfg(test)]
@@ -985,7 +1051,7 @@ impl TlsNetwork {
     }
 
     #[cfg(test)]
-    fn with_adapter(
+    pub(crate) fn with_adapter(
         device_id: DeviceId,
         config: TlsTransportConfig,
         adapter: Arc<dyn crate::mdns::DiscoveryAdapter>,
@@ -1102,8 +1168,9 @@ impl TlsNetwork {
         let _ = sent_auth;
         Ok(Box::new(TlsChannel::new(
             stream,
-            peer_id,
+            Some(peer_id),
             self.config.frame_timeout,
+            None,
         )))
     }
 
@@ -1132,6 +1199,7 @@ impl TlsNetwork {
 
         let stop = Arc::new(AtomicBool::new(false));
         let session = Arc::clone(&self.session);
+        let gate = Arc::clone(&self.gate);
         let device_id = self.device_id;
         let config = self.config.clone();
         let worker_stop = Arc::clone(&stop);
@@ -1156,6 +1224,7 @@ impl TlsNetwork {
 
                             let session = Arc::clone(&session);
                             let configs = Arc::clone(&configs);
+                            let gate = Arc::clone(&gate);
                             let sync_sender = sync_sender.clone();
                             let pairing_sender = pairing_sender.clone();
                             let stop = Arc::clone(&worker_stop);
@@ -1170,6 +1239,7 @@ impl TlsNetwork {
                                         device_id,
                                         configs,
                                         session,
+                                        gate,
                                         config,
                                         sync_sender,
                                         pairing_sender,
@@ -1272,8 +1342,9 @@ impl TlsNetwork {
         authenticate_client_pairing(&mut stream, claim, Some(captured_client_auth))?;
         Ok(Box::new(TlsChannel::new(
             stream,
-            peer.device_id(),
+            None,
             self.config.frame_timeout,
+            None,
         )))
     }
 }
@@ -1286,6 +1357,7 @@ fn run_inbound_connection(
     device_id: DeviceId,
     configs: Arc<TlsConfigs>,
     session: Arc<Mutex<SessionState>>,
+    gate: Arc<ServingGate>,
     config: TlsTransportConfig,
     sync_sender: SyncSender<Box<dyn PeerChannel>>,
     pairing_sender: SyncSender<Box<dyn PeerChannel>>,
@@ -1344,14 +1416,25 @@ fn run_inbound_connection(
         .snapshot();
 
     let result = match alpn.as_deref() {
-        Some(ALPN_SYNC) => authenticate_server_sync(&mut stream, &snapshot, device_id)
-            .map(|peer| (peer, &sync_sender)),
+        Some(ALPN_SYNC) => {
+            // Claim the single inbound slot before the server proves itself:
+            // otherwise the client would already have a valid server auth and
+            // only learn about the refusal after it believed it succeeded.
+            let claim = match gate.decision() {
+                GateDecision::Deliver(claim) => claim,
+                GateDecision::Refuse => {
+                    refuse_connection(&mut stream);
+                    return;
+                }
+            };
+            authenticate_server_sync(&mut stream, &snapshot, device_id)
+                .map(|peer| (Some(peer), &sync_sender, claim))
+        }
         Some(ALPN_PAIR) => match snapshot.pairing_claim.as_ref() {
-            // A pairing channel's peer id is not meaningful yet: the join
-            // request on the channel is what names the joining Device, and
-            // only after the human approves it.
+            // A pairing channel's peer id is unknown until the join frame
+            // names the joining Device, so it is deliberately `None`.
             Some(claim) => authenticate_server_pairing(&mut stream, claim)
-                .map(|()| (Uuid::nil(), &pairing_sender)),
+                .map(|()| (None, &pairing_sender, None)),
             None => Err(NetworkError::AuthenticationFailed),
         },
         // A client that negotiated no protocol, or one we did not offer, gets
@@ -1361,12 +1444,16 @@ fn run_inbound_connection(
     };
 
     match result {
-        Ok((peer, sender)) => {
+        Ok((peer, sender, claim)) => {
             if stop.load(Ordering::SeqCst) {
                 return;
             }
-            let channel: Box<dyn PeerChannel> =
-                Box::new(TlsChannel::new(stream, peer, config.frame_timeout));
+            let channel: Box<dyn PeerChannel> = Box::new(TlsChannel::new(
+                stream,
+                peer,
+                config.frame_timeout,
+                claim,
+            ));
             // A full queue drops the channel rather than blocking a worker.
             let _ = sender.try_send(channel);
         }
@@ -1441,6 +1528,40 @@ impl PeerNetwork for TlsNetwork {
         }
     }
 
+    fn begin_serving(&self) -> Result<(), NetworkError> {
+        // Channels queued before this session have no server that was waiting
+        // for them. Drop them and their claims before opening the gate.
+        if let Some(receiver) = self
+            .inbound
+            .sync
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+        {
+            while receiver.try_recv().is_ok() {}
+        }
+        self.gate.serving.store(true, Ordering::SeqCst);
+        self.gate.busy.store(false, Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn end_serving(&self) {
+        self.gate.serving.store(false, Ordering::SeqCst);
+        self.gate.busy.store(false, Ordering::SeqCst);
+
+        // Anything queued for the stopped server is stale. Dropping it also
+        // releases its one-at-a-time claim.
+        if let Some(receiver) = self
+            .inbound
+            .sync
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+        {
+            while receiver.try_recv().is_ok() {}
+        }
+    }
+
     fn begin_pairing(&self, claim: &PairingClaim) -> Result<(), NetworkError> {
         let mut session = self
             .session
@@ -1481,6 +1602,9 @@ impl PeerNetwork for TlsNetwork {
         peer: &DiscoveredPeer,
         claim: &PairingClaim,
     ) -> Result<Box<dyn PeerChannel>, NetworkError> {
+        if claim.is_expired(chrono::Utc::now()) {
+            return Err(NetworkError::AuthenticationFailed);
+        }
         let mut stream = self.dial(peer, ALPN_PAIR)?;
         let sent_auth = authenticate_client_pairing(&mut stream, claim, None)?;
         #[cfg(test)]
@@ -1494,8 +1618,9 @@ impl PeerNetwork for TlsNetwork {
         let _ = sent_auth;
         Ok(Box::new(TlsChannel::new(
             stream,
-            peer.device_id(),
+            None,
             self.config.frame_timeout,
+            None,
         )))
     }
 
@@ -1513,6 +1638,12 @@ impl PeerNetwork for TlsNetwork {
             .pairing_claim
             .clone()
             .ok_or(NetworkError::AuthenticationFailed)?;
+        if registered.is_expired(chrono::Utc::now()) {
+            // The offer is over. Drop the registered claim so no worker can
+            // authenticate against it afterwards, and return nothing.
+            self.end_pairing()?;
+            return Err(NetworkError::AuthenticationFailed);
+        }
         if !registered.matches_claim(claim) {
             return Err(NetworkError::AuthenticationFailed);
         }
@@ -1569,12 +1700,12 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Mutex as StdMutex;
 
-    use chrono::Utc;
+    use chrono::{TimeDelta, Utc};
 
     use super::*;
     use crate::mdns::{DiscoveryAdapter, DiscoveryEvent, ServiceRecord};
     use crate::network::{PeerAdvertisement, PeerEndpoint};
-    use crate::pairing::{PairingCode, PairingSecret};
+    use crate::pairing::{PairingCode, PairingHost, PairingSecret, PAIRING_TTL_SECS};
     use crate::registry::{DeviceRecord, DeviceRegistry};
     use crate::sync::{SyncCredentials, SyncEngine, SyncProgress, SyncStateStore};
     use crate::user_manager::UserManager;
@@ -1846,7 +1977,7 @@ mod tests {
         b.start_advertising().unwrap();
 
         let mut channel = a.connect(&peer_for(&b, b_id)).unwrap();
-        assert_eq!(channel.peer_device_id(), b_id);
+        assert_eq!(channel.peer_device_id(), Some(b_id));
         assert_eq!(
             a.negotiated_version(),
             Some(ProtocolVersion::TLSv1_3),
@@ -1854,7 +1985,7 @@ mod tests {
         );
 
         let mut responder = b.accept().unwrap().expect("the channel is queued");
-        assert_eq!(responder.peer_device_id(), a_id);
+        assert_eq!(responder.peer_device_id(), Some(a_id));
         channel.close();
         responder.close();
     }
@@ -1895,8 +2026,108 @@ mod tests {
 
         // The rejection is per connection, not a poisoned session.
         let second = a.connect(&peer).unwrap();
-        assert_eq!(second.peer_device_id(), b_id);
+        assert_eq!(second.peer_device_id(), Some(b_id));
         assert!(b.accept().unwrap().is_some());
+    }
+
+    #[test]
+    fn test_an_expired_claim_cannot_authenticate_at_the_transport() {
+        let source_id = Uuid::new_v4();
+        let joiner_id = Uuid::new_v4();
+        let source = test_network(source_id);
+        let joiner = test_network(joiner_id);
+
+        let past = Utc::now() - TimeDelta::seconds(PAIRING_TTL_SECS + 5);
+        let (_, offer) = PairingHost::start(Uuid::new_v4(), source_id, 3, [9u8; 32], past);
+        let claim = PairingCode::qr(offer.qr_payload.clone()).claim().unwrap();
+        assert!(
+            claim.is_expired(Utc::now()),
+            "the fixture must really be past its TTL"
+        );
+
+        source.begin_pairing(&claim).unwrap();
+        source.start_advertising().unwrap();
+
+        // Even if a caller registers it, the transport refuses the expired
+        // offer on its own, before the app-level host is consulted.
+        assert!(matches!(
+            source.accept_for_pairing(&claim),
+            Err(NetworkError::AuthenticationFailed)
+        ));
+        let Err(error) = joiner.connect_for_pairing(&peer_for(&source, source_id), &claim) else {
+            panic!("an expired code must not open a pairing channel");
+        };
+        assert_eq!(error, NetworkError::AuthenticationFailed);
+        assert!(
+            source.accept_for_pairing(&claim).is_err(),
+            "the expired claim must not be left registered"
+        );
+    }
+
+    #[test]
+    fn test_serving_refuses_a_second_inbound_sync_while_one_is_in_flight() {
+        let a_id = Uuid::new_v4();
+        let b_id = Uuid::new_v4();
+        let c_id = Uuid::new_v4();
+        let a_key = Arc::new(DeviceKeypair::generate());
+        let b_key = Arc::new(DeviceKeypair::generate());
+        let c_key = Arc::new(DeviceKeypair::generate());
+
+        let mut registry = DeviceRegistry::new();
+        for (id, key, name) in [
+            (b_id, &b_key, "B"),
+            (a_id, &a_key, "A"),
+            (c_id, &c_key, "C"),
+        ] {
+            registry
+                .admit(DeviceRecord::admit(
+                    id,
+                    key.public_key(),
+                    name.to_string(),
+                    "windows".to_string(),
+                    b_id,
+                    Utc::now(),
+                    &b_key,
+                ))
+                .unwrap();
+        }
+
+        let a = test_network(a_id);
+        let b = test_network(b_id);
+        let c = test_network(c_id);
+        a.set_session(&key_session(a_id, &a_key, &registry)).unwrap();
+        b.set_session(&key_session(b_id, &b_key, &registry)).unwrap();
+        c.set_session(&key_session(c_id, &c_key, &registry)).unwrap();
+
+        b.start_advertising().unwrap();
+        b.begin_serving().unwrap();
+
+        let mut first = a.connect(&peer_for(&b, b_id)).unwrap();
+        let mut accepted = loop {
+            if let Some(channel) = b.accept().unwrap() {
+                break channel;
+            }
+        };
+
+        // The first channel is in flight, so a second must be refused rather
+        // than queued behind it.
+        let Err(error) = c.connect(&peer_for(&b, b_id)) else {
+            panic!("a second inbound sync must be refused while one is in flight");
+        };
+        assert_eq!(error, NetworkError::AuthenticationFailed);
+        assert!(
+            b.accept().unwrap().is_none(),
+            "the refused connection must not reach the queue"
+        );
+
+        // Once the first is finished, the gate opens again.
+        first.close();
+        accepted.close();
+        drop(accepted);
+        let mut second = c.connect(&peer_for(&b, b_id)).unwrap();
+        assert!(b.accept().unwrap().is_some(), "the next sync is accepted");
+        second.close();
+        b.end_serving();
     }
 
     #[test]
@@ -2291,7 +2522,11 @@ mod tests {
             .accept_for_pairing(&claim)
             .unwrap()
             .expect("the join is waiting");
-        assert_eq!(initiator.peer_device_id(), source_id);
+        assert_eq!(
+            initiator.peer_device_id(),
+            None,
+            "a pairing channel has no Device identity until the join frame names one"
+        );
 
         initiator.send(SyncMessage::Pairing(join)).unwrap();
         let request = match responder.receive().unwrap() {

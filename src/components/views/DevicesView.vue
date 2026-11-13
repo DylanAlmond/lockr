@@ -51,6 +51,8 @@ const {
   stopDiscovery,
   listDiscoveredPeers,
   revokeDevice,
+  startServing,
+  stopServing,
   syncWithDevice,
   cancelSync,
   onSyncProgress,
@@ -200,6 +202,10 @@ async function beginDiscovery() {
     return;
   }
 
+  // Serving needs an open discovery session to have a listener; starting it
+  // never advertises on its own.
+  await startServing();
+
   await refreshPeers();
 }
 
@@ -345,6 +351,7 @@ onUnmounted(() => {
   if (pollTimer) clearInterval(pollTimer);
   unlistenProgress?.();
   if (discoveryOn.value) {
+    void stopServing();
     void stopDiscovery();
   }
 });
