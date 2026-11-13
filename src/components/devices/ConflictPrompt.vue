@@ -3,7 +3,9 @@ import { computed, ref, watch } from 'vue';
 import { TriangleAlert, ChevronLeft, ChevronRight, ShieldQuestionMark } from '@lucide/vue';
 import Button from '../ui/Button.vue';
 import type { ConflictChoice, SyncConflict, SyncConflictSide } from '../../types';
+import { shortId, vaultLabelById } from '../../util/labels';
 import type { ConflictSession } from '../../composables/useSync';
+import { useSync } from '../../composables/useSync';
 
 const props = defineProps<{
   session: ConflictSession;
@@ -20,6 +22,9 @@ const emit = defineEmits<{
 }>();
 
 const index = ref(0);
+const { revealConflictCandidate } = useSync();
+const revealed = ref<Record<string, string | null>>({});
+const revealing = ref<string | null>(null);
 
 watch(
   () => props.session.conflicts.length,
@@ -35,6 +40,13 @@ watch(
 const conflicts = computed(() => props.session.conflicts);
 const current = computed<SyncConflict | null>(() => conflicts.value[index.value] ?? null);
 const position = computed(() => `${index.value + 1} of ${conflicts.value.length}`);
+
+// A revealed value belongs to the field the User was looking at. Moving to
+// another Conflict re-masks it rather than carrying a secret along.
+watch(current, () => {
+  revealed.value = {};
+  revealing.value = null;
+});
 
 const FIELD_LABELS: Record<string, string> = {
   display_name: 'Display name',
@@ -69,12 +81,8 @@ function fieldLabel(fieldKey: string): string {
   );
 }
 
-function shortId(id: string): string {
-  return id.slice(0, 8);
-}
-
 function vaultLabel(vaultId: string): string {
-  return props.vaultNames[vaultId] ?? `Vault ${shortId(vaultId)}`;
+  return vaultLabelById(vaultId, props.vaultNames);
 }
 
 function deviceLabel(deviceId: string): string {
@@ -151,9 +159,51 @@ function formatValue(value: unknown): string {
   return JSON.stringify(value);
 }
 
-function sideValue(side: SyncConflictSide): string {
-  if (current.value?.is_secret) return 'Value hidden';
-  return formatValue(side.value);
+function sideKey(entry: SideEntry): string {
+  return `${entry.side.device}:${entry.side.counter}`;
+}
+
+function isRevealed(entry: SideEntry): boolean {
+  return Object.prototype.hasOwnProperty.call(revealed.value, sideKey(entry));
+}
+
+function revealedValue(entry: SideEntry): string {
+  const value = revealed.value[sideKey(entry)];
+  return value === null || value === undefined ? 'Not set' : value;
+}
+
+async function toggleReveal(entry: SideEntry) {
+  if (!current.value || !entry.choice || props.busy) return;
+
+  const key = sideKey(entry);
+
+  if (isRevealed(entry)) {
+    const next = { ...revealed.value };
+    delete next[key];
+    revealed.value = next;
+    return;
+  }
+
+  revealing.value = key;
+  const result = await revealConflictCandidate({
+    sessionId: props.session.sessionId,
+    vaultId: current.value.vault_id,
+    itemId: current.value.item_id ?? null,
+    fieldKey: current.value.field_key,
+    choice: entry.choice
+  });
+  revealing.value = null;
+
+  if (result) {
+    revealed.value = { ...revealed.value, [key]: result.value };
+  }
+}
+
+function sideValue(entry: SideEntry): string {
+  if (current.value?.is_secret) {
+    return isRevealed(entry) ? revealedValue(entry) : 'Value hidden';
+  }
+  return formatValue(entry.side.value);
 }
 
 function choose(choice: ConflictChoice | null) {
@@ -212,8 +262,9 @@ function next() {
 
           <p v-if="current.is_secret" class="secret-note">
             <TriangleAlert :size="16" aria-hidden="true" />
-            This is a secret field. Lockr never shows either value here; choosing a side copies
-            that Device's value without revealing it.
+            This is a secret field. Lockr does not put either value in the Conflict report; you can
+            reveal one side at a time when you need to compare them. Choosing a side copies that
+            Device's value without revealing it.
           </p>
 
           <div class="side-grid">
@@ -228,9 +279,31 @@ function next() {
                 <span v-if="entry.choice === 'local'" class="side-tag">This copy</span>
               </header>
 
-              <p class="side-value" :class="{ 'side-value--secret': current.is_secret }">
-                {{ sideValue(entry.side) }}
+              <p
+                class="side-value"
+                :class="{
+                  'side-value--secret': current.is_secret && !isRevealed(entry),
+                  'side-value--revealed': current.is_secret && isRevealed(entry)
+                }"
+              >
+                {{ sideValue(entry) }}
               </p>
+
+              <Button
+                v-if="current.is_secret && entry.choice"
+                variant="label"
+                size="small"
+                :disabled="busy || revealing === sideKey(entry)"
+                @click="toggleReveal(entry)"
+              >
+                {{
+                  revealing === sideKey(entry)
+                    ? 'Revealing…'
+                    : isRevealed(entry)
+                      ? 'Hide value'
+                      : 'Reveal value'
+                }}
+              </Button>
 
               <Button
                 v-if="entry.choice"
@@ -466,6 +539,11 @@ function next() {
   align-items: center;
   color: var(--color-text-muted);
   font-style: italic;
+}
+
+.side-value--revealed {
+  font-family: ui-monospace, monospace;
+  font-size: 0.8125rem;
 }
 
 .conflict-error {

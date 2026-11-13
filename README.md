@@ -20,7 +20,7 @@ This application prioritizes security by keeping all business logic, state manag
 - **Resistant Key Derivation**: Master passwords are hashed using Argon2id (64MB memory, 3 iterations), making brute-force attacks computationally infeasible.
 - **Memory Safety**: Uses the `zeroize` crate and custom `Drop` implementations to ensure passwords and encryption keys are securely wiped from RAM when vaults are locked or swapped.
 - **Zero-Knowledge Frontend**: The Vue UI never receives your passwords unless you explicitly request them. Decrypted vaults are stripped of secrets before crossing the Tauri bridge.
-- **Local-First & Offline**: No servers, no cloud, no network requests. Your data stays on your machine.
+- **Offline by Default**: No servers and no cloud. Sync is optional and peer-to-peer between your own Devices on the local network, and only runs when you start it.
 - **Cross-Platform**: Built with Tauri, resulting in a small, native-feeling application for Windows, macOS, and Linux.
 
 ## Tech Stack

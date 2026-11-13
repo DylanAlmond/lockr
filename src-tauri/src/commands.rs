@@ -4,7 +4,7 @@ use std::println;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -17,8 +17,8 @@ use crate::mdns::DiscoverySession;
 use crate::network::{NetworkError, PeerChannel, PeerNetwork, SyncMessage, TransportSession};
 use crate::pairing::{PairingClaim, PAIRING_TTL_SECS};
 use crate::sync::{
-    PendingSync, SyncControl, SyncCredentials, SyncEngine, SyncOutcome, SyncProgress, SyncReport,
-    SyncStateStore,
+    PendingConflict, PendingSync, SyncCancel, SyncControl, SyncCredentials, SyncEngine, SyncOutcome,
+    SyncProgress, SyncReport, SyncStateStore,
 };
 use crate::transport::TlsNetwork;
 use crate::user_manager::UserManager;
@@ -28,30 +28,6 @@ use crate::{
     PairingApprovalPrompt, PairingCode, PairingMessage, PairingOffer, SafeItem, SafeVault,
     SecretInput, User, UserId, VaultError, VaultId, CURRENT_SCHEMA_VERSION,
 };
-
-/// A one-way "stop waiting for pairing" flag.
-///
-/// Like [`SyncControl`], it lives outside the shared state so cancelling a
-/// pairing command that is blocked on the network never waits for the lock
-/// that command deliberately does not hold.
-#[derive(Default)]
-pub struct PairingControl {
-    cancelled: AtomicBool,
-}
-
-impl PairingControl {
-    pub fn reset(&self) {
-        self.cancelled.store(false, Ordering::SeqCst);
-    }
-
-    pub fn cancel(&self) {
-        self.cancelled.store(true, Ordering::SeqCst);
-    }
-
-    pub fn is_cancelled(&self) -> bool {
-        self.cancelled.load(Ordering::SeqCst)
-    }
-}
 
 /// The source Device's live pairing state: the offer, its claim, and the one
 /// authenticated connection a join arrived on.
@@ -103,7 +79,7 @@ pub struct ManagerState {
     pub vault_manager: Option<VaultManager>,
     pub user_manager: Option<UserManager>,
 
-    /// Master password â€” only needed for create_vault / unlock_vault.
+    /// Master password — only needed for create_vault / unlock_vault.
     /// Held in memory so the user can unlock additional vaults without
     /// re-entering their password. Zeroized on logout.
     pub master_password: Option<String>,
@@ -553,7 +529,7 @@ pub fn login_user(
 
     let user = user_manager.get_user(&user_id).map_err(|e| e.to_string())?;
 
-    // Unlock all vaults â€” each derives its master key once (Argon2id).
+    // Unlock all vaults — each derives its master key once (Argon2id).
     // After this, all further operations use the cached keys.
     for vault_id in &user.vault_ids {
         let _ = vault_manager.unlock_vault(*vault_id, mp, sk);
@@ -566,7 +542,7 @@ pub fn login_user(
 pub fn logout(
     state: AppState,
     sync_control: State<'_, SyncControl>,
-    pairing_control: State<'_, PairingControl>,
+    pairing_control: State<'_, SyncCancel>,
 ) -> Result<(), String> {
     // A blocked pairing wait may not hold the state lock; cancel it first.
     pairing_control.cancel();
@@ -605,7 +581,7 @@ pub fn logout(
 pub fn delete_user(
     state: AppState,
     sync_control: State<'_, SyncControl>,
-    pairing_control: State<'_, PairingControl>,
+    pairing_control: State<'_, SyncCancel>,
 ) -> Result<(), String> {
     pairing_control.cancel();
     stop_serving_blocking(state.inner(), sync_control.inner());
@@ -699,7 +675,7 @@ fn pairing_transport_error(error: NetworkError) -> String {
 /// Mint the offer and start accepting joins for it.
 fn run_start_pairing(
     state: &mut ManagerState,
-    control: &PairingControl,
+    control: &SyncCancel,
     now: DateTime<Utc>,
 ) -> Result<PairingOffer, String> {
     control.reset();
@@ -745,7 +721,7 @@ fn run_start_pairing(
 /// human approval. The authenticated channel is kept for [`run_approve_pairing`].
 fn run_await_pairing_request(
     state: &Mutex<ManagerState>,
-    control: &PairingControl,
+    control: &SyncCancel,
 ) -> Result<PairingApprovalPrompt, String> {
     let (network, claim, expires_at) = {
         let state = state.lock().map_err(|e| e.to_string())?;
@@ -947,7 +923,7 @@ fn run_approve_pairing(
 /// approval outcome on the same channel. Bounded by the offer's TTL.
 fn run_join_pairing(
     state: &Mutex<ManagerState>,
-    control: &PairingControl,
+    control: &SyncCancel,
     code: &PairingCode,
     now: DateTime<Utc>,
 ) -> Result<PairingJoinReady, String> {
@@ -1163,7 +1139,7 @@ fn run_complete_pairing(
 #[tauri::command]
 pub fn start_pairing(
     state: AppState,
-    control: State<'_, PairingControl>,
+    control: State<'_, SyncCancel>,
 ) -> Result<PairingOffer, String> {
     let mut state = state.lock().map_err(|e| e.to_string())?;
     run_start_pairing(&mut state, control.inner(), Utc::now())
@@ -1178,7 +1154,7 @@ pub async fn receive_pairing_request(
 ) -> Result<PairingApprovalPrompt, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<Mutex<ManagerState>>();
-        let control = app.state::<PairingControl>();
+        let control = app.state::<SyncCancel>();
         run_await_pairing_request(state.inner(), control.inner())
     })
     .await
@@ -1204,7 +1180,7 @@ pub fn approve_pairing(
 /// Abandon a live offer or an in-progress join, including a command currently
 /// blocked waiting for the other Device.
 #[tauri::command]
-pub fn cancel_pairing(state: AppState, control: State<'_, PairingControl>) -> Result<(), String> {
+pub fn cancel_pairing(state: AppState, control: State<'_, SyncCancel>) -> Result<(), String> {
     control.cancel();
     let mut state = state.lock().map_err(|e| e.to_string())?;
     state.teardown_pairing();
@@ -1221,7 +1197,7 @@ pub async fn join_pairing(
 ) -> Result<PairingJoinReady, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<Mutex<ManagerState>>();
-        let control = app.state::<PairingControl>();
+        let control = app.state::<SyncCancel>();
         run_join_pairing(state.inner(), control.inner(), &code, Utc::now())
     })
     .await
@@ -1698,7 +1674,7 @@ pub fn flush_all(state: AppState) -> Result<(), String> {
 }
 
 /// Toggle autosave on/off.
-/// When off, mutations only mark vaults dirty â€” you must call
+/// When off, mutations only mark vaults dirty — you must call
 /// flush_vault / flush_all to persist.
 #[tauri::command]
 pub fn set_autosave(state: AppState, enabled: bool) -> Result<(), String> {
@@ -1940,6 +1916,58 @@ pub struct ConflictResolutionResult {
     pub remaining: usize,
 }
 
+/// The failure shape for a sync command.
+///
+/// The UI matches on `code`, never on `message`: the message is for the User
+/// and may be reworded, while the code is part of the command contract.
+#[derive(Debug, Clone, Serialize)]
+pub struct SyncCommandError {
+    pub code: String,
+    pub message: String,
+}
+
+impl SyncCommandError {
+    fn unknown(message: impl Into<String>) -> Self {
+        Self {
+            code: "sync.unknown".to_string(),
+            message: message.into(),
+        }
+    }
+}
+
+impl From<VaultError> for SyncCommandError {
+    fn from(error: VaultError) -> Self {
+        Self {
+            code: error.code().to_string(),
+            message: error.to_string(),
+        }
+    }
+}
+
+impl From<String> for SyncCommandError {
+    fn from(message: String) -> Self {
+        Self::unknown(message)
+    }
+}
+
+impl From<NetworkError> for SyncCommandError {
+    fn from(error: NetworkError) -> Self {
+        match error {
+            NetworkError::DiscoveryFailed(detail) => {
+                VaultError::SyncDiscoveryFailed(detail).into()
+            }
+            NetworkError::TransportUnavailable(detail) => {
+                VaultError::SyncTransportUnavailable(detail).into()
+            }
+            NetworkError::Timeout => {
+                VaultError::SyncTimeout("the other Device did not answer".into()).into()
+            }
+            NetworkError::AuthenticationFailed => VaultError::SyncAuthenticationFailed.into(),
+            other => Self::unknown(other.to_string()),
+        }
+    }
+}
+
 fn sync_discovery_error(err: NetworkError) -> String {
     match err {
         NetworkError::DiscoveryFailed(detail) => {
@@ -1962,7 +1990,7 @@ fn sync_discovery_error(err: NetworkError) -> String {
 pub async fn sync_with_device(
     app: tauri::AppHandle,
     device_id: String,
-) -> Result<SyncReport, String> {
+) -> Result<SyncReport, SyncCommandError> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<Mutex<ManagerState>>();
         let control = app.state::<SyncControl>();
@@ -1971,7 +1999,7 @@ pub async fn sync_with_device(
         })
     })
     .await
-    .map_err(|error| format!("the sync task did not finish: {error}"))?
+    .map_err(|error| SyncCommandError::unknown(format!("the sync task did not finish: {error}")))?
 }
 
 /// The body of [`sync_with_device`], separate from Tauri so the command's
@@ -1982,55 +2010,92 @@ fn run_sync_with_device(
     control: &SyncControl,
     device_id: &str,
     mut progress: impl FnMut(SyncProgress),
-) -> Result<SyncReport, String> {
-    let peer_device_id: crate::DeviceId = Uuid::parse_str(device_id).map_err(|e| e.to_string())?;
+) -> Result<SyncReport, SyncCommandError> {
+    let peer_device_id: crate::DeviceId = Uuid::parse_str(device_id).map_err(|e| {
+        SyncCommandError::from(VaultError::SyncRefused(format!(
+            "the Device id is not valid: {e}"
+        )))
+    })?;
 
     // Claim the single sync slot before touching the shared state. A second
     // invocation is refused here, immediately, instead of queueing behind the
     // first on that state and finding the slot free only once it finishes.
-    let lease = control.begin().map_err(|error| error.to_string())?;
+    let lease = control.begin()?;
 
-    let mut state = state.lock().map_err(|e| e.to_string())?;
+    let mut state = state.lock().map_err(|e| SyncCommandError::unknown(e.to_string()))?;
 
     let user_id = state
         .user_manager
         .as_ref()
         .and_then(|manager| manager.active_user_id)
-        .ok_or_else(|| VaultError::SyncNotLoggedIn.to_string())?;
+        .ok_or(VaultError::SyncNotLoggedIn)?;
 
     if state.master_password.is_none() || state.secret_key.is_none() {
-        return Err(VaultError::SyncNotLoggedIn.to_string());
+        return Err(VaultError::SyncNotLoggedIn.into());
     }
 
     let sync_set = state
         .sync_state
         .as_ref()
         .ok_or_else(|| {
-            VaultError::SyncRefused("device-local sync state is unavailable".into()).to_string()
+            VaultError::SyncRefused("device-local sync state is unavailable".into())
         })?
         .scope(&user_id);
 
     state.configure_network_session()?;
 
     let network = state.network.clone().ok_or_else(|| {
-        VaultError::SyncTransportUnavailable("no network seam".into()).to_string()
+        VaultError::SyncTransportUnavailable("no network seam".into())
     })?;
 
-    network.start_advertising().map_err(sync_discovery_error)?;
+    // A sync borrows visibility; it does not own it. When the Devices screen
+    // already has discovery open, stopping advertising here would leave
+    // `state.discovery` alive over a dead mDNS session and listener, so the
+    // screen would show no peers and inbound sync would stay unreachable.
+    let owns_advertising = state.discovery.is_none();
+    network.start_advertising()?;
 
-    let peer = match network.discover().map_err(sync_discovery_error) {
-        Ok(peers) => peers
-            .into_iter()
-            .find(|peer| peer.device_id() == peer_device_id),
-        Err(error) => {
-            let _ = network.stop_advertising();
-            return Err(error);
+    let peer = {
+        // Discovery is live, but a fresh mDNS query takes a moment to answer.
+        // Wait briefly so a Device that is right there is not reported
+        // unreachable merely because the first poll raced the response.
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            match network.discover() {
+                Ok(peers) => {
+                    if let Some(peer) = peers
+                        .into_iter()
+                        .find(|peer| peer.device_id() == peer_device_id)
+                    {
+                        break Some(peer);
+                    }
+                }
+                Err(error) => {
+                    if owns_advertising {
+                        let _ = network.stop_advertising();
+                    }
+                    return Err(error.into());
+                }
+            }
+
+            if lease.token().is_cancelled() {
+                if owns_advertising {
+                    let _ = network.stop_advertising();
+                }
+                return Err(VaultError::SyncCancelled.into());
+            }
+            if Instant::now() >= deadline {
+                break None;
+            }
+            std::thread::sleep(Duration::from_millis(100));
         }
     };
 
     let Some(peer) = peer else {
-        let _ = network.stop_advertising();
-        return Err(VaultError::SyncPeerUnreachable(peer_device_id.to_string()).to_string());
+        if owns_advertising {
+            let _ = network.stop_advertising();
+        }
+        return Err(VaultError::SyncPeerUnreachable(peer_device_id.to_string()).into());
     };
 
     let result = (|| -> Result<SyncOutcome, VaultError> {
@@ -2072,10 +2137,14 @@ fn run_sync_with_device(
         engine.collect(sent, &mut progress)
     })();
 
-    let _ = network.stop_advertising();
-    let outcome = result.map_err(|error| error.to_string())?;
+    if owns_advertising {
+        let _ = network.stop_advertising();
+    }
+    let outcome = result?;
 
-    state.remember_sync_outcome(user_id, peer_device_id, outcome)
+    state
+        .remember_sync_outcome(user_id, peer_device_id, outcome)
+        .map_err(SyncCommandError::from)
 }
 
 /// Stop an in-flight sync at its next frame boundary.
@@ -2284,6 +2353,115 @@ pub fn set_vault_syncing(state: AppState, vault_id: String, syncing: bool) -> Re
         .map_err(|e| e.to_string())
 }
 
+/// Which open Conflict a resolution or reveal refers to. A Vault-metadata
+/// Conflict has no Item id; an Item Conflict must match the exact identity.
+fn pending_conflict_matches(
+    conflict: &PendingConflict,
+    vault_id: VaultId,
+    item_id: Option<crate::ItemId>,
+    field_key: &str,
+) -> bool {
+    if conflict.vault_id != vault_id || conflict.field_key != field_key {
+        return false;
+    }
+
+    match (&conflict.scope, item_id) {
+        (crate::ConflictScope::Item { item_id: owned, .. }, Some(requested)) => {
+            *owned == requested
+        }
+        (crate::ConflictScope::Vault, None) => true,
+        _ => false,
+    }
+}
+
+fn find_pending_conflict<'a>(
+    pending: &'a PendingSync,
+    vault_id: VaultId,
+    item_id: Option<crate::ItemId>,
+    field_key: &str,
+) -> Option<&'a PendingConflict> {
+    pending
+        .conflicts
+        .iter()
+        .find(|conflict| pending_conflict_matches(conflict, vault_id, item_id, field_key))
+}
+
+/// Reveal one secret candidate on demand. This is the per-field fetch the Safe
+/// View Pattern requires; the Conflict payload itself never carries secrets.
+fn read_conflict_candidate_secret(
+    pending: &PendingSync,
+    vault_id: VaultId,
+    item_id: Option<crate::ItemId>,
+    field_key: &str,
+    choice: ConflictChoice,
+) -> Result<Option<String>, String> {
+    let conflict =
+        find_pending_conflict(pending, vault_id, item_id, field_key).ok_or_else(|| {
+            VaultError::SyncConflictResolution(
+                "no open conflict matches that Vault and field".into(),
+            )
+            .to_string()
+        })?;
+
+    if !conflict.is_secret {
+        return Err(VaultError::SyncConflictResolution(
+            "only secret Conflict values are fetched on demand".into(),
+        )
+        .to_string());
+    }
+
+    let candidate = match choice {
+        ConflictChoice::Local => &conflict.local,
+        ConflictChoice::Remote => &conflict.remote,
+    };
+
+    Ok(match candidate {
+        Some(crate::merge::FieldValue::Secret(value)) => Some(value.clone()),
+        _ => None,
+    })
+}
+
+/// Fetch one side of a secret Conflict on demand.
+///
+/// The value crosses the Tauri bridge only for this one field, only when the
+/// User asks, and only for the sync session that produced it. `null` means the
+/// candidate has no value; a failed fetch is an error, never conflated with it.
+#[tauri::command]
+pub fn get_conflict_candidate_secret(
+    state: AppState,
+    session_id: String,
+    vault_id: String,
+    item_id: Option<String>,
+    field_key: String,
+    choice: ConflictChoice,
+) -> Result<Option<String>, String> {
+    let state = state.lock().map_err(|e| e.to_string())?;
+    let session_id: Uuid = Uuid::parse_str(&session_id).map_err(|e| e.to_string())?;
+    let vault_id: VaultId = Uuid::parse_str(&vault_id).map_err(|e| e.to_string())?;
+    let item_id: Option<crate::ItemId> = item_id
+        .map(|value| Uuid::parse_str(&value).map_err(|e| e.to_string()))
+        .transpose()?;
+
+    let user_id = state
+        .user_manager
+        .as_ref()
+        .and_then(|manager| manager.active_user_id)
+        .ok_or_else(|| VaultError::SyncNotLoggedIn.to_string())?;
+
+    let pending = state.pending_syncs.get(&session_id).ok_or_else(|| {
+        VaultError::SyncConflictResolution("this sync session is no longer open".into()).to_string()
+    })?;
+
+    if pending.user_id != user_id {
+        return Err(VaultError::SyncConflictResolution(
+            "this sync session belongs to another User".into(),
+        )
+        .to_string());
+    }
+
+    read_conflict_candidate_secret(pending, vault_id, item_id, &field_key, choice)
+}
+
 /// Apply the User's explicit choice for one field or Vault-metadata Conflict.
 /// Only this command writes a contested value; the sync itself left the local
 /// value in place.
@@ -2322,27 +2500,14 @@ pub fn resolve_sync_conflict(
             .to_string());
         }
 
-        let conflict = pending
-            .conflicts
-            .iter()
-            .find(|conflict| {
-                if conflict.vault_id != vault_id || conflict.field_key != field_key {
-                    return false;
-                }
-                match (&conflict.scope, item_id) {
-                    (crate::ConflictScope::Item { item_id: owned, .. }, Some(requested)) => {
-                        *owned == requested
-                    }
-                    (crate::ConflictScope::Vault, None) => true,
-                    _ => false,
-                }
-            })
-            .ok_or_else(|| {
+        let conflict = find_pending_conflict(pending, vault_id, item_id, &field_key).ok_or_else(
+            || {
                 VaultError::SyncConflictResolution(
                     "no open conflict matches that Vault and field".into(),
                 )
                 .to_string()
-            })?;
+            },
+        )?;
 
         (
             conflict.scope.clone(),
@@ -2525,9 +2690,14 @@ mod tests {
     #[derive(Default)]
     struct TestDiscovery {
         records: Mutex<Vec<ResolvedService>>,
+        advertising: AtomicBool,
     }
 
     impl TestDiscovery {
+        fn is_advertising(&self) -> bool {
+            self.advertising.load(Ordering::SeqCst)
+        }
+
         fn publish(&self, device_id: crate::DeviceId, port: u16) {
             self.records.lock().unwrap().push(ResolvedService {
                 service_type: crate::network::SYNC_SERVICE_TYPE.to_string(),
@@ -2541,6 +2711,7 @@ mod tests {
 
     impl DiscoveryAdapter for TestDiscovery {
         fn advertise(&self, _record: ServiceRecord) -> Result<(), NetworkError> {
+            self.advertising.store(true, Ordering::SeqCst);
             Ok(())
         }
 
@@ -2549,6 +2720,7 @@ mod tests {
         }
 
         fn stop(&self) -> Result<(), NetworkError> {
+            self.advertising.store(false, Ordering::SeqCst);
             Ok(())
         }
 
@@ -2683,7 +2855,7 @@ mod tests {
     /// Pair the two instances through the command bodies only: no caller ever
     /// supplies, alters or replays a handshake frame.
     fn pair_instances(lab: &PairingLab) -> PairingJoinReady {
-        let source_control = PairingControl::default();
+        let source_control = SyncCancel::default();
         let offer = {
             let mut source = lab.source.lock().unwrap();
             run_start_pairing(&mut source, &source_control, Utc::now()).unwrap()
@@ -2693,7 +2865,7 @@ mod tests {
             .publish(lab.source_id, lab.source_net.local_port());
 
         let code = PairingCode::qr(offer.qr_payload.clone());
-        let join_control = PairingControl::default();
+        let join_control = SyncCancel::default();
         let (prompt_tx, prompt_rx) = mpsc::channel();
 
         let ready = std::thread::scope(|scope| {
@@ -2823,6 +2995,90 @@ mod tests {
         }
     }
 
+    fn pending_secret_conflict() -> PendingConflict {
+        PendingConflict {
+            vault_id: Uuid::new_v4(),
+            scope: crate::ConflictScope::Item {
+                item_id: Uuid::new_v4(),
+                display_name: Some("Mail".to_string()),
+            },
+            field_key: "password".to_string(),
+            is_secret: true,
+            local: Some(crate::merge::FieldValue::Secret("local-secret".to_string())),
+            remote: Some(crate::merge::FieldValue::Secret("remote-secret".to_string())),
+            local_version: None,
+            sides: [conflict_side(Uuid::new_v4()), conflict_side(Uuid::new_v4())],
+        }
+    }
+
+    #[test]
+    fn test_a_conflict_secret_is_revealed_one_field_at_a_time() {
+        let conflict = pending_secret_conflict();
+        let vault_id = conflict.vault_id;
+        let item_id = conflict.item_id();
+        let pending = PendingSync {
+            user_id: Uuid::new_v4(),
+            conflicts: vec![conflict],
+        };
+
+        assert_eq!(
+            read_conflict_candidate_secret(
+                &pending,
+                vault_id,
+                item_id,
+                "password",
+                ConflictChoice::Local
+            )
+            .unwrap(),
+            Some("local-secret".to_string())
+        );
+        assert_eq!(
+            read_conflict_candidate_secret(
+                &pending,
+                vault_id,
+                item_id,
+                "password",
+                ConflictChoice::Remote
+            )
+            .unwrap(),
+            Some("remote-secret".to_string())
+        );
+        assert!(
+            read_conflict_candidate_secret(
+                &pending,
+                vault_id,
+                item_id,
+                "password",
+                ConflictChoice::Local
+            )
+            .is_ok(),
+            "the reveal is per-field, not a payload expansion"
+        );
+    }
+
+    #[test]
+    fn test_a_non_secret_conflict_is_not_fetched_as_a_secret() {
+        let conflict = pending_conflict();
+        let vault_id = conflict.vault_id;
+        let item_id = conflict.item_id();
+        let pending = PendingSync {
+            user_id: Uuid::new_v4(),
+            conflicts: vec![conflict],
+        };
+
+        assert!(
+            read_conflict_candidate_secret(
+                &pending,
+                vault_id,
+                item_id,
+                "name",
+                ConflictChoice::Local
+            )
+            .is_err(),
+            "non-secret values already travel in the safe Conflict payload"
+        );
+    }
+
     #[test]
     fn test_a_second_sync_is_refused_from_the_command_path_without_queueing() {
         let temp_dir = setup();
@@ -2848,7 +3104,7 @@ mod tests {
             drop(held);
             let result = received.expect("a second sync must be refused, not queued");
             assert!(
-                matches!(result, Err(ref message) if message.contains("already in progress")),
+                matches!(result, Err(ref error) if error.code == "sync.busy"),
                 "unexpected result: {result:?}"
             );
         });
@@ -3037,6 +3293,65 @@ mod tests {
     }
 
     #[test]
+    fn test_a_sync_leaves_a_discovery_session_it_did_not_open_advertising() {
+        let lab = pairing_lab();
+        pair_instances(&lab);
+
+        // The Devices screen owns this session: it opened discovery before the
+        // User pressed Sync. The sync must borrow visibility, not take it over.
+        {
+            let mut source = lab.source.lock().unwrap();
+            let network = source.network.clone().unwrap();
+            source.discovery = Some(DiscoverySession::start(&network).unwrap());
+        }
+        assert!(
+            lab.source_discovery.is_advertising(),
+            "the screen's discovery session advertises"
+        );
+
+        lab.source_discovery
+            .publish(lab.joiner_id, lab.joiner_net.local_port());
+        lab.joiner_net.start_advertising().unwrap();
+        lab.joiner_net.begin_serving().unwrap();
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let server_control = SyncControl::default();
+        let source_control = SyncControl::default();
+
+        std::thread::scope(|scope| {
+            let server = scope.spawn(|| serve_loop(&lab.joiner, &stop, &server_control, |_| {}));
+
+            run_sync_with_device(
+                &lab.source,
+                &source_control,
+                &lab.joiner_id.to_string(),
+                |_| {},
+            )
+            .expect("the sync completes");
+
+            stop.store(true, Ordering::SeqCst);
+            server_control.cancel();
+            server.join().expect("the server loop stops");
+        });
+
+        let source = lab.source.lock().unwrap();
+        assert!(
+            source.discovery.is_some(),
+            "the discovery session the screen owns is still open"
+        );
+        assert!(
+            lab.source_discovery.is_advertising(),
+            "finishing a sync must not stop advertising owned by the Devices screen"
+        );
+
+        let peers = source.network.as_ref().unwrap().discover().unwrap();
+        assert!(
+            peers.iter().any(|peer| peer.device_id() == lab.joiner_id),
+            "inbound sync stays reachable after a sync until the screen closes"
+        );
+    }
+
+    #[test]
     fn test_an_expired_code_tears_down_the_join_without_leaving_state() {
         let lab = pairing_lab();
         let past = Utc::now() - chrono::TimeDelta::seconds(PAIRING_TTL_SECS + 1);
@@ -3048,7 +3363,7 @@ mod tests {
             past,
         );
         let code = PairingCode::qr(offer.qr_payload);
-        let control = PairingControl::default();
+        let control = SyncCancel::default();
 
         let error = run_join_pairing(&lab.joiner, &control, &code, Utc::now())
             .expect_err("an expired code must not join");
@@ -3071,7 +3386,7 @@ mod tests {
     #[test]
     fn test_a_wrong_code_is_refused_and_leaves_no_join_state() {
         let lab = pairing_lab();
-        let source_control = PairingControl::default();
+        let source_control = SyncCancel::default();
         let offer = {
             let mut source = lab.source.lock().unwrap();
             run_start_pairing(&mut source, &source_control, Utc::now()).unwrap()
@@ -3086,7 +3401,7 @@ mod tests {
             }
         };
 
-        let join_control = PairingControl::default();
+        let join_control = SyncCancel::default();
         let code = PairingCode::typed(lab.source_id, wrong_code);
         let error = run_join_pairing(&lab.joiner, &join_control, &code, Utc::now())
             .expect_err("a wrong code must not join");
@@ -3114,7 +3429,7 @@ mod tests {
     fn test_cancelling_a_waiting_join_tears_down_both_sides_and_the_offer() {
         let lab = pairing_lab();
 
-        let source_control = PairingControl::default();
+        let source_control = SyncCancel::default();
         let offer = {
             let mut source = lab.source.lock().unwrap();
             run_start_pairing(&mut source, &source_control, Utc::now()).unwrap()
@@ -3124,7 +3439,7 @@ mod tests {
             .publish(lab.source_id, lab.source_net.local_port());
 
         let code = PairingCode::qr(offer.qr_payload.clone());
-        let join_control = PairingControl::default();
+        let join_control = SyncCancel::default();
         let (prompt_tx, prompt_rx) = mpsc::channel();
 
         std::thread::scope(|scope| {

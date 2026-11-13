@@ -487,9 +487,12 @@ impl VaultItem {
         }
     }
 
-    /// True for any content-free record: a deleted Tombstone or a move
-    /// record. Such an item is never listed and never carries secrets.
-    pub fn is_tombstone(&self) -> bool {
+    /// True for any record that carries no payload: a deleted Tombstone or a
+    /// move record. Such an item is never listed and never carries secrets.
+    ///
+    /// Use [`Self::is_deleted`] when the question is specifically whether this
+    /// is a Tombstone; a move record is a distinct lifecycle state.
+    pub fn is_content_free(&self) -> bool {
         self.deleted || self.kind.is_none()
     }
 
@@ -642,7 +645,7 @@ impl Serialize for VaultItem {
     where
         S: serde::Serializer,
     {
-        if self.is_tombstone() {
+        if self.is_content_free() {
             RemovedVaultItemWire {
                 id: &self.id,
                 vault_id: &self.vault_id,
@@ -937,7 +940,7 @@ impl Vault {
 
         for item in &mut self.items {
             item.clock = VersionVector::from_version(device_id, 1);
-            if item.is_tombstone() {
+            if item.is_content_free() {
                 item.field_clocks.clear();
             } else {
                 item.stamp_all_fields(device_id, 1);
@@ -1516,7 +1519,7 @@ mod tests {
         assert!(parsed.clock.is_empty());
         assert_eq!(parsed.name_clock, FieldVersion::default());
         assert_eq!(parsed.color_clock, FieldVersion::default());
-        assert!(!parsed.items[0].is_tombstone());
+        assert!(!parsed.items[0].is_content_free());
         assert!(parsed.items[0].clock.is_empty());
         assert!(parsed.items[0].field_clocks.is_empty());
         assert_eq!(parsed.items[0].moved_to, None);
@@ -1539,7 +1542,7 @@ mod tests {
             VersionVector::from_version(device, 2),
         );
 
-        assert!(tombstone.is_tombstone());
+        assert!(tombstone.is_deleted());
         assert!(tombstone.kind.is_none());
 
         let json = serde_json::to_value(&tombstone).unwrap();
@@ -1553,7 +1556,7 @@ mod tests {
         assert!(json.get("tags").is_none());
 
         let parsed: VaultItem = serde_json::from_value(json).unwrap();
-        assert!(parsed.is_tombstone());
+        assert!(parsed.is_deleted());
         assert_eq!(parsed.id, item_id);
         assert_eq!(parsed.clock.get(&device), 2);
     }

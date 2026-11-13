@@ -68,10 +68,33 @@ export interface ConflictResolutionRequest {
   choice: ConflictChoice;
 }
 
-/** Classify a backend error string into the UI's distinct failure states. */
+/** One on-demand secret reveal. `value: null` means the candidate is not set. */
+export interface RevealedConflictValue {
+  value: string | null;
+}
+
+/**
+ * A backend failure arrives as `{ code, message }`. The code is the stable
+ * discriminator; the message is display text and may be reworded freely.
+ */
+function syncErrorInfo(error: unknown): { code: string | null; raw: string } {
+  if (typeof error === 'object' && error !== null) {
+    const candidate = error as { code?: unknown; message?: unknown };
+    return {
+      code: typeof candidate.code === 'string' ? candidate.code : null,
+      raw:
+        typeof candidate.message === 'string'
+          ? candidate.message
+          : JSON.stringify(candidate)
+    };
+  }
+
+  return { code: null, raw: String(error) };
+}
+
+/** Classify a backend sync failure by its stable error code. */
 export function classifySyncError(error: unknown): SyncFailure {
-  const raw = String(error);
-  const lower = raw.toLowerCase();
+  const { code, raw } = syncErrorInfo(error);
 
   const failure = (
     kind: SyncFailureKind,
@@ -89,132 +112,129 @@ export function classifySyncError(error: unknown): SyncFailure {
     raw
   });
 
-  if (lower.includes('device identity is damaged') || lower.includes('identity is damaged')) {
-    return failure(
-      'damaged-identity',
-      'This Device’s identity is damaged',
-      'Lockr will not replace this Device’s identity on its own. Restore the identity file from a backup, or start again with a new identity below.',
-      false,
-      true
-    );
-  }
+  switch (code) {
+    case 'device.identity_damaged':
+      return failure(
+        'damaged-identity',
+        'This Device’s identity is damaged',
+        'Lockr will not replace this Device’s identity on its own. Restore the identity file from a backup, or start again with a new identity below.',
+        false,
+        true
+      );
 
-  if (raw.startsWith('This Device has been revoked')) {
-    return failure(
-      'this-device-revoked',
-      'This Device has been revoked',
-      'No honest Device will sync with this copy any more. Pair this installation again from another Device to rejoin with a new identity.',
-      false
-    );
-  }
+    case 'sync.this_device_revoked':
+      return failure(
+        'this-device-revoked',
+        'This Device has been revoked',
+        'No honest Device will sync with this copy any more. Pair this installation again from another Device to rejoin with a new identity.',
+        false
+      );
 
-  if (raw.startsWith('Sync peer has been revoked')) {
-    return failure(
-      'revoked',
-      'That Device has been revoked',
-      'Revocation is permanent. This Device will not sync with it again, even if its old copy of the Device list disagrees.',
-      false
-    );
-  }
+    case 'sync.device_revoked':
+      return failure(
+        'revoked',
+        'That Device has been revoked',
+        'Revocation is permanent. This Device will not sync with it again, even if its old copy of the Device list disagrees.',
+        false
+      );
 
-  if (raw.startsWith('Sync peer is unreachable')) {
-    return failure(
-      'unreachable',
-      'That Device could not be reached',
-      'Check that the other Device is running Lockr on the same network, then try again. Nothing was changed.',
-      true
-    );
-  }
+    case 'sync.device_unreachable':
+      return failure(
+        'unreachable',
+        'That Device could not be reached',
+        'Check that the other Device is running Lockr on the same network, then try again. Nothing was changed.',
+        true
+      );
 
-  if (raw.startsWith('Sync refused: Device ') && raw.includes('not paired')) {
-    return failure(
-      'unpaired',
-      'That Device is not paired with this one',
-      'Pairing is the only grant of access. Admit the Device from the Devices screen before syncing with it.',
-      false
-    );
-  }
+    case 'sync.device_not_paired':
+      return failure(
+        'unpaired',
+        'That Device is not paired with this one',
+        'Pairing is the only grant of access. Admit the Device from the Devices screen before syncing with it.',
+        false
+      );
 
-  if (
-    raw.startsWith('Cannot sync with a Device using vault schema') ||
-    raw.startsWith('Incompatible vault schema')
-  ) {
-    return failure(
-      'schema-mismatch',
-      'The two Devices use different vault schemas',
-      'Update the older Device. Lockr will not send data the other Device cannot read.',
-      false
-    );
-  }
+    case 'sync.schema_mismatch':
+    case 'pairing.schema_mismatch':
+      return failure(
+        'schema-mismatch',
+        'The two Devices use different vault schemas',
+        'Update the older Device. Lockr will not send data the other Device cannot read.',
+        false
+      );
 
-  if (raw.startsWith('Sync was cancelled')) {
-    return failure(
-      'cancelled',
-      'Sync cancelled',
-      'Any Vault that finished transferring is safe to open. Everything else was left as it was before the sync.',
-      true
-    );
-  }
+    case 'sync.cancelled':
+      return failure(
+        'cancelled',
+        'Sync cancelled',
+        'Any Vault that finished transferring is safe to open. Everything else was left as it was before the sync.',
+        true
+      );
 
-  if (raw.startsWith('Sync was interrupted')) {
-    return failure(
-      'interrupted',
-      'The connection dropped mid-sync',
-      'Every Vault is still readable and the sync is safe to retry. A complete Vault is the smallest unit transferred.',
-      true
-    );
-  }
+    case 'sync.interrupted':
+      return failure(
+        'interrupted',
+        'The connection dropped mid-sync',
+        'Every Vault is still readable and the sync is safe to retry. A complete Vault is the smallest unit transferred.',
+        true
+      );
 
-  if (raw.startsWith('Sync timed out')) {
-    return failure('timeout', 'The other Device stopped responding', 'Try again once it is awake and on the network.', true);
-  }
+    case 'sync.timeout':
+      return failure(
+        'timeout',
+        'The other Device stopped responding',
+        'Try again once it is awake and on the network.',
+        true
+      );
 
-  if (raw.startsWith('Sync discovery failed')) {
-    return failure(
-      'discovery',
-      'Devices could not be discovered',
-      'Discovery needs the local network. Check the connection and try refreshing the list.',
-      true
-    );
-  }
+    case 'sync.discovery_failed':
+      return failure(
+        'discovery',
+        'Devices could not be discovered',
+        'Discovery needs the local network. Check the connection and try refreshing the list.',
+        true
+      );
 
-  if (raw.startsWith('Sync transport is unavailable')) {
-    return failure(
-      'transport',
-      'The secure sync channel is unavailable',
-      'This build cannot open a channel to another Device. No vault data was sent.',
-      false
-    );
-  }
+    case 'sync.transport_unavailable':
+      return failure(
+        'transport',
+        'The secure sync channel is unavailable',
+        'This build cannot open a channel to another Device. No vault data was sent.',
+        false
+      );
 
-  if (raw.startsWith('Sync authentication failed')) {
-    return failure(
-      'authentication',
-      'The other Device could not be authenticated',
-      'The secure channel did not prove which Device answered. Re-pairing is the fallback.',
-      false
-    );
-  }
+    case 'sync.authentication_failed':
+      return failure(
+        'authentication',
+        'The other Device could not be authenticated',
+        'The secure channel did not prove which Device answered. Re-pairing is the fallback.',
+        false
+      );
 
-  if (raw.startsWith('Sync refused: no User')) {
-    return failure(
-      'not-logged-in',
-      'Sign in to sync',
-      'Sync uses the credentials already resident in this session. Sign in and try again.',
-      false
-    );
-  }
+    case 'sync.not_logged_in':
+      return failure(
+        'not-logged-in',
+        'Sign in to sync',
+        'Sync uses the credentials already resident in this session. Sign in and try again.',
+        false
+      );
 
-  if (raw.includes('already in progress')) {
-    return failure(
-      'busy',
-      'A sync is already running',
-      'Only one sync runs at a time on this Device. Wait for it to finish, or cancel it first.',
-      false
-    );
-  }
+    case 'sync.busy':
+      return failure(
+        'busy',
+        'A sync is already running',
+        'Only one sync runs at a time on this Device. Wait for it to finish, or cancel it first.',
+        false
+      );
 
-  return failure('unknown', 'The sync did not complete', 'Nothing was reported as complete. Try again, or check the other Device.', true);
+    default:
+      return failure(
+        'unknown',
+        'The sync did not complete',
+        'Nothing was reported as complete. Try again, or check the other Device.',
+        true
+      );
+  }
 }
 
 // Sync progress is process-wide: a sync can outlive the screen that started it.
@@ -246,21 +266,40 @@ export function useSync() {
     conflictError.value = null;
   }
 
-  // ============ Pairing ============
+  // ============ Backend calls ============
 
-  async function startPairing(): Promise<PairingOffer | null> {
-    error.value = null;
+  /**
+   * One command call, one error convention: a failed call records the message
+   * and yields null; a successful `void` command yields undefined, which is
+   * still a success. Callers that return a boolean wrap this in `requestOk`.
+   */
+  async function request<T>(
+    command: string,
+    args?: Record<string, unknown>,
+    clearError = false
+  ): Promise<T | null> {
+    if (clearError) error.value = null;
+
     try {
-      return await invoke<PairingOffer>('start_pairing');
+      return await invoke<T>(command, args);
     } catch (e) {
       error.value = String(e);
       return null;
     }
   }
 
-  async function cancelPairing(): Promise<boolean> {
+  async function requestOk(
+    command: string,
+    args?: Record<string, unknown>,
+    clearError = false
+  ): Promise<boolean> {
+    if (clearError) error.value = null;
+
     try {
-      await invoke('cancel_pairing');
+      // A `Result<(), _>` command resolves to `null`, which is a success.
+      // This is deliberately separate from `request`, whose `null` means a
+      // failed call for commands that return a value.
+      await invoke(command, args);
       return true;
     } catch (e) {
       error.value = String(e);
@@ -268,24 +307,22 @@ export function useSync() {
     }
   }
 
+  // ============ Pairing ============
+
+  async function startPairing(): Promise<PairingOffer | null> {
+    return request<PairingOffer>('start_pairing', undefined, true);
+  }
+
+  async function cancelPairing(): Promise<boolean> {
+    return requestOk('cancel_pairing');
+  }
+
   async function joinPairing(code: PairingCode): Promise<PairingJoinReady | null> {
-    error.value = null;
-    try {
-      return await invoke<PairingJoinReady>('join_pairing', { code });
-    } catch (e) {
-      error.value = String(e);
-      return null;
-    }
+    return request<PairingJoinReady>('join_pairing', { code }, true);
   }
 
   async function receivePairingRequest(): Promise<PairingApprovalPrompt | null> {
-    error.value = null;
-    try {
-      return await invoke<PairingApprovalPrompt>('receive_pairing_request');
-    } catch (e) {
-      error.value = String(e);
-      return null;
-    }
+    return request<PairingApprovalPrompt>('receive_pairing_request', undefined, true);
   }
 
   /** The transfer stays in the backend; only the outcome is returned. */
@@ -293,13 +330,7 @@ export function useSync() {
     deviceId: string,
     syncSet: string[] | null
   ): Promise<PairingOutcome | null> {
-    error.value = null;
-    try {
-      return await invoke<PairingOutcome>('approve_pairing', { deviceId, syncSet });
-    } catch (e) {
-      error.value = String(e);
-      return null;
-    }
+    return request<PairingOutcome>('approve_pairing', { deviceId, syncSet }, true);
   }
 
   /**
@@ -307,86 +338,38 @@ export function useSync() {
    * typed on this Device. The transfer never reaches the frontend.
    */
   async function completePairing(masterPassword: string): Promise<User | null> {
-    error.value = null;
-    try {
-      return await invoke<User>('complete_pairing', { masterPassword });
-    } catch (e) {
-      error.value = String(e);
-      return null;
-    }
+    return request<User>('complete_pairing', { masterPassword }, true);
   }
 
   /** Serve inbound sync. Advertising remains owned by the discovery session. */
   async function startServing(): Promise<boolean> {
-    error.value = null;
-    try {
-      await invoke('start_serving');
-      return true;
-    } catch (e) {
-      error.value = String(e);
-      return false;
-    }
+    return requestOk('start_serving', undefined, true);
   }
 
   async function stopServing(): Promise<boolean> {
-    try {
-      await invoke('stop_serving');
-      return true;
-    } catch (e) {
-      error.value = String(e);
-      return false;
-    }
+    return requestOk('stop_serving');
   }
 
   // ============ Devices and discovery ============
 
   async function listPairedDevices(): Promise<PairedDevice[] | null> {
-    try {
-      return await invoke<PairedDevice[]>('list_paired_devices');
-    } catch (e) {
-      error.value = String(e);
-      return null;
-    }
+    return request<PairedDevice[]>('list_paired_devices');
   }
 
   async function startDiscovery(): Promise<boolean> {
-    try {
-      await invoke('start_discovery');
-      return true;
-    } catch (e) {
-      error.value = String(e);
-      return false;
-    }
+    return requestOk('start_discovery');
   }
 
   async function stopDiscovery(): Promise<boolean> {
-    try {
-      await invoke('stop_discovery');
-      return true;
-    } catch (e) {
-      error.value = String(e);
-      return false;
-    }
+    return requestOk('stop_discovery');
   }
 
   async function listDiscoveredPeers(): Promise<DiscoveredPeer[] | null> {
-    try {
-      return await invoke<DiscoveredPeer[]>('list_discovered_peers');
-    } catch (e) {
-      error.value = String(e);
-      return null;
-    }
+    return request<DiscoveredPeer[]>('list_discovered_peers');
   }
 
   async function revokeDevice(deviceId: string): Promise<boolean> {
-    error.value = null;
-    try {
-      await invoke('revoke_device', { deviceId });
-      return true;
-    } catch (e) {
-      error.value = String(e);
-      return false;
-    }
+    return requestOk('revoke_device', { deviceId }, true);
   }
 
   // ============ Sync ============
@@ -433,13 +416,7 @@ export function useSync() {
   }
 
   async function cancelSync(): Promise<boolean> {
-    try {
-      await invoke('cancel_sync');
-      return true;
-    } catch (e) {
-      error.value = String(e);
-      return false;
-    }
+    return requestOk('cancel_sync');
   }
 
   function onSyncProgress(handler: (payload: SyncProgress) => void): Promise<UnlistenFn> {
@@ -500,6 +477,31 @@ export function useSync() {
   }
 
   /**
+   * Reveal one side of a secret Conflict. This is the per-field on-demand
+   * fetch: the Conflict payload never carries either value, so a reveal must
+   * be asked for explicitly and applies to one field at a time.
+   */
+  async function revealConflictCandidate(
+    request: ConflictResolutionRequest
+  ): Promise<RevealedConflictValue | null> {
+    conflictError.value = null;
+
+    try {
+      const value = await invoke<string | null>('get_conflict_candidate_secret', {
+        sessionId: request.sessionId,
+        vaultId: request.vaultId,
+        itemId: request.itemId,
+        fieldKey: request.fieldKey,
+        choice: request.choice
+      });
+      return { value };
+    } catch (e) {
+      conflictError.value = String(e);
+      return null;
+    }
+  }
+
+  /**
    * Dismiss the prompt without choosing. Clean merges are already saved.
    * The backend has no abandon command, so the session stays open until
    * logout; this only stops the UI blocking navigation.
@@ -512,79 +514,36 @@ export function useSync() {
   // ============ Sync Set ============
 
   async function getSyncSet(): Promise<SyncSetView | null> {
-    try {
-      return await invoke<SyncSetView>('get_sync_set');
-    } catch (e) {
-      error.value = String(e);
-      return null;
-    }
+    return request<SyncSetView>('get_sync_set');
   }
 
   /** Replace the Sync Set with this Device's explicit choice. */
   async function setSyncSet(vaultIds: string[]): Promise<boolean> {
-    error.value = null;
-    try {
-      await invoke('set_sync_set', { vaultIds });
-      return true;
-    } catch (e) {
-      error.value = String(e);
-      return false;
-    }
+    return requestOk('set_sync_set', { vaultIds }, true);
   }
 
   /** Toggle one Vault without replacing the whole set. Off keeps the copy. */
   async function setVaultSyncing(vaultId: string, syncing: boolean): Promise<boolean> {
-    error.value = null;
-    try {
-      await invoke('set_vault_syncing', { vaultId, syncing });
-      return true;
-    } catch (e) {
-      error.value = String(e);
-      return false;
-    }
+    return requestOk('set_vault_syncing', { vaultId, syncing }, true);
   }
 
   async function listUnregisteredVaults(): Promise<UnregisteredVault[] | null> {
-    try {
-      return await invoke<UnregisteredVault[]>('list_unregistered_vaults');
-    } catch (e) {
-      error.value = String(e);
-      return null;
-    }
+    return request<UnregisteredVault[]>('list_unregistered_vaults');
   }
 
   /** Adopt a local `.vault` file. Adoption shares its entire contents. */
   async function adoptVault(vaultId: string): Promise<boolean> {
-    error.value = null;
-    try {
-      await invoke('adopt_vault', { vaultId });
-      return true;
-    } catch (e) {
-      error.value = String(e);
-      return false;
-    }
+    return requestOk('adopt_vault', { vaultId }, true);
   }
 
   // ============ Device identity ============
 
   async function getDeviceIdentityError(): Promise<string | null> {
-    try {
-      return await invoke<string | null>('get_device_identity_error');
-    } catch (e) {
-      error.value = String(e);
-      return null;
-    }
+    return request<string | null>('get_device_identity_error');
   }
 
   async function startWithNewDeviceIdentity(confirm: boolean): Promise<boolean> {
-    error.value = null;
-    try {
-      await invoke('start_with_new_device_identity', { confirm });
-      return true;
-    } catch (e) {
-      error.value = String(e);
-      return false;
-    }
+    return requestOk('start_with_new_device_identity', { confirm }, true);
   }
 
   return {
@@ -624,6 +583,7 @@ export function useSync() {
     cancelSync,
     onSyncProgress,
     resolveSyncConflict,
+    revealConflictCandidate,
     abandonConflicts,
 
     // Sync Set

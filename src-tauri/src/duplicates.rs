@@ -105,12 +105,12 @@ pub(crate) fn suggest_duplicates(vault: &Vault) -> Vec<DuplicateSuggestion> {
     let mut suggestions = Vec::new();
 
     for (index, first) in vault.items.iter().enumerate() {
-        if first.is_tombstone() {
+        if first.is_content_free() {
             continue;
         }
 
         for second in vault.items.iter().skip(index + 1) {
-            if second.is_tombstone() || vault.is_duplicate_dismissed(first.id, second.id) {
+            if second.is_content_free() || vault.is_duplicate_dismissed(first.id, second.id) {
                 continue;
             }
 
@@ -278,7 +278,7 @@ fn live_index(vault: &Vault, item_id: ItemId) -> Result<usize, VaultError> {
     vault
         .items
         .iter()
-        .position(|item| item.id == item_id && !item.is_tombstone())
+        .position(|item| item.id == item_id && !item.is_content_free())
         .ok_or_else(|| VaultError::ItemNotFound(item_id.to_string()))
 }
 

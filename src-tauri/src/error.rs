@@ -50,14 +50,17 @@ pub enum VaultError {
     #[error("Sync refused: no User is signed in on this Device")]
     SyncNotLoggedIn,
 
-    #[error("Sync peer is unreachable: {0}")]
+    #[error("Sync refused: Device {0} could not be reached")]
     SyncPeerUnreachable(String),
 
-    #[error("Sync peer has been revoked: {0}")]
+    #[error("Sync refused: Device {0} has been revoked")]
     SyncPeerRevoked(String),
 
     #[error("Sync refused: Device {0} is not paired with this Device")]
     SyncPeerNotPaired(String),
+
+    #[error("Sync refused: a sync is already in progress on this Device")]
+    SyncBusy,
 
     #[error("Sync was cancelled before it completed")]
     SyncCancelled,
@@ -86,7 +89,7 @@ pub enum VaultError {
     #[error("Sync was interrupted before it completed: {0}")]
     SyncInterrupted(String),
 
-    #[error("Sync refused: the peer sent vault {remote} where {local} was expected")]
+    #[error("Sync refused: the other Device sent vault {remote} where {local} was expected")]
     SyncVaultIdMismatch { local: String, remote: String },
 
     #[error("Sync refused: the connection did not come from the expected Device")]
@@ -108,6 +111,54 @@ pub enum VaultError {
     Validation(String),
 }
 
+impl VaultError {
+    /// A stable, machine-readable discriminator for this failure.
+    ///
+    /// UI code matches on this instead of the human-readable `Display` text,
+    /// so rewording a message can never silently collapse two failure states.
+    /// These strings are part of the command contract: treat them as API.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::NotFound(_) => "vault.not_found",
+            Self::ItemNotFound(_) => "item.not_found",
+            Self::UserNotFound(_) => "user.not_found",
+            Self::AuthenticationFailed => "auth.wrong_password",
+            Self::VaultLocked => "vault.locked",
+            Self::Encryption(_) => "crypto.encryption",
+            Self::Decryption(_) => "crypto.decryption",
+            Self::ExternalChange(_) => "vault.external_change",
+            Self::DeviceIdentityDamaged(_) => "device.identity_damaged",
+            Self::DeviceRegistry(_) => "device.registry",
+            Self::PairingSecretStale => "pairing.secret_stale",
+            Self::PairingSchemaMismatch { .. } => "pairing.schema_mismatch",
+            Self::PairingRateLimited => "pairing.rate_limited",
+            Self::PairingNotStarted => "pairing.not_started",
+            Self::Pairing(_) => "pairing.failed",
+            Self::SyncNotLoggedIn => "sync.not_logged_in",
+            Self::SyncPeerUnreachable(_) => "sync.device_unreachable",
+            Self::SyncPeerRevoked(_) => "sync.device_revoked",
+            Self::SyncPeerNotPaired(_) => "sync.device_not_paired",
+            Self::SyncBusy => "sync.busy",
+            Self::SyncCancelled => "sync.cancelled",
+            Self::SyncTimeout(_) => "sync.timeout",
+            Self::SyncThisDeviceRevoked(_) => "sync.this_device_revoked",
+            Self::SyncAuthenticationFailed => "sync.authentication_failed",
+            Self::SyncProtocolMismatch { .. } => "sync.protocol_mismatch",
+            Self::SyncSchemaMismatch { .. } => "sync.schema_mismatch",
+            Self::SyncDiscoveryFailed(_) => "sync.discovery_failed",
+            Self::SyncTransportUnavailable(_) => "sync.transport_unavailable",
+            Self::SyncInterrupted(_) => "sync.interrupted",
+            Self::SyncVaultIdMismatch { .. } => "sync.vault_id_mismatch",
+            Self::SyncWrongPeer => "sync.wrong_device",
+            Self::SyncRefused(_) => "sync.refused",
+            Self::SyncConflictResolution(_) => "sync.conflict_resolution",
+            Self::Io(_) => "io",
+            Self::Serialization(_) => "serialization",
+            Self::Validation(_) => "validation",
+        }
+    }
+}
+
 // Tauri requires errors returned from commands to be serializable.
 // This converts any VaultError into a simple JSON string.
 impl serde::Serialize for VaultError {
@@ -117,5 +168,43 @@ impl serde::Serialize for VaultError {
     {
         // We just convert the error to its display string
         serializer.serialize_str(self.to_string().as_ref())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::VaultError;
+
+    #[test]
+    fn test_sync_failure_codes_are_stable_and_distinct() {
+        let cases = [
+            (
+                VaultError::SyncPeerUnreachable("device".into()),
+                "sync.device_unreachable",
+            ),
+            (
+                VaultError::SyncPeerRevoked("device".into()),
+                "sync.device_revoked",
+            ),
+            (VaultError::SyncBusy, "sync.busy"),
+            (VaultError::SyncCancelled, "sync.cancelled"),
+            (
+                VaultError::SyncSchemaMismatch {
+                    local: 3,
+                    remote: 2,
+                },
+                "sync.schema_mismatch",
+            ),
+        ];
+
+        for (error, expected) in cases {
+            assert_eq!(error.code(), expected);
+        }
+
+        assert_ne!(
+            VaultError::SyncPeerUnreachable("device".into()).code(),
+            VaultError::SyncPeerRevoked("device".into()).code(),
+            "the UI must be able to tell an unreachable Device from a revoked one"
+        );
     }
 }

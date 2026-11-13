@@ -6,6 +6,7 @@ import AlertModal from '../ui/AlertModal.vue';
 import { useModal } from '../../composables/useModal';
 import { useSync } from '../../composables/useSync';
 import { useVault } from '../../composables/useVault';
+import { vaultLabel } from '../../util/labels';
 import useAppStore from '../../stores/appStore';
 import type { SyncSetVault, UnregisteredVault } from '../../types';
 
@@ -27,10 +28,6 @@ const selected = ref<Set<string>>(new Set());
 const busy = ref(false);
 const actionMessage = ref<string | null>(null);
 const actionError = ref<string | null>(null);
-
-function vaultLabel(vault: SyncSetVault): string {
-  return vault.name?.trim() || `Vault ${vault.vault_id.slice(0, 8)}`;
-}
 
 function initialSelection(): string[] {
   return props.vaults

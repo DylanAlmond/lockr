@@ -4,6 +4,7 @@ import { RefreshCw, Sparkles } from '@lucide/vue';
 import Button from '../ui/Button.vue';
 import Select from '../ui/Select.vue';
 import { useDuplicates } from '../../composables/useDuplicates';
+import { vaultLabelById } from '../../util/labels';
 import type {
   DuplicateCandidate,
   DuplicateField,
@@ -28,10 +29,18 @@ const combineTarget = ref<DuplicateSuggestion | null>(null);
 const survivor = ref<string | null>(null);
 const fieldChoices = ref<Record<string, string>>({});
 
+const vaultNames = computed<Record<string, string>>(() => {
+  const names: Record<string, string> = {};
+  for (const vault of props.vaults) {
+    if (vault.name?.trim()) names[vault.vault_id] = vault.name.trim();
+  }
+  return names;
+});
+
 const vaultOptions = computed(() =>
   props.vaults.map((vault) => ({
     value: vault.vault_id,
-    label: vault.name?.trim() || `Vault ${vault.vault_id.slice(0, 8)}`
+    label: vaultLabelById(vault.vault_id, vaultNames.value)
   }))
 );
 
@@ -39,9 +48,8 @@ const selectedVault = computed(
   () => props.vaults.find((vault) => vault.vault_id === selectedVaultId.value) ?? null
 );
 
-function vaultLabel(vaultId: string): string {
-  const vault = props.vaults.find((candidate) => candidate.vault_id === vaultId);
-  return vault?.name?.trim() || `Vault ${vaultId.slice(0, 8)}`;
+function vaultName(vaultId: string): string {
+  return vaultLabelById(vaultId, vaultNames.value);
 }
 
 function candidateLabel(candidate: DuplicateCandidate): string {
@@ -209,7 +217,7 @@ function reviewNote(note: DuplicateIdentityNote) {
         <div>
           <strong>Same Item found in {{ note.vault_ids.length }} Vaults</strong>
           <p>
-            {{ note.vault_ids.map(vaultLabel).join(' and ') }} — review it as a Duplicate so one
+            {{ note.vault_ids.map(vaultName).join(' and ') }} — review it as a Duplicate so one
             identity can be retired.
           </p>
         </div>
