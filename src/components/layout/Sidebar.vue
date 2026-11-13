@@ -101,13 +101,13 @@ function vaultMenuItems(vault: Vault): DropdownItem[] {
       }
     },
     {
-      label: 'Delete Vault',
+      label: 'Delete Vault Everywhere',
       onSelect: () => {
         openModal(markRaw(AlertModal), {
-          title: `Delete "${vault.name}"`,
+          title: `Delete "${vault.name}" everywhere?`,
           message:
-            "Are you sure you want to continue? All items in this vault will be deleted. This can't be undone.",
-          actionLabel: 'Delete',
+            "This records a deletion that travels to every Device on the next sync. This Device and every other Device keep a local “.vault.deleted” copy as trash, and syncing cannot bring the Vault back. To remove this Device’s copy without deleting it anywhere else, use “Remove from this Device” under Devices.",
+          actionLabel: 'Delete everywhere',
           confirmationValue: vault.name,
           onClose: () => {},
           onConfirm: () => handleDeleteVault(vault)

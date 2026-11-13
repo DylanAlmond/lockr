@@ -277,12 +277,12 @@ pub struct SyncCredentials<'a> {
     pub secret_key: &'a [u8],
 }
 
-/// A one-way "stop this sync" flag.
+/// A one-way "stop this operation" flag shared by sync and pairing.
 ///
 /// It lives outside the global application state on purpose: the UI must be
-/// able to cancel a sync even while the command that is running it holds that
-/// state. The engine checks it between frames; a blocking transport should
-/// also use it to cut a read short.
+/// able to cancel a sync or pairing wait even while the command that is running
+/// it holds that state. The engine checks it between frames; a blocking
+/// transport should also use it to cut a read short.
 #[derive(Debug, Clone, Default)]
 pub struct SyncCancel {
     flag: Arc<AtomicBool>,
@@ -291,6 +291,12 @@ pub struct SyncCancel {
 impl SyncCancel {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Clear the flag for a new operation. Only the command starting that
+    /// operation may reset it; a waiter must never un-cancel itself.
+    pub fn reset(&self) {
+        self.flag.store(false, Ordering::SeqCst);
     }
 
     pub fn cancel(&self) {
@@ -327,9 +333,7 @@ impl SyncControl {
     pub fn begin(&self) -> Result<SyncLease<'_>, VaultError> {
         let mut active = self.lock();
         if active.is_some() {
-            return Err(VaultError::SyncRefused(
-                "a sync is already in progress on this Device".into(),
-            ));
+            return Err(VaultError::SyncBusy);
         }
 
         let token = SyncCancel::new();
@@ -471,6 +475,16 @@ pub(crate) struct PendingConflict {
     /// The safe provenance the merge engine produced, reused verbatim in the
     /// surfaced report so the UI can say which Device wrote which side.
     pub(crate) sides: [crate::ConflictSide; 2],
+}
+
+impl PendingConflict {
+    /// The Item this Conflict belongs to, or `None` for Vault metadata.
+    pub(crate) fn item_id(&self) -> Option<ItemId> {
+        match &self.scope {
+            ConflictScope::Item { item_id, .. } => Some(*item_id),
+            ConflictScope::Vault => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -728,7 +742,7 @@ impl<'a> SyncEngine<'a> {
             self.require_admitted_peer(sent.peer_device_id, &self.local_devices()?)?;
             match self.receive_frame(sent.channel.as_mut())? {
                 SyncMessage::Vault { vault_id, blob } => {
-                    self.integrator_check_scope(&sent.accepting, vault_id)?;
+                    self.check_offered_vault_is_in_agreed_scope(&sent.accepting, vault_id)?;
                     self.integrate(vault_id, &blob, &mut outcome, progress)?;
                 }
                 SyncMessage::Complete => break,
@@ -865,7 +879,7 @@ impl<'a> SyncEngine<'a> {
             self.require_admitted_peer(accepted.peer_device_id, &self.local_devices()?)?;
             match current {
                 SyncMessage::Vault { vault_id, blob } => {
-                    self.integrator_check_scope(&intersection, vault_id)?;
+                    self.check_offered_vault_is_in_agreed_scope(&intersection, vault_id)?;
                     self.integrate(vault_id, &blob, &mut outcome, progress)?;
                 }
                 SyncMessage::Complete => break,
@@ -1037,7 +1051,9 @@ impl<'a> SyncEngine<'a> {
             .collect()
     }
 
-    fn integrator_check_scope(
+    /// Refuse an offered Vault unless it is inside the Sync Set intersection
+    /// the two Devices agreed on for this exchange.
+    fn check_offered_vault_is_in_agreed_scope(
         &self,
         intersection: &BTreeSet<VaultId>,
         vault_id: VaultId,
@@ -1264,9 +1280,9 @@ impl<'a> SyncEngine<'a> {
                 continue;
             };
             for item in &vault.items {
-                // `is_tombstone()` is also true for move records, which are
-                // content-free. The live filter is explicit instead.
-                if item.deleted || item.moved_to.is_some() || item.kind.is_none() {
+                // Both a Tombstone and a move record are content-free; only a
+                // live copy can be a Duplicate identity.
+                if item.is_content_free() {
                     continue;
                 }
                 by_item.entry(item.id).or_default().push(safe.id);
@@ -1343,7 +1359,7 @@ fn capture_field_version(
         ConflictScope::Item { item_id, .. } => vault
             .items
             .iter()
-            .find(|item| item.id == *item_id && !item.is_tombstone())
+            .find(|item| item.id == *item_id && !item.is_content_free())
             .and_then(|item| item.field_clocks.get(field_key).copied()),
         ConflictScope::Vault => match field_key {
             "name" => Some(vault.name_clock),
@@ -2925,10 +2941,7 @@ mod tests {
 
         let first = control.begin().unwrap();
         assert!(control.is_active());
-        assert!(matches!(
-            control.begin(),
-            Err(VaultError::SyncRefused(_))
-        ));
+        assert!(matches!(control.begin(), Err(VaultError::SyncBusy)));
 
         // Cancelling reaches the running sync without any lock the exchange
         // is holding, which is why the token lives in this control rather
@@ -3996,7 +4009,7 @@ mod tests {
                     .items
                     .iter()
                     .filter(|item| item.id == a_item || item.id == b_item)
-                    .filter(|item| !item.is_tombstone())
+                    .filter(|item| !item.is_content_free())
                     .count(),
                 2,
                 "KeepBoth must keep both identities"
@@ -4095,12 +4108,12 @@ mod tests {
                 .collect();
             assert_eq!(live.len(), 2, "the vault keeps identity history");
             assert!(
-                live.iter().any(|item| item.id == a_item && !item.is_tombstone()),
+                live.iter().any(|item| item.id == a_item && !item.is_content_free()),
                 "the survivor stays live"
             );
             assert!(
                 live.iter()
-                    .any(|item| item.id == b_item && item.is_tombstone()),
+                    .any(|item| item.id == b_item && item.is_deleted()),
                 "the discarded identity becomes a Tombstone"
             );
             assert_eq!(
@@ -4581,7 +4594,7 @@ mod tests {
                         .unwrap()
                         .items
                         .iter()
-                        .any(|item| item.id == fixture.item_id && !item.is_tombstone()),
+                        .any(|item| item.id == fixture.item_id && !item.is_content_free()),
                     "the limitation leaves a live copy in each destination"
                 );
             }

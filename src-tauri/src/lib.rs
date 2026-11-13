@@ -54,7 +54,7 @@ pub fn run() {
             // Pairing waits are the same shape: a join can block on the
             // network without holding the shared state, and cancel must reach
             // it directly.
-            app.manage(commands::PairingControl::default());
+            app.manage(sync::SyncCancel::default());
 
             Ok(())
         })
@@ -91,6 +91,7 @@ pub fn run() {
             commands::set_sync_set,
             commands::set_vault_syncing,
             commands::resolve_sync_conflict,
+            commands::get_conflict_candidate_secret,
             commands::list_unregistered_vaults,
             commands::adopt_vault,
             commands::revoke_device,

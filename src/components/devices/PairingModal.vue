@@ -4,6 +4,8 @@ import { Check, Copy, KeyRound, LoaderCircle, QrCode, ShieldCheck } from '@lucid
 import Button from '../ui/Button.vue';
 import Input from '../ui/Input.vue';
 import { useSync } from '../../composables/useSync';
+import { vaultLabel } from '../../util/labels';
+import useAppStore from '../../stores/appStore';
 import type {
   PairingApprovalPrompt,
   PairingJoinReady,
@@ -31,8 +33,12 @@ const {
   receivePairingRequest,
   approvePairing,
   completePairing,
-  getSyncSet
+  getSyncSet,
+  syncWithDevice,
+  syncFailure
 } = useSync();
+
+const { state } = useAppStore();
 
 const mode = ref<'source' | 'join'>(props.initialMode);
 const busy = ref(false);
@@ -57,6 +63,8 @@ const joinStage = ref<'idle' | 'waiting' | 'approved' | 'done'>('idle');
 const joinReady = ref<PairingJoinReady | null>(null);
 const joinPassword = ref('');
 const joinAborted = ref(false);
+const joinSyncState = ref<'idle' | 'syncing' | 'done' | 'conflicts' | 'failed'>('idle');
+const joinSyncMessage = ref<string | null>(null);
 
 const now = ref(Date.now());
 let timer: ReturnType<typeof setInterval> | null = null;
@@ -83,10 +91,6 @@ const secondsLeft = computed(() => {
 });
 
 const offerExpired = computed(() => !!offer.value && secondsLeft.value <= 0);
-
-function vaultLabel(vault: SyncSetVault): string {
-  return vault.name?.trim() || `Vault ${vault.vault_id.slice(0, 8)}`;
-}
 
 function toggleVault(vaultId: string) {
   const next = new Set(checked.value);
@@ -115,6 +119,8 @@ async function switchMode(next: 'source' | 'join') {
   joinPassword.value = '';
   waitingForJoin.value = false;
   joinAborted.value = false;
+  joinSyncState.value = 'idle';
+  joinSyncMessage.value = null;
   syncSetLoaded.value = false;
 }
 
@@ -231,17 +237,62 @@ async function beginJoin() {
 async function finishJoin() {
   busy.value = true;
   localError.value = null;
+  joinSyncState.value = 'idle';
+  joinSyncMessage.value = null;
 
   const user = await completePairing(joinPassword.value);
-  busy.value = false;
 
   if (!user) {
+    busy.value = false;
     localError.value = error.value;
     return;
   }
 
   joinPassword.value = '';
   joinStage.value = 'done';
+
+  // Pairing transfers identity and metadata; the Vaults themselves arrive over
+  // the ordinary sync engine. Story 8: finish pairing with the Sync Set's
+  // Vaults present and usable instead of asking the User to sync manually.
+  await runInitialSync();
+  busy.value = false;
+}
+
+async function runInitialSync() {
+  const sourceDeviceId = joinReady.value?.source_device_id;
+  if (!sourceDeviceId) {
+    joinSyncState.value = 'failed';
+    joinSyncMessage.value =
+      'Pairing completed, but Lockr does not know which Device to fetch the Vaults from.';
+    return;
+  }
+
+  joinSyncState.value = 'syncing';
+  joinSyncMessage.value = null;
+
+  const report = await syncWithDevice(sourceDeviceId);
+
+  if (!report) {
+    joinSyncState.value = 'failed';
+    joinSyncMessage.value =
+      syncFailure.value?.detail ?? error.value ?? 'The Vaults could not be fetched after pairing.';
+    return;
+  }
+
+  state.vaultMutationCount += 1;
+
+  if (report.conflicts.length > 0) {
+    joinSyncState.value = 'conflicts';
+    joinSyncMessage.value =
+      'Your Vaults are on this Device, but some fields conflict. Resolve them to finish the first sync.';
+    return;
+  }
+
+  joinSyncState.value = 'done';
+  joinSyncMessage.value =
+    report.vault_ids.length > 0
+      ? `Your Vaults are on this Device and ready to open (${report.vault_ids.length} Vault${report.vault_ids.length === 1 ? '' : 's'}).`
+      : 'Pairing is complete. No Vaults were in the agreed Sync Set.';
 }
 
 async function reset() {
@@ -256,6 +307,8 @@ async function reset() {
   joinStage.value = 'idle';
   joinReady.value = null;
   joinPassword.value = '';
+  joinSyncState.value = 'idle';
+  joinSyncMessage.value = null;
   qrPayload.value = '';
   typedCode.value = '';
   sourceDeviceId.value = '';
@@ -425,8 +478,8 @@ async function reset() {
             <h3>Paired with {{ outcome?.name ?? 'the new Device' }}</h3>
             <p class="panel-copy">
               The approval was delivered over the secure pairing channel and the new Device now
-              holds the User id, shared profile metadata, and the secret key. The master password
-              was never sent.
+              holds the User id, shared profile metadata, and the secret key. It fetches the
+              checked Vaults over the sync channel; the master password was never sent.
             </p>
           </div>
         </div>
@@ -517,8 +570,8 @@ async function reset() {
           </header>
 
           <p class="panel-copy">
-            <strong>{{ joinReady?.user_name || 'Your account' }}</strong> approved this Device.
-            Enter the master password for that account to finish pairing. It is used only on this
+            <strong>{{ joinReady?.user_name || 'Your User' }}</strong> approved this Device.
+            Enter the master password for that User to finish pairing. It is used only on this
             Device.
           </p>
 
@@ -542,16 +595,46 @@ async function reset() {
 
       <template v-else>
         <div class="transfer-ready">
-          <ShieldCheck :size="24" aria-hidden="true" />
+          <LoaderCircle
+            v-if="joinSyncState === 'syncing'"
+            :size="24"
+            class="spin"
+            aria-hidden="true"
+          />
+          <ShieldCheck v-else :size="24" aria-hidden="true" />
           <div>
-            <h3>This Device is paired</h3>
+            <h3>
+              {{ joinSyncState === 'syncing' ? 'Fetching your Vaults' : 'This Device is paired' }}
+            </h3>
             <p class="panel-copy">
-              The secret key was re-wrapped under the password typed here. Open the Devices screen
-              to sync, or close this dialog.
+              <template v-if="joinSyncState === 'syncing'">
+                Pairing succeeded. Your Vaults are arriving over the secure sync channel; this can
+                take a moment.
+              </template>
+              <template v-else-if="joinSyncState === 'failed'">
+                Pairing succeeded, but the first Vault sync did not finish. Nothing was lost; you
+                can retry, or sync later from the Devices screen.
+              </template>
+              <template v-else>
+                {{ joinSyncMessage }}
+              </template>
             </p>
+            <p v-if="joinSyncState === 'failed'" class="error-text">{{ joinSyncMessage }}</p>
           </div>
         </div>
-        <Button variant="label" @click="emit('close')">Close</Button>
+        <div class="panel-actions">
+          <Button
+            v-if="joinSyncState === 'failed'"
+            variant="outline"
+            :disabled="busy"
+            @click="runInitialSync"
+          >
+            Retry Vault sync
+          </Button>
+          <Button variant="label" :disabled="busy || joinSyncState === 'syncing'" @click="emit('close')">
+            Close
+          </Button>
+        </div>
       </template>
     </section>
   </article>

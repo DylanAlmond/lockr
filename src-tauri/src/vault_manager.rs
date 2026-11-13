@@ -162,7 +162,7 @@ fn current_field_version(
         crate::ConflictScope::Item { item_id, .. } => vault
             .items
             .iter()
-            .find(|item| item.id == *item_id && !item.is_tombstone())
+            .find(|item| item.id == *item_id && !item.is_content_free())
             .and_then(|item| item.field_clocks.get(field_key).copied()),
         crate::ConflictScope::Vault => match field_key {
             "name" => Some(vault.name_clock),
@@ -632,7 +632,7 @@ impl VaultManager {
             let has_live_item = vault
                 .items
                 .iter()
-                .any(|i| i.id == item_id && !i.is_tombstone());
+                .any(|i| i.id == item_id && !i.is_content_free());
             let already_deleted = vault.items.iter().any(|i| i.id == item_id && i.is_deleted());
             if !has_live_item && already_deleted {
                 return Ok(());
@@ -645,7 +645,7 @@ impl VaultManager {
             let index = vault
                 .items
                 .iter()
-                .position(|i| i.id == item_id && !i.is_tombstone())
+                .position(|i| i.id == item_id && !i.is_content_free())
                 .ok_or(VaultError::ItemNotFound(item_id.to_string()))?;
 
             let mut item = vault.items.remove(index);
@@ -780,7 +780,7 @@ impl VaultManager {
         let item = vault
             .items
             .iter()
-            .find(|i| i.id == item_id && !i.is_tombstone())
+            .find(|i| i.id == item_id && !i.is_content_free())
             .ok_or(VaultError::ItemNotFound(item_id.to_string()))?;
         item_to_safe(item, &vault.secrets).ok_or_else(|| {
             VaultError::ItemNotFound(item_id.to_string())
@@ -823,7 +823,7 @@ impl VaultManager {
             let item = vault
                 .items
                 .iter()
-                .find(|i| i.id == item_id && !i.is_tombstone())
+                .find(|i| i.id == item_id && !i.is_content_free())
                 .ok_or(VaultError::ItemNotFound(item_id.to_string()))?;
 
             match &data {
@@ -851,7 +851,7 @@ impl VaultManager {
             let item = vault
                 .items
                 .iter_mut()
-                .find(|i| i.id == item_id && !i.is_tombstone())
+                .find(|i| i.id == item_id && !i.is_content_free())
                 .ok_or(VaultError::ItemNotFound(item_id.to_string()))?;
 
             let counter = item.clock.increment(device);
@@ -915,7 +915,7 @@ impl VaultManager {
                 .vault
                 .items
                 .iter()
-                .find(|i| i.id == item_id && !i.is_tombstone())
+                .find(|i| i.id == item_id && !i.is_content_free())
             {
                 return item_to_safe(item, &uv.vault.secrets)
                     .ok_or_else(|| VaultError::ItemNotFound(item_id.to_string()));
@@ -955,7 +955,7 @@ impl VaultManager {
             let idx = source
                 .items
                 .iter()
-                .position(|i| i.id == item_id && !i.is_tombstone())
+                .position(|i| i.id == item_id && !i.is_content_free())
                 .ok_or(VaultError::ItemNotFound(item_id.to_string()))?;
             let mut item = source.items.remove(idx);
 
@@ -1086,7 +1086,7 @@ impl VaultManager {
         let item = vault
             .items
             .iter()
-            .find(|i| i.id == item_id && !i.is_tombstone())
+            .find(|i| i.id == item_id && !i.is_content_free())
             .ok_or(VaultError::ItemNotFound(item_id.to_string()))?;
 
         let allowed = allowed_secret_keys(
@@ -1126,7 +1126,7 @@ impl VaultManager {
             let item = vault
                 .items
                 .iter()
-                .find(|i| i.id == item_id && !i.is_tombstone())
+                .find(|i| i.id == item_id && !i.is_content_free())
                 .ok_or(VaultError::ItemNotFound(item_id.to_string()))?;
 
             let allowed = allowed_secret_keys(
@@ -1163,7 +1163,7 @@ impl VaultManager {
             let item = vault
                 .items
                 .iter_mut()
-                .find(|i| i.id == item_id && !i.is_tombstone())
+                .find(|i| i.id == item_id && !i.is_content_free())
                 .expect("the item was just validated");
 
             // A secret is a field like any other: bump the item's lifecycle
@@ -2198,7 +2198,7 @@ mod tests {
 
         assert_eq!(stored.clock.get(&device), 1);
         assert_eq!(stored.clock.iter().count(), 1);
-        assert!(!stored.is_tombstone());
+        assert!(!stored.is_content_free());
 
         for key in [
             "display_name",
@@ -2575,7 +2575,7 @@ mod tests {
             let vault_ref = manager.get_vault(vault.id).unwrap();
             assert_eq!(vault_ref.items.len(), 1, "the tombstone is retained");
             let tombstone = &vault_ref.items[0];
-            assert!(tombstone.is_tombstone());
+            assert!(tombstone.is_deleted());
             assert!(tombstone.kind.is_none(), "a tombstone carries no payload");
             assert_eq!(tombstone.id, note_id);
             assert_eq!(tombstone.clock.get(&device), 2);
@@ -2608,7 +2608,7 @@ mod tests {
         {
             let vault_ref = manager.get_vault(vault.id).unwrap();
             assert_eq!(vault_ref.items.len(), 2);
-            assert!(vault_ref.items.iter().all(|item| item.is_tombstone()));
+            assert!(vault_ref.items.iter().all(|item| item.is_deleted()));
             assert!(vault_ref.secrets.is_empty(), "Deleting must drop secrets too");
             let account_tombstone = vault_ref
                 .items
@@ -2622,7 +2622,7 @@ mod tests {
         manager.lock_vault(Some(vault.id));
         let re_unlocked = manager.unlock_vault(vault.id, MASTER_PW, &KEY).unwrap();
         assert_eq!(re_unlocked.items.len(), 2);
-        assert!(re_unlocked.items.iter().all(|item| item.is_tombstone()));
+        assert!(re_unlocked.items.iter().all(|item| item.is_content_free()));
         assert!(manager
             .get_all_items(ItemFilter::default())
             .unwrap()
@@ -3091,7 +3091,7 @@ mod tests {
         manager.delete_item(vault_b.id, new_id).unwrap();
         let vault_b_ref = manager.get_vault(vault_b.id).unwrap();
         assert_eq!(vault_b_ref.items.len(), 1, "deletion leaves a Tombstone");
-        assert!(vault_b_ref.items[0].is_tombstone());
+        assert!(vault_b_ref.items[0].is_deleted());
         assert_eq!(vault_b_ref.items[0].id, new_id);
     }
 
@@ -3337,7 +3337,7 @@ mod tests {
             assert!(vault_data
                 .items
                 .iter()
-                .any(|item| item.id == id && !item.is_tombstone()));
+                .any(|item| item.id == id && !item.is_content_free()));
         }
 
         // The dismissal is vault content, so a lock/unlock round trip keeps it.
@@ -3387,7 +3387,7 @@ mod tests {
             .iter()
             .find(|item| item.id == keeper_id)
             .unwrap();
-        assert!(!keeper_item.is_tombstone());
+        assert!(!keeper_item.is_content_free());
         assert_eq!(
             manager
                 .get_item_secret(vault.id, keeper_id, SECRET_FIELD_PASSWORD)
@@ -3401,7 +3401,7 @@ mod tests {
             .iter()
             .find(|item| item.id == discarded_id)
             .unwrap();
-        assert!(tombstone.is_tombstone());
+        assert!(tombstone.is_deleted());
         assert!(vault_data
             .secrets
             .iter()
@@ -3609,7 +3609,7 @@ mod tests {
             .iter()
             .find(|item| item.id == survivor_id)
             .unwrap();
-        assert!(!combined.is_tombstone());
+        assert!(!combined.is_content_free());
 
         // Tags are a union, favourite is an OR.
         assert_eq!(
@@ -3649,7 +3649,7 @@ mod tests {
             .iter()
             .find(|item| item.id == other_id)
             .unwrap();
-        assert!(tombstone.is_tombstone());
+        assert!(tombstone.is_deleted());
 
         // The survivor carries a fresh tick from the resolving Device, which
         // dominates both of the clocks it was combined from.
@@ -4565,7 +4565,7 @@ mod tests {
             .unwrap()
             .items
             .iter()
-            .any(|item| item.id == account_id && !item.is_tombstone()));
+            .any(|item| item.id == account_id && !item.is_content_free()));
     }
 
     #[test]
@@ -4599,7 +4599,7 @@ mod tests {
             );
 
             if vault_id == vault_a.id {
-                assert!(!records[0].is_tombstone(), "the item is live here again");
+                assert!(!records[0].is_content_free(), "the item is live here again");
             } else {
                 assert!(records[0].is_move_record());
                 assert_eq!(records[0].moved_to, Some(vault_a.id));
@@ -4610,7 +4610,7 @@ mod tests {
             .unwrap()
             .items
             .iter()
-            .any(|item| item.id == item_id && !item.is_tombstone()));
+            .any(|item| item.id == item_id && !item.is_content_free()));
     }
 
     #[test]
@@ -4691,7 +4691,7 @@ mod tests {
                 .unwrap()
                 .items
                 .iter()
-                .any(|item| item.id == item_id && !item.is_tombstone()));
+                .any(|item| item.id == item_id && !item.is_content_free()));
         }
     }
 

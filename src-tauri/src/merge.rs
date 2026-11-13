@@ -277,8 +277,9 @@ pub fn merge_vaults(left: &Vault, right: &Vault) -> Result<MergeOutcome, MergeEr
     }
 
     // The common idempotent case: hand back the input untouched, preserving
-    // its item order exactly.
-    if vaults_are_identical(left, right) {
+    // its item order exactly. Compare in place so secrets are compared by
+    // reference, never serialised into a temporary plaintext buffer.
+    if left == right {
         return Ok(MergeOutcome::Merged(left.clone()));
     }
 
@@ -541,7 +542,7 @@ pub(crate) fn apply_conflict_value(
             let Some(position) = vault
                 .items
                 .iter()
-                .position(|item| item.id == *item_id && !item.is_tombstone())
+                .position(|item| item.id == *item_id && !item.is_content_free())
             else {
                 return false;
             };
@@ -621,13 +622,6 @@ fn apply_secret_value(
             .push(ItemSecrets::new(item_id, field_key, value, version)),
         (None, None) => {}
     }
-}
-
-/// Structural equality, compared in place. Secrets are compared by reference
-/// and never serialised into a temporary plaintext buffer, so an identical
-/// merge cannot create an un-zeroized copy of a password.
-fn vaults_are_identical(left: &Vault, right: &Vault) -> bool {
-    left == right
 }
 
 fn index_items(vault: &Vault) -> BTreeMap<ItemId, &VaultItem> {
@@ -1561,7 +1555,7 @@ mod tests {
         for (left, right) in [(&moved, &moved_back), (&moved_back, &moved)] {
             let merged = expect_merged(merge_vaults(left, right));
             let item = stored_item(&merged, item_id);
-            assert!(!item.is_tombstone(), "moving back must restore the item");
+            assert!(!item.is_content_free(), "moving back must restore the item");
             assert_eq!(
                 item.display_name.as_deref(),
                 Some("Octocat"),
@@ -1639,7 +1633,7 @@ mod tests {
             serde_json::to_value(&left).unwrap(),
             serde_json::to_value(&right).unwrap()
         );
-        assert!(!stored_item(&left, item_id).is_tombstone());
+        assert!(!stored_item(&left, item_id).is_content_free());
     }
 
     #[test]
@@ -1922,7 +1916,7 @@ mod tests {
         for (left, right) in [(&deleted, &live), (&live, &deleted)] {
             let merged = expect_merged(merge_vaults(left, right));
             let item = stored_item(&merged, item_id);
-            assert!(item.is_tombstone(), "deletion must win the merge");
+            assert!(item.is_deleted(), "deletion must win the merge");
             assert!(
                 merged.secrets.iter().all(|entry| entry.item_id != item_id),
                 "a tombstone carries no secrets"

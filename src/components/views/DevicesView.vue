@@ -31,6 +31,7 @@ import type {
   UnregisteredVault
 } from '../../types';
 import { formatTimestamp } from '../../util/timestamp';
+import { shortId } from '../../util/labels';
 
 const router = useRouter();
 const { openModal } = useModal();
@@ -124,10 +125,6 @@ const latestLastSync = computed<string | null>(() => {
   if (times.length === 0) return null;
   return new Date(Math.max(...times)).toISOString();
 });
-
-function shortId(id: string): string {
-  return id.slice(0, 8);
-}
 
 function deviceFor(peer: DiscoveredPeer): PairedDevice | undefined {
   return devices.value.find((device) => device.device_id === peer.device_id);
@@ -259,7 +256,7 @@ function openPairing(initialMode: 'source' | 'join') {
   openModal(markRaw(PairingModal), {
     initialMode,
     onClose: () => {
-      void refreshDevices();
+      void refreshAll();
     }
   });
 }
