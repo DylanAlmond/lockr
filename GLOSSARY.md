@@ -63,6 +63,10 @@ The one-time act of admitting a new Device to a User, so that the Device shares 
 
 What remains of a deleted Item or Vault, so the deletion can travel to the User's other Devices instead of the deleted thing reappearing on the next sync. A Tombstone carries no content and no secrets — only the identity of what was deleted, and enough information to know when every Device has seen the deletion.
 
+## Acknowledgement
+
+A Device's published claim that it has seen a given point in the shared history. Acknowledgements decide when a Tombstone may be forgotten: not before every admitted Device has one covering it.
+
 ## Move Record
 
 What remains of an Item in the Vault it left when the Item moved to another Vault. Unlike a Tombstone it names the destination Vault, so a move can beat a stale copy without meaning deletion; a later move back supersedes it. In code: the `moved_to` field on `VaultItem`.

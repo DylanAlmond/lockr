@@ -155,6 +155,9 @@ because the alternative — rejecting every revocation whose signer is later rev
 would silently resurrect Devices that were legitimately revoked earlier and make the
 whole registry fail to load.
 
+This is a recorded **design decision**, not a pending defect. ADR-0003 §1 states the
+intended key-rotation fix and the contract it must satisfy when it is built.
+
 ### 9. Shared registry, device-local profile
 
 The profile file stops being "the user" and becomes "this Device's view of the
