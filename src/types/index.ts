@@ -228,4 +228,94 @@ export type PairingMessage =
         vaults: unknown;
       };
       secret_key: number[];
+      /** The source's pre-checked Sync Set for the joining Device. Absent or
+       * null means the default: every Vault in the shared registry. */
+      sync_set?: string[] | null;
     };
+
+/** One Vault in the device-local Sync Set. `syncing: false` keeps the local
+ * copy and its contents; it only stops offering and requesting it. */
+export interface SyncSetVault {
+  vault_id: string;
+  name: string | null;
+  syncing: boolean;
+}
+
+export interface SyncSetView {
+  vaults: SyncSetVault[];
+}
+
+/** A paired Device with last-sync state. Safe View: no key material. */
+export interface PairedDevice {
+  device_id: string;
+  name: string;
+  platform: string;
+  admitted: boolean;
+  revoked: boolean;
+  last_sync_at: string | null;
+  is_this_device: boolean;
+}
+
+/** The only fields discovery may reveal: an opaque id, an address, and
+ * whether this User has paired it. */
+export interface DiscoveredPeer {
+  device_id: string;
+  address: string;
+  paired: boolean;
+}
+
+export interface SyncConflictSide {
+  device: string;
+  counter: number;
+  /** Always null for a secret field. */
+  value: unknown;
+}
+
+/** A conflict of one field. Vault metadata conflicts carry the Vault id too;
+ * `scope` is `vault` and `item_id` is absent in that case. */
+export interface SyncConflict {
+  vault_id: string;
+  scope: 'item' | 'vault';
+  item_id?: string;
+  display_name?: string | null;
+  field_key: string;
+  is_secret: boolean;
+  sides: [SyncConflictSide, SyncConflictSide];
+}
+
+/** Same Item identity found live in more than one Vault after a sync. This is
+ * the concurrent-opposite-move case; review it as a Duplicate. */
+export interface DuplicateIdentityNote {
+  item_id: string;
+  vault_ids: string[];
+}
+
+export interface SyncReport {
+  session_id: string;
+  peer_device_id: string;
+  vault_ids: string[];
+  conflicts: SyncConflict[];
+  duplicate_notes: DuplicateIdentityNote[];
+}
+
+export type SyncProgress =
+  | { event: 'started'; peer_device_id: string; vault_ids: string[] }
+  | { event: 'scope_agreed'; peer_device_id: string; vault_ids: string[] }
+  | { event: 'sending_vault'; vault_id: string; bytes: number }
+  | { event: 'receiving_vault'; vault_id: string; bytes: number }
+  | { event: 'vault_merged'; vault_id: string }
+  | { event: 'vault_conflicted'; vault_id: string; conflicts: number }
+  | { event: 'complete'; vaults: number; conflicts: number };
+
+export interface UnregisteredVault {
+  vault_id: string;
+  file_name: string;
+}
+
+/** Pick one side of a Conflict. A secret is chosen by side so its value never
+ * has to be sent to the UI. */
+export type ConflictChoice = 'local' | 'remote';
+
+export interface ConflictResolutionResult {
+  remaining: number;
+}

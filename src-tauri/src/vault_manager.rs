@@ -1176,6 +1176,151 @@ impl VaultManager {
         Ok(outcome)
     }
 
+    // ============ Sync support ============
+
+    /// Whether this Device holds a vault file for `vault_id`. Used by the
+    /// sync engine to decide what it can offer; it never offers a Vault it
+    /// does not have, and `.OLD` backups are invisible here.
+    pub(crate) fn has_vault_file(&self, vault_id: VaultId) -> bool {
+        self.vault_path(vault_id).is_file()
+    }
+
+    /// The encrypted bytes exactly as they sit on disk. This is what travels
+    /// during a sync: no decryption happens on the sending side.
+    pub(crate) fn read_encrypted_vault(&self, vault_id: VaultId) -> Result<Vec<u8>, VaultError> {
+        std::fs::read(self.vault_path(vault_id)).map_err(Into::into)
+    }
+
+    /// Decrypt a peer's encrypted vault file with the credentials resident in
+    /// this session. Nothing is written: the caller merges it first.
+    pub(crate) fn decrypt_vault_bytes(
+        &self,
+        bytes: &[u8],
+        master_password: &str,
+        secret_key: &[u8],
+    ) -> Result<Vault, VaultError> {
+        let encoded = std::str::from_utf8(bytes)
+            .map_err(|_| VaultError::Decryption("vault blob is not valid UTF-8".into()))?;
+        let salt = crate::crypto::extract_salt(encoded)?;
+        let master_key = derive_master_key(master_password, secret_key, &salt)?;
+        let (json_bytes, _) = decrypt_with_key(&master_key, encoded)?;
+        serde_json::from_slice(&json_bytes).map_err(Into::into)
+    }
+
+    /// Install a vault this Device did not have: re-encrypt it under a locally
+    /// generated salt with the same User credentials and write it atomically.
+    pub(crate) fn install_vault(
+        &mut self,
+        vault: Vault,
+        master_password: &str,
+        secret_key: &[u8],
+    ) -> Result<(), VaultError> {
+        let path = self.vault_path(vault.id);
+        if path.exists() {
+            return Err(VaultError::ExternalChange(vault.id.to_string()));
+        }
+
+        let vault_id = vault.id;
+        let salt = generate_salt();
+        let master_key = derive_master_key(master_password, secret_key, &salt)?;
+
+        self.unlocked_vaults.insert(
+            vault_id,
+            UnlockedVault {
+                vault,
+                master_key,
+                salt,
+                dirty: true,
+                fingerprint: None,
+            },
+        );
+
+        self.save_vault(vault_id)
+    }
+
+    /// Replace an unlocked vault with a merged result and save it atomically.
+    pub(crate) fn replace_vault(&mut self, vault: Vault) -> Result<(), VaultError> {
+        let vault_id = vault.id;
+        let unlocked = self
+            .unlocked_vaults
+            .get_mut(&vault_id)
+            .ok_or(VaultError::VaultLocked)?;
+        unlocked.vault = vault;
+        unlocked.dirty = true;
+        self.save_vault(vault_id)
+    }
+
+    /// Apply the User's explicit choice for one contested field. The value is
+    /// stamped as a fresh local write so it beats both conflicting versions
+    /// on the next sync. Returns whether the conflict still described a field
+    /// that exists.
+    pub(crate) fn resolve_conflict_field(
+        &mut self,
+        vault_id: VaultId,
+        scope: &crate::ConflictScope,
+        field_key: &str,
+        is_secret: bool,
+        value: Option<&crate::merge::FieldValue>,
+    ) -> Result<bool, VaultError> {
+        let device = self.device_id;
+        let applied = {
+            let unlocked = self
+                .unlocked_vaults
+                .get_mut(&vault_id)
+                .ok_or(VaultError::VaultLocked)?;
+            let applied = crate::merge::apply_conflict_value(
+                &mut unlocked.vault,
+                scope,
+                field_key,
+                is_secret,
+                value,
+                device,
+            );
+            if applied {
+                unlocked.dirty = true;
+            }
+            applied
+        };
+
+        if applied {
+            self.maybe_save(vault_id)?;
+        }
+        Ok(applied)
+    }
+
+    /// Vault files present on disk but absent from the shared Vault Registry.
+    /// These are never synced until the User explicitly adopts them.
+    pub(crate) fn unregistered_vault_files(
+        &self,
+        registry: &crate::VaultRegistry,
+    ) -> Result<Vec<VaultId>, VaultError> {
+        let mut ids = Vec::new();
+        if !self.vaults_dir.exists() {
+            return Ok(ids);
+        }
+
+        for entry in read_dir(&self.vaults_dir)? {
+            let path = entry?.path();
+            // `.vault.OLD` is a migration backup and must never be adopted or
+            // transferred. Exact extension matching keeps it out.
+            if path.extension().and_then(|ext| ext.to_str()) != Some("vault") {
+                continue;
+            }
+            let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+                continue;
+            };
+            let Ok(vault_id) = Uuid::parse_str(stem) else {
+                continue;
+            };
+            if !registry.contains(&vault_id) {
+                ids.push(vault_id);
+            }
+        }
+
+        ids.sort();
+        Ok(ids)
+    }
+
     /// Save immediately if autosave is on. Otherwise just leave the dirty
     /// flag set (caller is responsible for flushing).
     fn maybe_save(&mut self, vault_id: VaultId) -> Result<(), VaultError> {

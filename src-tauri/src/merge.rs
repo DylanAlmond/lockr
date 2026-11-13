@@ -406,6 +406,223 @@ fn union_dismissals(
     union
 }
 
+/// The merge result with every contested field left at the *local* value.
+///
+/// [`ConflictReport::merged`] carries a deterministic preview for contested
+/// fields so two Devices compute the same report. That preview must never be
+/// written to disk: it would silently choose one side of a genuine Conflict.
+/// This function keeps every clean merge and restores each contested field -
+/// value and field clock - from `local`, so the saved vault still says exactly
+/// what this Device said before the sync.
+pub(crate) fn keep_local_for_conflicts(local: &Vault, report: &ConflictReport) -> Vault {
+    let mut merged = report.merged.clone();
+
+    for conflict in &report.conflicts {
+        match &conflict.scope {
+            ConflictScope::Item { item_id, .. } => {
+                let Some(local_item) = local.items.iter().find(|item| item.id == *item_id) else {
+                    continue;
+                };
+                let Some(position) = merged.items.iter().position(|item| item.id == *item_id)
+                else {
+                    continue;
+                };
+
+                // Kind is not a versioned field. A kind collision should not
+                // occur for honest copies; keep the local item whole rather
+                // than pretending one side's kind won a field merge.
+                if conflict.field_key == "kind" {
+                    let clock = merged.items[position].clock.clone();
+                    let mut item = local_item.clone();
+                    item.clock = clock;
+                    merged.items[position] = item;
+                    restore_local_secrets(&mut merged, local, *item_id);
+                    continue;
+                }
+
+                if conflict.is_secret {
+                    restore_local_secret_field(&mut merged, local, *item_id, &conflict.field_key);
+                } else if let Some(value) = read_item_field(local_item, &conflict.field_key) {
+                    write_item_field(&mut merged.items[position], &conflict.field_key, &value);
+                }
+
+                restore_local_field_clock(
+                    &mut merged.items[position],
+                    local_item,
+                    &conflict.field_key,
+                );
+            }
+            ConflictScope::Vault => match conflict.field_key.as_str() {
+                "name" => {
+                    merged.name = local.name.clone();
+                    merged.name_clock = local.name_clock;
+                }
+                "color" => {
+                    merged.color = local.color.clone();
+                    merged.color_clock = local.color_clock;
+                }
+                _ => {}
+            },
+        }
+    }
+
+    merged
+}
+
+fn restore_local_field_clock(merged_item: &mut VaultItem, local_item: &VaultItem, field_key: &str) {
+    match local_item.field_clocks.get(field_key).copied() {
+        Some(version) => {
+            merged_item.record_field(field_key, version);
+        }
+        None => {
+            merged_item.field_clocks.remove(field_key);
+        }
+    }
+}
+
+fn restore_local_secrets(merged: &mut Vault, local: &Vault, item_id: ItemId) {
+    merged.secrets.retain(|entry| entry.item_id != item_id);
+    if let Some(entry) = local.secrets.iter().find(|entry| entry.item_id == item_id) {
+        merged.secrets.push(canonical_secrets(entry));
+    }
+}
+
+fn restore_local_secret_field(merged: &mut Vault, local: &Vault, item_id: ItemId, field_key: &str) {
+    let local_field = local
+        .secrets
+        .iter()
+        .find(|entry| entry.item_id == item_id)
+        .and_then(|entry| entry.fields.iter().find(|field| field.key == field_key))
+        .cloned();
+
+    let Some(position) = merged
+        .secrets
+        .iter()
+        .position(|entry| entry.item_id == item_id)
+    else {
+        if let Some(field) = local_field {
+            merged.secrets.push(ItemSecrets {
+                item_id,
+                fields: vec![field],
+            });
+        }
+        return;
+    };
+
+    merged.secrets[position]
+        .fields
+        .retain(|field| field.key != field_key);
+    if let Some(field) = local_field {
+        merged.secrets[position].fields.push(field);
+    }
+    if merged.secrets[position].fields.is_empty() {
+        merged.secrets.remove(position);
+    }
+}
+
+/// Apply the User's explicit choice for one contested field.
+///
+/// The chosen value is stamped as a new write by `device`, so it causally
+/// dominates both conflicting values and travels to the peer on the next
+/// sync. This is the only path that may change a contested field on disk.
+///
+/// Returns `false` when the scope/field does not exist or the value's type is
+/// not valid for that field; nothing is mutated in that case.
+pub(crate) fn apply_conflict_value(
+    vault: &mut Vault,
+    scope: &ConflictScope,
+    field_key: &str,
+    is_secret: bool,
+    value: Option<&FieldValue>,
+    device: DeviceId,
+) -> bool {
+    match scope {
+        ConflictScope::Item { item_id, .. } => {
+            let Some(position) = vault
+                .items
+                .iter()
+                .position(|item| item.id == *item_id && !item.is_tombstone())
+            else {
+                return false;
+            };
+
+            if !is_secret {
+                let Some(value) = value else {
+                    return false;
+                };
+                if read_item_field(&vault.items[position], field_key).is_none() {
+                    return false;
+                }
+                if !write_item_field(&mut vault.items[position], field_key, value) {
+                    return false;
+                }
+            }
+
+            let counter = vault.items[position].clock.increment(device);
+            let version = FieldVersion::new(device, counter);
+            vault.items[position].record_field(field_key, version);
+
+            if is_secret {
+                apply_secret_value(vault, *item_id, field_key, value, version);
+            }
+
+            true
+        }
+        ConflictScope::Vault => {
+            let Some(FieldValue::Plain(value)) = value else {
+                return false;
+            };
+            let counter = vault.clock.increment(device);
+            let version = FieldVersion::new(device, counter);
+            match field_key {
+                "name" => {
+                    vault.name = value.clone();
+                    vault.name_clock = version;
+                }
+                "color" => {
+                    vault.color = value.clone();
+                    vault.color_clock = version;
+                }
+                _ => return false,
+            }
+            true
+        }
+    }
+}
+
+fn apply_secret_value(
+    vault: &mut Vault,
+    item_id: ItemId,
+    field_key: &str,
+    value: Option<&FieldValue>,
+    version: FieldVersion,
+) {
+    let secret = match value {
+        Some(FieldValue::Secret(value)) => Some(value.clone()),
+        _ => None,
+    };
+
+    match (
+        vault
+            .secrets
+            .iter()
+            .position(|entry| entry.item_id == item_id),
+        secret,
+    ) {
+        (Some(position), Some(value)) => vault.secrets[position].set(field_key, value, version),
+        (Some(position), None) => {
+            vault.secrets[position].remove(field_key);
+            if vault.secrets[position].fields.is_empty() {
+                vault.secrets.remove(position);
+            }
+        }
+        (None, Some(value)) => vault
+            .secrets
+            .push(ItemSecrets::new(item_id, field_key, value, version)),
+        (None, None) => {}
+    }
+}
+
 /// Structural equality, compared in place. Secrets are compared by reference
 /// and never serialised into a temporary plaintext buffer, so an identical
 /// merge cannot create an un-zeroized copy of a password.
