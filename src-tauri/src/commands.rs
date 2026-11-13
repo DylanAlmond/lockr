@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::println;
 use std::sync::Mutex;
 
+use chrono::Utc;
 use tauri::State;
 use uuid::Uuid;
 use zeroize::Zeroize;
@@ -10,8 +11,9 @@ use zxcvbn::{zxcvbn, Entropy};
 use crate::user_manager::UserManager;
 use crate::vault_manager::VaultManager;
 use crate::{
-    DuplicateOutcome, DuplicateResolution, DuplicateSuggestion, IntoSafe, ItemFilter,
-    NewItemData, SafeItem, SafeVault, SecretInput, User, UserId,
+    DuplicateOutcome, DuplicateResolution, DuplicateSuggestion, IntoSafe, ItemFilter, NewItemData,
+    PairingApprovalPrompt, PairingCode, PairingMessage, PairingOffer, SafeItem, SafeVault,
+    SecretInput, User, UserId, CURRENT_SCHEMA_VERSION,
 };
 
 pub struct ManagerState {
@@ -335,6 +337,99 @@ pub fn start_with_new_device_identity(state: AppState, confirm: bool) -> Result<
     }
 
     state.recover_with_new_device_identity()
+}
+
+// ============ Pairing ============
+
+/// Source Device: mint a single-use offer. The secret key is held by the
+/// backend for the life of the offer and is never part of the offer itself.
+#[tauri::command]
+pub fn start_pairing(state: AppState) -> Result<PairingOffer, String> {
+    let mut state = state.lock().map_err(|e| e.to_string())?;
+    let (_, user_manager, _, secret_key) = state.parts_mut()?;
+
+    let secret_key = secret_key.as_ref().ok_or("Not logged in")?;
+    user_manager
+        .start_pairing(secret_key, CURRENT_SCHEMA_VERSION, Utc::now())
+        .map_err(|e| e.to_string())
+}
+
+/// Source Device: take the joining Device's announcement and return what the
+/// human must approve. Nothing is admitted and no key material moves here.
+#[tauri::command]
+pub fn receive_pairing_request(
+    state: AppState,
+    message: PairingMessage,
+) -> Result<PairingApprovalPrompt, String> {
+    let mut state = state.lock().map_err(|e| e.to_string())?;
+    let (_, user_manager) = state.ready_mut()?;
+
+    user_manager
+        .receive_pairing_request(message, Utc::now())
+        .map_err(|e| e.to_string())
+}
+
+/// Source Device: approve the Device shown in the prompt. The returned frame
+/// belongs on the authenticated pairing channel; it carries key material and
+/// is never a view for display.
+#[tauri::command]
+pub fn approve_pairing(state: AppState, device_id: String) -> Result<PairingMessage, String> {
+    let mut state = state.lock().map_err(|e| e.to_string())?;
+    let (_, user_manager) = state.ready_mut()?;
+    let device_id = Uuid::parse_str(&device_id).map_err(|e| e.to_string())?;
+
+    user_manager
+        .approve_pairing(device_id, Utc::now())
+        .map_err(|e| e.to_string())
+}
+
+/// Abandon a live offer or an in-progress join.
+#[tauri::command]
+pub fn cancel_pairing(state: AppState) -> Result<(), String> {
+    let mut state = state.lock().map_err(|e| e.to_string())?;
+    let (_, user_manager) = state.ready_mut()?;
+    user_manager.cancel_pairing();
+    Ok(())
+}
+
+/// Joining Device: announce this Device with the scanned or typed code. The
+/// returned frame belongs on the pairing channel established with the code's
+/// secret; nothing is written until the transfer arrives.
+#[tauri::command]
+pub fn join_pairing(state: AppState, code: PairingCode) -> Result<PairingMessage, String> {
+    let mut state = state.lock().map_err(|e| e.to_string())?;
+    let (_, user_manager) = state.ready_mut()?;
+
+    user_manager
+        .join_pairing(&code, CURRENT_SCHEMA_VERSION, Utc::now())
+        .map_err(|e| e.to_string())
+}
+
+/// Joining Device: accept the source's transfer and re-wrap the secret key
+/// under the password typed locally. The password never leaves this Device.
+#[tauri::command]
+pub fn complete_pairing(
+    state: AppState,
+    message: PairingMessage,
+    master_password: String,
+) -> Result<User, String> {
+    let mut state = state.lock().map_err(|e| e.to_string())?;
+    let (_, user_manager, master_password_state, secret_key_state) = state.parts_mut()?;
+
+    let user = user_manager
+        .complete_pairing(message, &master_password, Utc::now())
+        .map_err(|e| e.to_string())?;
+
+    // A Device that has just paired is logged in on the strength of the
+    // password typed here, exactly as if it had unlocked its own profile.
+    let secret_key = user_manager
+        .login(&user.id, &master_password)
+        .map_err(|e| e.to_string())?;
+
+    *master_password_state = Some(master_password);
+    *secret_key_state = Some(secret_key);
+
+    Ok(user)
 }
 
 #[tauri::command]

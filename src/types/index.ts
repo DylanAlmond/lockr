@@ -178,3 +178,54 @@ export interface Duration {
 export interface Match {
   pattern: string;
 }
+
+/** A single-use Pairing offer, rendered as a QR payload plus a typed fallback. */
+export interface PairingOffer {
+  session_id: string;
+  source_device_id: string;
+  qr_payload: string;
+  typed_code: string;
+  expires_at: string;
+}
+
+/** What the human on the source Device approves before any key material moves. */
+export interface PairingApprovalPrompt {
+  device_id: string;
+  name: string;
+  platform: string;
+}
+
+/** What the joining Device announces. Identity metadata only. */
+export interface PairingRequest {
+  device_id: string;
+  name: string;
+  platform: string;
+  public_key: string;
+  schema_version: number;
+}
+
+/** A scanned QR payload, or the 8-character fallback plus the Device it belongs to. */
+export type PairingCode =
+  | { kind: 'qr'; payload: string }
+  | { kind: 'typed'; source_device_id: string; code: string };
+
+/**
+ * A wire frame for the already-authenticated pairing channel. The `transfer`
+ * frame carries key material to the joining Device; it is never rendered (see
+ * the Safe View Pattern) and never contains the master password.
+ */
+export type PairingMessage =
+  | ({ kind: 'join' } & PairingRequest)
+  | {
+      kind: 'transfer';
+      schema_version: number;
+      shared_profile: {
+        user_id: string;
+        name: string;
+        color: string;
+        icon: string | null;
+        devices: unknown;
+        vaults: unknown;
+      };
+      secret_key: number[];
+    };
