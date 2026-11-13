@@ -191,6 +191,24 @@ Three actions exist and must never be the same button:
 3. **Delete vault** — the real one: tombstone, travels everywhere, becomes local
    trash on receivers.
 
+A Vault Tombstone is kept forever, unlike an Item Tombstone. A Device that was
+switched off when the deletion happened must still learn it on its next sync, and a
+tombstone that had been compacted would let a stale copy's registry resurrect the
+Vault. They carry an id, a timestamp, and the deleting Device, so retention costs
+nothing. Item Tombstones are not compacted in this increment either: doing it
+properly needs a per-Device acknowledgement clock that the Device Registry does not
+carry yet, so they are retained and the purge remains a follow-up.
+
+**Known limitation: Vault Registry membership is not signed.** Only `DeviceRecord`s
+carry signatures. Any admitted Device can therefore add a Vault id — and, with
+tombstones, delete one — in its own copy of the registry, and the union merge accepts
+it. Injecting an id only pollutes the Sync Set view and the unregistered-file list;
+it cannot make another Device transfer a file the injecting Device does not hold, and
+it cannot read anything. Resurrecting a locally unregistered `.vault` would require
+learning that file's UUID, which UUIDv4 makes impractical. Signing Registry
+membership — and ordering a tombstone against its signer's own revocation — is a
+later increment.
+
 ### 11. Manual first; automatic later, gated by a trusted network
 
 v1 syncs only when the user asks. Automatic sync makes the app a background

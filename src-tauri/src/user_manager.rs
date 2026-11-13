@@ -763,6 +763,25 @@ impl UserManager {
         Ok(())
     }
 
+    /// Delete a Vault everywhere: drop it from the shared Vault Registry and
+    /// record a Tombstone naming this Device as the deleter.
+    ///
+    /// This is the only one of the three removal operations that touches
+    /// shared state. "Stop syncing" and "remove local copy" are Device-local
+    /// and never call this.
+    pub fn delete_vault(&self, vault_id: VaultId, now: DateTime<Utc>) -> Result<(), VaultError> {
+        let user_id = self
+            .active_user_id
+            .as_ref()
+            .ok_or_else(|| VaultError::UserNotFound("No user is active".into()))?;
+
+        let mut shared = self.get_shared_profile(user_id)?;
+        if shared.vaults.delete(vault_id, now, self.device_id) {
+            self.save_shared_profile(&shared)?;
+        }
+        Ok(())
+    }
+
     /// Revoke a lost Device from this Device. Signed by this Device's session
     /// signing key; the registry keeps the record forever and revocation wins
     /// over any older copy a peer may still hold.
@@ -1097,6 +1116,37 @@ mod tests {
             "the UI-facing view must not gain a stale vault"
         );
         assert_eq!(shared.name, "Old Name", "metadata fallback still works");
+
+        std::fs::remove_dir_all(temp_dir).ok();
+    }
+
+    #[test]
+    fn test_deleting_a_vault_tombstones_it_in_the_shared_registry() {
+        let temp_dir = setup();
+        let mut manager = UserManager::new(temp_dir.clone()).unwrap();
+        let user = manager
+            .register("Deleter".to_string(), "Password")
+            .unwrap();
+        let vault_id = Uuid::new_v4();
+        let kept_id = Uuid::new_v4();
+        manager.add_vault_to_user(vault_id).unwrap();
+        manager.add_vault_to_user(kept_id).unwrap();
+
+        manager
+            .delete_vault(vault_id, DateTime::from_timestamp(3_000, 0).unwrap())
+            .unwrap();
+
+        // The deletion is shared state: it must survive a reload, and the
+        // `vault_ids` view must stop naming the Vault.
+        let reloaded = manager.get_shared_profile(&user.id).unwrap();
+        assert!(reloaded.vaults.is_tombstoned(&vault_id));
+        assert!(!reloaded.vaults.contains(&vault_id));
+        assert_eq!(reloaded.vaults.ids(), vec![kept_id]);
+        assert_eq!(manager.get_user(&user.id).unwrap().vault_ids, vec![kept_id]);
+        assert_eq!(
+            reloaded.vaults.tombstone(&vault_id).unwrap().deleted_by,
+            manager.device_id()
+        );
 
         std::fs::remove_dir_all(temp_dir).ok();
     }

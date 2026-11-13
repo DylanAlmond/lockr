@@ -325,10 +325,8 @@ impl MdnsDiscovery {
 
     /// Start advertising and browsing for the duration of a session.
     pub fn start_session(self: &Arc<Self>) -> Result<DiscoverySession, NetworkError> {
-        self.start_advertising()?;
-        Ok(DiscoverySession {
-            network: Arc::clone(self),
-        })
+        let network: Arc<dyn PeerNetwork> = self.clone();
+        DiscoverySession::start(&network)
     }
 
     fn lock_state(&self) -> std::sync::MutexGuard<'_, SessionState> {
@@ -443,16 +441,23 @@ impl Drop for MdnsDiscovery {
 /// browsing, dropping it stops both. Holding this guard is the only way the
 /// app should keep discovery open, so an idle app cannot leave a responder
 /// behind.
+///
+/// It works over the [`PeerNetwork`] seam rather than a concrete mDNS
+/// implementation, so tests (and any future transport) get the same
+/// start-and-stop guarantee.
 pub struct DiscoverySession {
-    network: Arc<MdnsDiscovery>,
+    network: Arc<dyn PeerNetwork>,
 }
 
 impl DiscoverySession {
-    pub fn start(network: &Arc<MdnsDiscovery>) -> Result<Self, NetworkError> {
-        network.start_session()
+    pub fn start(network: &Arc<dyn PeerNetwork>) -> Result<Self, NetworkError> {
+        network.start_advertising()?;
+        Ok(Self {
+            network: Arc::clone(network),
+        })
     }
 
-    pub fn network(&self) -> &Arc<MdnsDiscovery> {
+    pub fn network(&self) -> &Arc<dyn PeerNetwork> {
         &self.network
     }
 
@@ -663,6 +668,7 @@ mod tests {
     fn test_dropping_the_session_stops_advertising() {
         let adapter = Arc::new(FakeAdapter::default());
         let network = network(Arc::clone(&adapter));
+        let network: Arc<dyn PeerNetwork> = network;
 
         {
             let _session = DiscoverySession::start(&network).unwrap();
@@ -680,6 +686,7 @@ mod tests {
     fn test_a_discovered_peer_resolves_to_an_address_and_an_opaque_device_id() {
         let adapter = Arc::new(FakeAdapter::default());
         let network = network(Arc::clone(&adapter));
+        let network: Arc<dyn PeerNetwork> = network;
         let peer_id = Uuid::new_v4();
 
         let session = DiscoverySession::start(&network).unwrap();

@@ -150,6 +150,28 @@ fn fingerprint(bytes: &[u8]) -> u64 {
     hash
 }
 
+/// The last writer of one field, as this Device currently has it. Used to
+/// refuse a stale Conflict choice: the value the User was shown is only valid
+/// while this version is unchanged.
+fn current_field_version(
+    vault: &Vault,
+    scope: &crate::ConflictScope,
+    field_key: &str,
+) -> Option<FieldVersion> {
+    match scope {
+        crate::ConflictScope::Item { item_id, .. } => vault
+            .items
+            .iter()
+            .find(|item| item.id == *item_id && !item.is_tombstone())
+            .and_then(|item| item.field_clocks.get(field_key).copied()),
+        crate::ConflictScope::Vault => match field_key {
+            "name" => Some(vault.name_clock),
+            "color" => Some(vault.color_clock),
+            _ => None,
+        },
+    }
+}
+
 /// An unlocked vault held in RAM, along with its cached encryption key,
 /// salt, and dirty flag.
 ///
@@ -218,6 +240,12 @@ impl VaultManager {
     /// ever written at migration time, never on plain unlocks.
     fn vault_backup_path(&self, vault_id: VaultId) -> PathBuf {
         self.vaults_dir.join(format!("{}.vault.OLD", vault_id))
+    }
+
+    /// Where a Vault deleted on another Device becomes local trash. The purge
+    /// is left to the User; a remote trigger never hard-deletes.
+    pub(crate) fn vault_trash_path(&self, vault_id: VaultId) -> PathBuf {
+        self.vaults_dir.join(format!("{}.vault.deleted", vault_id))
     }
 
     /// Check if a SPECIFIC vault is unlocked
@@ -543,8 +571,14 @@ impl VaultManager {
         Ok(())
     }
 
-    /// Delete a given vault file and remove from RAM.
-    pub fn delete_vault(&mut self, vault_id: VaultId) -> Result<(), VaultError> {
+    /// Remove this Device's copy of a Vault: lock it and delete the file.
+    ///
+    /// This is the "remove local copy" removal operation and nothing more: it
+    /// is **not** a deletion and never leaves a Tombstone, because it means
+    /// "I do not want it here", not "it is gone". The caller is responsible
+    /// for taking the Vault out of this Device's Sync Set; otherwise the next
+    /// sync would simply install it again from a peer.
+    pub fn remove_local_copy(&mut self, vault_id: VaultId) -> Result<(), VaultError> {
         if self.is_vault_unlocked(vault_id) {
             self.lock_vault(Some(vault_id));
         }
@@ -556,10 +590,55 @@ impl VaultManager {
         Ok(())
     }
 
+    /// Move this Device's copy of a Vault to local trash
+    /// (`<vault_id>.vault.deleted`), keeping the encrypted file recoverable.
+    ///
+    /// This is the local half of "delete everywhere": the Vault Registry's
+    /// Tombstone is what travels, and every Device calls this when it learns
+    /// it. It is idempotent, because a deletion can arrive twice (or from two
+    /// Devices), and it never fails because the file is already gone.
+    /// Returns whether a live file was moved.
+    pub(crate) fn move_to_trash(&mut self, vault_id: VaultId) -> Result<bool, VaultError> {
+        if self.is_vault_unlocked(vault_id) {
+            self.lock_vault(Some(vault_id));
+        }
+
+        let path = self.vault_path(vault_id);
+        if !path.is_file() {
+            return Ok(false);
+        }
+
+        let trash = self.vault_trash_path(vault_id);
+        // A previous trash is superseded; Windows rename refuses to overwrite.
+        if trash.exists() {
+            std::fs::remove_file(&trash)?;
+        }
+        std::fs::rename(&path, &trash)?;
+        Ok(true)
+    }
+
     /// Delete an item of any kind and its secret entry, if any. The item is
     /// retained as a Tombstone — identity and clock only — so the deletion
     /// can travel to other Devices instead of the item reappearing on sync.
+    ///
+    /// Deleting an already-deleted item succeeds quietly: a deletion can
+    /// reach a Device twice (a retry, or the same deletion made on two
+    /// Devices), and treating the second one as an error would make sync
+    /// order-dependent. A move record is *not* a deletion, so deleting the
+    /// identity of an item that moved away is still `ItemNotFound`.
     pub fn delete_item(&mut self, vault_id: VaultId, item_id: ItemId) -> Result<(), VaultError> {
+        {
+            let vault = self.get_vault(vault_id)?;
+            let has_live_item = vault
+                .items
+                .iter()
+                .any(|i| i.id == item_id && !i.is_tombstone());
+            let already_deleted = vault.items.iter().any(|i| i.id == item_id && i.is_deleted());
+            if !has_live_item && already_deleted {
+                return Ok(());
+            }
+        }
+
         {
             let device = self.device_id;
             let vault = self.get_vault_mut(vault_id)?;
@@ -1209,6 +1288,10 @@ impl VaultManager {
 
     /// Install a vault this Device did not have: re-encrypt it under a locally
     /// generated salt with the same User credentials and write it atomically.
+    ///
+    /// The file is written *before* the vault is published in memory. A save
+    /// failure therefore leaves no half-installed vault that later reads
+    /// report as unlocked but that has no file on disk.
     pub(crate) fn install_vault(
         &mut self,
         vault: Vault,
@@ -1223,6 +1306,11 @@ impl VaultManager {
         let vault_id = vault.id;
         let salt = generate_salt();
         let master_key = derive_master_key(master_password, secret_key, &salt)?;
+        let json_bytes = serde_json::to_vec(&vault)?;
+        let encrypted = encrypt_with_key(&master_key, &salt, &json_bytes)?;
+
+        ensure_file_unchanged(&path, None, vault_id)?;
+        write_atomic(&path, encrypted.as_bytes())?;
 
         self.unlocked_vaults.insert(
             vault_id,
@@ -1230,12 +1318,12 @@ impl VaultManager {
                 vault,
                 master_key,
                 salt,
-                dirty: true,
-                fingerprint: None,
+                dirty: false,
+                fingerprint: Some(fingerprint(encrypted.as_bytes())),
             },
         );
 
-        self.save_vault(vault_id)
+        Ok(())
     }
 
     /// Replace an unlocked vault with a merged result and save it atomically.
@@ -1254,12 +1342,19 @@ impl VaultManager {
     /// stamped as a fresh local write so it beats both conflicting versions
     /// on the next sync. Returns whether the conflict still described a field
     /// that exists.
+    ///
+    /// `expected_local` is the local field version the User was shown when the
+    /// sync surfaced the Conflict. If the local field has been written since
+    /// then, the candidate is stale and is refused: applying it would silently
+    /// clobber newer work. A refusal is a distinct error, so the caller can
+    /// re-sync and re-prompt instead of pretending the choice was applied.
     pub(crate) fn resolve_conflict_field(
         &mut self,
         vault_id: VaultId,
         scope: &crate::ConflictScope,
         field_key: &str,
         is_secret: bool,
+        expected_local: Option<FieldVersion>,
         value: Option<&crate::merge::FieldValue>,
     ) -> Result<bool, VaultError> {
         let device = self.device_id;
@@ -1268,6 +1363,12 @@ impl VaultManager {
                 .unlocked_vaults
                 .get_mut(&vault_id)
                 .ok_or(VaultError::VaultLocked)?;
+            let current = current_field_version(&unlocked.vault, scope, field_key);
+            if current != expected_local {
+                return Err(VaultError::SyncConflictResolution(format!(
+                    "{field_key} changed on this Device after the sync surfaced it; sync again before choosing"
+                )));
+            }
             let applied = crate::merge::apply_conflict_value(
                 &mut unlocked.vault,
                 scope,
@@ -2526,6 +2627,200 @@ mod tests {
             .get_all_items(ItemFilter::default())
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn test_deleting_an_already_deleted_item_is_idempotent() {
+        let temp_dir = setup();
+        let mut manager = VaultManager::new(temp_dir.clone()).unwrap();
+        let vault = manager
+            .create_vault("Test".to_string(), "#6240BF".to_string(), MASTER_PW, &KEY)
+            .unwrap();
+        let device = manager.device_id();
+
+        let note = add_test_note(&mut manager, vault.id, "Note", "Body");
+        let note_id = match &note {
+            crate::SafeItem::Note(n) => n.id,
+            _ => panic!("expected note"),
+        };
+
+        manager.delete_item(vault.id, note_id).unwrap();
+        let clock_after_first = {
+            let vault_ref = manager.get_vault(vault.id).unwrap();
+            let tombstone = vault_ref
+                .items
+                .iter()
+                .find(|item| item.id == note_id)
+                .unwrap();
+            tombstone.clock.clone()
+        };
+
+        // The same delete arriving twice (a retry, or two Devices deleting
+        // the same Item) must succeed quietly.
+        manager.delete_item(vault.id, note_id).unwrap();
+
+        let vault_ref = manager.get_vault(vault.id).unwrap();
+        let tombstones: Vec<_> = vault_ref.items.iter().filter(|i| i.deleted).collect();
+        assert_eq!(tombstones.len(), 1, "one identity has one Tombstone");
+        assert_eq!(
+            tombstones[0].clock, clock_after_first,
+            "a repeat delete must not advance the clock"
+        );
+        assert_eq!(tombstones[0].clock.get(&device), 2);
+
+        // A move record is not a deletion: an Item that moved away is not
+        // "already deleted" in the vault it left.
+        let destination = manager
+            .create_vault("Elsewhere".to_string(), "#112233".to_string(), MASTER_PW, &KEY)
+            .unwrap();
+        let moved = add_test_account_item(&mut manager, vault.id, "octocat", "pw");
+        let moved_id = match &moved {
+            crate::SafeItem::Account(account) => account.id,
+            _ => panic!("expected account"),
+        };
+        manager
+            .move_item(vault.id, moved_id, destination.id)
+            .unwrap();
+
+        assert!(matches!(
+            manager.delete_item(vault.id, moved_id),
+            Err(VaultError::ItemNotFound(_))
+        ));
+
+        // An identity this vault never held is still an error.
+        assert!(matches!(
+            manager.delete_item(vault.id, Uuid::new_v4()),
+            Err(VaultError::ItemNotFound(_))
+        ));
+    }
+
+    #[test]
+    fn test_removing_a_local_copy_deletes_only_this_devices_file() {
+        let temp_dir = setup();
+        let mut manager = VaultManager::new(temp_dir.clone()).unwrap();
+        let vault = manager
+            .create_vault("Test".to_string(), "#6240BF".to_string(), MASTER_PW, &KEY)
+            .unwrap();
+
+        manager.remove_local_copy(vault.id).unwrap();
+
+        assert!(!manager.has_vault_file(vault.id), "the local file is gone");
+        assert!(matches!(
+            manager.get_vault(vault.id),
+            Err(VaultError::VaultLocked)
+        ));
+        assert!(
+            !manager.vault_trash_path(vault.id).exists(),
+            "removing a local copy is not a deletion and leaves no trash"
+        );
+    }
+
+    #[test]
+    fn test_moving_a_deleted_vault_to_local_trash_keeps_the_encrypted_file() {
+        let temp_dir = setup();
+        let mut manager = VaultManager::new(temp_dir.clone()).unwrap();
+        let vault = manager
+            .create_vault("Test".to_string(), "#6240BF".to_string(), MASTER_PW, &KEY)
+            .unwrap();
+        manager.lock_vault(Some(vault.id));
+        let encrypted =
+            std::fs::read(temp_dir.join("vaults").join(format!("{}.vault", vault.id))).unwrap();
+
+        assert!(manager.move_to_trash(vault.id).unwrap());
+
+        assert!(!manager.has_vault_file(vault.id));
+        let trash = manager.vault_trash_path(vault.id);
+        assert_eq!(
+            std::fs::read(&trash).unwrap(),
+            encrypted,
+            "trash keeps the encrypted file rather than destroying it"
+        );
+
+        // A deletion can arrive twice; the second one is a no-op.
+        assert!(!manager.move_to_trash(vault.id).unwrap());
+        assert!(trash.exists());
+    }
+
+    #[test]
+    fn test_a_failed_install_does_not_publish_an_unlocked_vault() {
+        let source_dir = setup();
+        let mut source = VaultManager::new(source_dir.clone()).unwrap();
+        let vault = source
+            .create_vault("Remote".to_string(), "#6240BF".to_string(), MASTER_PW, &KEY)
+            .unwrap();
+
+        let target_dir = setup();
+        let mut target = VaultManager::new(target_dir.clone()).unwrap();
+        // Make the destination unwritable by putting a directory where the
+        // vault file must go.
+        let blocked = target_dir.join("vaults").join(format!("{}.vault", vault.id));
+        std::fs::create_dir(&blocked).unwrap();
+
+        let result = target.install_vault(vault.clone(), MASTER_PW, &KEY);
+
+        assert!(result.is_err());
+        assert!(
+            matches!(target.get_vault(vault.id), Err(VaultError::VaultLocked)),
+            "a vault whose file was never written must not look unlocked"
+        );
+
+        std::fs::remove_dir_all(source_dir).ok();
+        std::fs::remove_dir_all(target_dir).ok();
+    }
+
+    #[test]
+    fn test_card_expiry_month_is_validated_on_update() {
+        let temp_dir = setup();
+        let mut manager = VaultManager::new(temp_dir.clone()).unwrap();
+        let vault = manager
+            .create_vault("Test".to_string(), "#6240BF".to_string(), MASTER_PW, &KEY)
+            .unwrap();
+        let device = manager.device_id();
+
+        let card = add_test_card(&mut manager, vault.id);
+        let card_id = match card {
+            crate::SafeItem::Card(view) => view.id,
+            _ => panic!("expected card view"),
+        };
+        let clock_before = manager
+            .get_vault(vault.id)
+            .unwrap()
+            .items
+            .iter()
+            .find(|item| item.id == card_id)
+            .unwrap()
+            .clock
+            .clone();
+
+        let result = manager.update_item(
+            vault.id,
+            card_id,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(crate::NewItemData::Card(crate::CardData {
+                cardholder_name: "Alex".to_string(),
+                expiry_month: 13,
+                expiry_year: 2030,
+                brand: None,
+            })),
+        );
+
+        assert!(matches!(
+            result,
+            Err(VaultError::Validation(ref msg)) if msg.contains("between 1 and 12")
+        ));
+        let stored = manager
+            .get_vault(vault.id)
+            .unwrap()
+            .items
+            .iter()
+            .find(|item| item.id == card_id)
+            .unwrap();
+        assert_eq!(stored.clock, clock_before, "a rejected update is not a write");
+        assert_eq!(stored.clock.get(&device), clock_before.get(&device));
     }
 
     #[test]

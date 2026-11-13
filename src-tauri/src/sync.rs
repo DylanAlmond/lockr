@@ -15,14 +15,21 @@
 //! responder.accept               <- Scope(initiator)
 //!                                -> Scope(responder)
 //! initiator.send_offers          <- Scope(responder)
+//!                                -> Scope(revised)   (only if the merge grew
+//!                                                     the initiator's scope)
 //!                                -> Vault* then Complete
-//! responder.receive_offers       <- Vault* then Complete
+//! responder.receive_offers       <- Scope(revised) then Vault* then Complete
 //!                                -> Vault* then Complete
 //! initiator.collect              <- Vault* then Complete
 //! ```
 //!
 //! The initiator sends first at every phase, and the responder replies, so a
 //! queue-backed test channel never has to guess when to block.
+//!
+//! The revised scope is what lets a Vault created on the responder since the
+//! last sync transfer in one round: the initiator only learns the Vault from
+//! the responder's registry, so it must announce that it now wants it before
+//! the responder decides what to offer.
 //!
 //! ## Conflicts are saved differently from clean merges
 //!
@@ -42,10 +49,14 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+use zeroize::Zeroize;
 
 use crate::atomic::write_atomic;
 use crate::merge::FieldValue;
@@ -57,13 +68,21 @@ use crate::registry::{SharedRegistries, VaultRegistry};
 use crate::user_manager::UserManager;
 use crate::vault_manager::VaultManager;
 use crate::{
-    Conflict, ConflictScope, DeviceId, ItemId, MergeError, MergeOutcome, UserId, Vault, VaultError,
-    VaultId,
+    Conflict, ConflictScope, DeviceId, FieldVersion, ItemId, MergeError, MergeOutcome, UserId, Vault,
+    VaultError, VaultId, CURRENT_SCHEMA_VERSION,
 };
 
 /// Device-local file holding Sync Sets and last-sync timestamps. It is never
 /// part of a Vault and never travels; each Device decides its own scope.
 const SYNC_STATE_FILE: &str = "sync_state.json";
+
+/// How long the engine waits for one frame from the peer.
+///
+/// A sync is a short conversational exchange, so a healthy peer replies
+/// promptly. A silent one must fail rather than leave the command — and every
+/// other command waiting on the same state — blocked indefinitely.
+pub const SYNC_FRAME_TIMEOUT: Duration = Duration::from_secs(30);
+
 
 /// The Sync Set rule for one Device.
 ///
@@ -258,6 +277,106 @@ pub struct SyncCredentials<'a> {
     pub secret_key: &'a [u8],
 }
 
+/// A one-way "stop this sync" flag.
+///
+/// It lives outside the global application state on purpose: the UI must be
+/// able to cancel a sync even while the command that is running it holds that
+/// state. The engine checks it between frames; a blocking transport should
+/// also use it to cut a read short.
+#[derive(Debug, Clone, Default)]
+pub struct SyncCancel {
+    flag: Arc<AtomicBool>,
+}
+
+impl SyncCancel {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn cancel(&self) {
+        self.flag.store(true, Ordering::SeqCst);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.flag.load(Ordering::SeqCst)
+    }
+}
+
+/// Guards the "one sync at a time" rule and hands out its cancel token.
+///
+/// This is separate from [`crate::commands::ManagerState`] so that starting a
+/// sync, cancelling one, and noticing that another is already running never
+/// need the same lock the running exchange holds.
+#[derive(Default)]
+pub struct SyncControl {
+    active: Mutex<Option<SyncCancel>>,
+}
+
+impl SyncControl {
+    fn lock(&self) -> std::sync::MutexGuard<'_, Option<SyncCancel>> {
+        // The value is a single flag; recovering a poisoned lock is safe and
+        // means a panic elsewhere cannot wedge every later sync.
+        self.active
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Claim the single sync slot. Two simultaneous syncs must not interleave:
+    /// the second caller is refused rather than racing the first over vault
+    /// files. Dropping the lease releases the slot.
+    pub fn begin(&self) -> Result<SyncLease<'_>, VaultError> {
+        let mut active = self.lock();
+        if active.is_some() {
+            return Err(VaultError::SyncRefused(
+                "a sync is already in progress on this Device".into(),
+            ));
+        }
+
+        let token = SyncCancel::new();
+        *active = Some(token.clone());
+
+        Ok(SyncLease {
+            control: self,
+            token,
+        })
+    }
+
+    /// Ask the running sync, if any, to stop at the next frame boundary.
+    pub fn cancel(&self) {
+        if let Some(token) = self.lock().as_ref() {
+            token.cancel();
+        }
+    }
+
+    pub fn is_active(&self) -> bool {
+        self.lock().is_some()
+    }
+
+    fn finish(&self) {
+        *self.lock() = None;
+    }
+}
+
+/// A claimed sync slot. Dropping it lets the next sync begin, even if the
+/// exchange failed or panicked.
+pub struct SyncLease<'a> {
+    control: &'a SyncControl,
+    token: SyncCancel,
+}
+
+impl SyncLease<'_> {
+    /// The token to hand to [`SyncEngine::with_cancel`].
+    pub fn token(&self) -> SyncCancel {
+        self.token.clone()
+    }
+}
+
+impl Drop for SyncLease<'_> {
+    fn drop(&mut self) {
+        self.control.finish();
+    }
+}
+
 /// Progress reported by the engine. The UI receives the same shape as Tauri
 /// events; the engine itself only knows this callback, so it is callable
 /// without a UI.
@@ -344,6 +463,11 @@ pub(crate) struct PendingConflict {
     pub(crate) local: Option<FieldValue>,
     pub(crate) remote: Option<FieldValue>,
 
+    /// This Device's field version at the moment the Conflict was surfaced.
+    /// A resolution is refused if the field has been written since, because
+    /// the candidate the User was shown would clobber newer work.
+    pub(crate) local_version: Option<FieldVersion>,
+
     /// The safe provenance the merge engine produced, reused verbatim in the
     /// surfaced report so the UI can say which Device wrote which side.
     pub(crate) sides: [crate::ConflictSide; 2],
@@ -353,6 +477,24 @@ pub(crate) struct PendingConflict {
 pub(crate) struct PendingSync {
     pub(crate) user_id: UserId,
     pub(crate) conflicts: Vec<PendingConflict>,
+}
+
+impl PendingSync {
+    /// Forget the plaintext secret candidates this open session held.
+    ///
+    /// A logout or a user switch must not leave secret values sitting in
+    /// memory waiting for a resolution that can never arrive.
+    pub(crate) fn forget(&mut self) {
+        for conflict in &mut self.conflicts {
+            for candidate in [&mut conflict.local, &mut conflict.remote] {
+                if let Some(FieldValue::Secret(secret)) = candidate {
+                    secret.zeroize();
+                }
+                *candidate = None;
+            }
+        }
+        self.conflicts.clear();
+    }
 }
 
 /// The engine's full result: the safe report and the backend-only candidates.
@@ -381,7 +523,10 @@ impl SyncOutcome {
 pub struct SyncStart {
     channel: Box<dyn PeerChannel>,
     peer_device_id: DeviceId,
-    local_scope: BTreeSet<VaultId>,
+
+    /// The scope the initiator announced. If merging the responder's registry
+    /// widens it, the initiator announces the revision before any blob moves.
+    sent_scope: BTreeSet<VaultId>,
 }
 
 impl SyncStart {
@@ -394,7 +539,10 @@ impl SyncStart {
 pub struct SyncSent {
     channel: Box<dyn PeerChannel>,
     peer_device_id: DeviceId,
-    intersection: BTreeSet<VaultId>,
+
+    /// Vaults this Device is willing to accept: its Sync Set over the merged
+    /// registry. A responder cannot push anything outside it.
+    accepting: BTreeSet<VaultId>,
 }
 
 /// A responder that has received the initiator's Scope and sent its own.
@@ -411,6 +559,7 @@ pub struct SyncEngine<'a> {
     user_manager: &'a UserManager,
     credentials: SyncCredentials<'a>,
     sync_set: SyncSet,
+    cancel: SyncCancel,
 }
 
 impl<'a> SyncEngine<'a> {
@@ -427,7 +576,14 @@ impl<'a> SyncEngine<'a> {
             user_manager,
             credentials,
             sync_set,
+            cancel: SyncCancel::new(),
         }
+    }
+
+    /// Attach the cancel token claimed from a [`SyncControl`].
+    pub fn with_cancel(mut self, cancel: SyncCancel) -> Self {
+        self.cancel = cancel;
+        self
     }
 
     // ============ Initiator ============
@@ -441,9 +597,11 @@ impl<'a> SyncEngine<'a> {
         let user_id = self.signed_in_user()?;
         let shared = self.user_manager.get_shared_profile(&user_id)?;
 
-        if shared.devices.is_revoked(&peer.device_id()) {
-            return Err(VaultError::SyncPeerRevoked(peer.device_id().to_string()));
-        }
+        // Pairing is the only grant of access. Discovery, or a channel that
+        // merely exists, is never enough: an advertiser this Device has not
+        // paired with is refused before a socket is opened.
+        self.require_admitted_peer(peer.device_id(), &shared.devices)?;
+        self.check_cancelled()?;
 
         let local_scope = self.sync_set.ids(&shared.vaults);
         let local_scope_ids: Vec<VaultId> = local_scope.iter().copied().collect();
@@ -453,9 +611,16 @@ impl<'a> SyncEngine<'a> {
             .connect(peer)
             .map_err(Self::map_connect_error)?;
 
+        // The channel must really lead to the Device that was asked for.
+        if channel.peer_device_id() != peer.device_id() {
+            channel.close();
+            return Err(VaultError::SyncWrongPeer);
+        }
+
         // A dirty vault must travel as it is now, not as it was last saved.
         self.vault_manager.flush_all()?;
 
+        self.check_cancelled()?;
         channel
             .send(SyncMessage::Scope(ScopeState::new(
                 local_scope_ids.clone(),
@@ -471,7 +636,7 @@ impl<'a> SyncEngine<'a> {
         Ok(SyncStart {
             channel,
             peer_device_id: peer.device_id(),
-            local_scope,
+            sent_scope: local_scope,
         })
     }
 
@@ -485,12 +650,33 @@ impl<'a> SyncEngine<'a> {
         let remote_scope = self.receive_scope(&mut *start.channel)?;
         let merged_registry = self.merge_registries(&remote_scope.registries)?;
 
-        self.reject_revoked_peer(start.peer_device_id, &merged_registry.devices)?;
+        self.require_admitted_peer(start.peer_device_id, &merged_registry.devices)?;
+
+        // Recompute the local scope from the *merged* registry. The peer may
+        // have told us about a Vault it created since the last sync; taking
+        // this Device's default Sync Set before the merge would leave that
+        // Vault until the following round.
+        let local_scope = self.sync_set.ids(&merged_registry.vaults);
         let intersection = self.intersection(
-            &start.local_scope,
+            &local_scope,
             &remote_scope.vault_ids,
             &merged_registry.vaults,
         );
+
+        if !local_scope.is_subset(&start.sent_scope) {
+            // The responder decides what to offer from the scope we
+            // announced, which predates the registry it just gave us.
+            // Announce the wider scope so it can include those Vaults in the
+            // same round.
+            let revised: Vec<VaultId> = local_scope.iter().copied().collect();
+            start
+                .channel
+                .send(SyncMessage::Scope(ScopeState::new(
+                    revised,
+                    merged_registry.clone(),
+                )))
+                .map_err(Self::map_channel_error)?;
+        }
 
         let agreed: Vec<VaultId> = intersection.iter().copied().collect();
         progress(SyncProgress::ScopeAgreed {
@@ -501,6 +687,7 @@ impl<'a> SyncEngine<'a> {
         for vault_id in &intersection {
             self.send_vault(start.channel.as_mut(), *vault_id, progress)?;
         }
+        self.check_cancelled()?;
         start
             .channel
             .send(SyncMessage::Complete)
@@ -509,7 +696,11 @@ impl<'a> SyncEngine<'a> {
         Ok(SyncSent {
             channel: start.channel,
             peer_device_id: start.peer_device_id,
-            intersection,
+            // What this Device is willing to accept from the responder: its
+            // whole Sync Set, not only the part the responder already knew
+            // about. The responder still sends only Vaults it holds and has
+            // in its own Sync Set.
+            accepting: local_scope,
         })
     }
 
@@ -523,9 +714,10 @@ impl<'a> SyncEngine<'a> {
         let mut outcome = SyncOutcome::report_only(session_id, sent.peer_device_id);
 
         loop {
-            match sent.channel.receive().map_err(Self::map_channel_error)? {
+            self.require_admitted_peer(sent.peer_device_id, &self.local_devices()?)?;
+            match self.receive_frame(sent.channel.as_mut())? {
                 SyncMessage::Vault { vault_id, blob } => {
-                    self.integrator_check_scope(&sent.intersection, vault_id)?;
+                    self.integrator_check_scope(&sent.accepting, vault_id)?;
                     self.integrate(vault_id, &blob, &mut outcome, progress)?;
                 }
                 SyncMessage::Complete => break,
@@ -554,16 +746,28 @@ impl<'a> SyncEngine<'a> {
         };
 
         let peer_device_id = channel.peer_device_id();
-        self.reject_revoked_peer(
+
+        // Fail closed before reading anything: an inbound channel from a
+        // Device this User never paired with gets no registry state and no
+        // vault ids. Run this again after the merge, because the peer's own
+        // registry may revoke it.
+        if let Err(error) = self.require_admitted_peer(
             peer_device_id,
             &self.user_manager.get_shared_profile(&user_id)?.devices,
-        )?;
+        ) {
+            channel.close();
+            return Err(error);
+        }
 
         let remote_scope = self.receive_scope(&mut *channel)?;
         let merged_registry = self.merge_registries(&remote_scope.registries)?;
-        self.reject_revoked_peer(peer_device_id, &merged_registry.devices)?;
+        if let Err(error) = self.require_admitted_peer(peer_device_id, &merged_registry.devices) {
+            channel.close();
+            return Err(error);
+        }
 
         self.vault_manager.flush_all()?;
+        self.check_cancelled()?;
 
         let local_scope = self.sync_set.ids(&merged_registry.vaults);
         let local_ids: Vec<VaultId> = local_scope.iter().copied().collect();
@@ -603,13 +807,34 @@ impl<'a> SyncEngine<'a> {
         let session_id = Uuid::new_v4();
         let mut outcome = SyncOutcome::report_only(session_id, accepted.peer_device_id);
 
+        // The peer may have been revoked while the channel was open, and a
+        // revocation that arrived with the peer's registry was merged during
+        // `accept`. Stop before any vault content is sent or integrated.
+        self.require_admitted_peer(accepted.peer_device_id, &self.local_devices()?)?;
+
+        // The initiator may announce a revised scope after merging our
+        // registry (it has learned about Vaults we hold that it did not know).
+        // Recompute the intersection before deciding what to offer, otherwise
+        // a Vault created here since the last sync would wait a round.
+        let mut intersection = accepted.intersection.clone();
+        let mut current = self.receive_frame(accepted.channel.as_mut())?;
+        while let SyncMessage::Scope(scope) = &current {
+            let merged_registry = self.merge_registries(&scope.registries)?;
+            self.require_admitted_peer(accepted.peer_device_id, &merged_registry.devices)?;
+            intersection = self.intersection(
+                &self.sync_set.ids(&merged_registry.vaults),
+                &scope.vault_ids,
+                &merged_registry.vaults,
+            );
+            current = self.receive_frame(accepted.channel.as_mut())?;
+        }
+
         // Capture this Device's copies *before* merging the initiator's
         // offers. Sending the post-merge copy back would make it look
         // causally later than the initiator's own write (it has absorbed the
         // initiator's clock), silently hiding the very conflict the two
         // original copies describe.
-        let own_offers: Vec<(VaultId, Vec<u8>)> = accepted
-            .intersection
+        let own_offers: Vec<(VaultId, Vec<u8>)> = intersection
             .iter()
             .filter(|vault_id| self.vault_manager.has_vault_file(**vault_id))
             .map(|vault_id| {
@@ -621,13 +846,10 @@ impl<'a> SyncEngine<'a> {
             .collect::<Result<_, VaultError>>()?;
 
         loop {
-            match accepted
-                .channel
-                .receive()
-                .map_err(Self::map_channel_error)?
-            {
+            self.require_admitted_peer(accepted.peer_device_id, &self.local_devices()?)?;
+            match current {
                 SyncMessage::Vault { vault_id, blob } => {
-                    self.integrator_check_scope(&accepted.intersection, vault_id)?;
+                    self.integrator_check_scope(&intersection, vault_id)?;
                     self.integrate(vault_id, &blob, &mut outcome, progress)?;
                 }
                 SyncMessage::Complete => break,
@@ -637,12 +859,14 @@ impl<'a> SyncEngine<'a> {
                     )))
                 }
             }
+            current = self.receive_frame(accepted.channel.as_mut())?;
         }
 
         // Responder replies with the pre-merge copies captured above. Both
         // Devices therefore merge the same two original states, compute the
         // same conflicts, and keep their own contested values.
         for (vault_id, bytes) in own_offers {
+            self.check_cancelled()?;
             progress(SyncProgress::SendingVault {
                 vault_id,
                 bytes: bytes.len(),
@@ -655,6 +879,7 @@ impl<'a> SyncEngine<'a> {
                 })
                 .map_err(Self::map_channel_error)?;
         }
+        self.check_cancelled()?;
         accepted
             .channel
             .send(SyncMessage::Complete)
@@ -678,8 +903,51 @@ impl<'a> SyncEngine<'a> {
         Ok(user_id)
     }
 
+    /// The Device Registry this Device has right now.
+    fn local_devices(&self) -> Result<crate::DeviceRegistry, VaultError> {
+        let user_id = self
+            .user_manager
+            .active_user_id
+            .ok_or(VaultError::SyncNotLoggedIn)?;
+        Ok(self.user_manager.get_shared_profile(&user_id)?.devices)
+    }
+
+    /// Refuse a peer that this User has not admitted, or has revoked.
+    ///
+    /// An unknown Device is not "merely unrevoked": `is_revoked` is false for
+    /// it, so checking revocation alone would let any advertiser in.
+    fn require_admitted_peer(
+        &self,
+        peer_device_id: DeviceId,
+        devices: &crate::DeviceRegistry,
+    ) -> Result<(), VaultError> {
+        match devices.get(&peer_device_id) {
+            Some(record) if record.is_revoked() => {
+                Err(VaultError::SyncPeerRevoked(peer_device_id.to_string()))
+            }
+            Some(_) => Ok(()),
+            None => Err(VaultError::SyncPeerNotPaired(peer_device_id.to_string())),
+        }
+    }
+
+    fn check_cancelled(&self) -> Result<(), VaultError> {
+        if self.cancel.is_cancelled() {
+            Err(VaultError::SyncCancelled)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Receive one frame, refusing to wait forever and honouring cancellation.
+    fn receive_frame(&self, channel: &mut dyn PeerChannel) -> Result<SyncMessage, VaultError> {
+        self.check_cancelled()?;
+        channel
+            .receive_timeout(SYNC_FRAME_TIMEOUT)
+            .map_err(Self::map_channel_error)
+    }
+
     fn receive_scope(&self, channel: &mut dyn PeerChannel) -> Result<ScopeState, VaultError> {
-        match channel.receive().map_err(Self::map_channel_error)? {
+        match self.receive_frame(channel)? {
             SyncMessage::Scope(scope) => Ok(scope),
             other => Err(VaultError::SyncRefused(format!(
                 "expected the peer's scope, got {other:?}"
@@ -689,7 +957,13 @@ impl<'a> SyncEngine<'a> {
 
     /// Merge the peer's shared registries into ours. Revocation wins, so a
     /// peer cannot un-revoke a Device by presenting an older copy.
-    fn merge_registries(&self, remote: &SharedRegistries) -> Result<SharedRegistries, VaultError> {
+    ///
+    /// A Vault Tombstone that arrives here is applied immediately: this
+    /// Device's live copy becomes local trash. Doing it inside the registry
+    /// merge is what makes "re-enable a Vault that was deleted while it was
+    /// out of the Sync Set" apply the pending tombstone without a second
+    /// round trip.
+    fn merge_registries(&mut self, remote: &SharedRegistries) -> Result<SharedRegistries, VaultError> {
         let user_id = self
             .user_manager
             .active_user_id
@@ -697,9 +971,7 @@ impl<'a> SyncEngine<'a> {
         let mut shared = self.user_manager.get_shared_profile(&user_id)?;
 
         shared.devices = shared.devices.merge(&remote.devices)?;
-        for vault_id in remote.vaults.iter() {
-            shared.vaults.insert(*vault_id);
-        }
+        shared.vaults = shared.vaults.merge(&remote.vaults);
 
         if shared.devices.is_revoked(&self.vault_manager.device_id()) {
             return Err(VaultError::SyncThisDeviceRevoked(
@@ -707,20 +979,21 @@ impl<'a> SyncEngine<'a> {
             ));
         }
 
-        self.user_manager.save_shared_profile(&shared)?;
-        Ok(shared.registries())
-    }
+        let tombstoned: Vec<VaultId> = shared
+            .vaults
+            .tombstones()
+            .map(|tombstone| tombstone.vault_id)
+            .collect();
 
-    fn reject_revoked_peer(
-        &self,
-        peer_device_id: DeviceId,
-        devices: &crate::DeviceRegistry,
-    ) -> Result<(), VaultError> {
-        if devices.is_revoked(&peer_device_id) {
-            Err(VaultError::SyncPeerRevoked(peer_device_id.to_string()))
-        } else {
-            Ok(())
+        self.user_manager.save_shared_profile(&shared)?;
+
+        for vault_id in tombstoned {
+            if self.vault_manager.has_vault_file(vault_id) {
+                self.vault_manager.move_to_trash(vault_id)?;
+            }
         }
+
+        Ok(shared.registries())
     }
 
     /// Registry ∩ both Sync Sets. Nothing outside this set is offered or
@@ -759,6 +1032,7 @@ impl<'a> SyncEngine<'a> {
         vault_id: VaultId,
         progress: &mut dyn FnMut(SyncProgress),
     ) -> Result<(), VaultError> {
+        self.check_cancelled()?;
         if !self.vault_manager.has_vault_file(vault_id) {
             // The registry can name a Vault this Device does not hold. That
             // is not an error: the peer may hold it and send it to us.
@@ -803,6 +1077,17 @@ impl<'a> SyncEngine<'a> {
             });
         }
 
+        // The transport handshake compares schema versions, but a blob can
+        // arrive over a channel that did not (or claim otherwise). Never
+        // integrate a schema this build cannot honestly read: a newer one
+        // would lose fields on merge, an older one is unmigrated.
+        if remote.schema_version != CURRENT_SCHEMA_VERSION {
+            return Err(VaultError::SyncSchemaMismatch {
+                local: CURRENT_SCHEMA_VERSION,
+                remote: remote.schema_version,
+            });
+        }
+
         if !self.vault_manager.has_vault_file(vault_id) {
             // First copy of this Vault on this Device.
             self.vault_manager.install_vault(
@@ -834,6 +1119,22 @@ impl<'a> SyncEngine<'a> {
                 self.vault_manager.replace_vault(merged)?;
             }
             MergeOutcome::Conflicts(report) => {
+                // An Item's kind is not a versioned field, so a disagreement
+                // about it cannot be resolved the way a field Conflict can.
+                // No local operation may change an Item's kind, so this is a
+                // malformed (or tampered) copy rather than an edit a human
+                // made: fail closed instead of surfacing a prompt that could
+                // never drain the session.
+                if report
+                    .conflicts
+                    .iter()
+                    .any(|conflict| conflict.field_key == "kind")
+                {
+                    return Err(VaultError::SyncRefused(format!(
+                        "Vault {vault_id}: the peer's copy disagrees about an Item's kind, which cannot be merged"
+                    )));
+                }
+
                 outcome.pending.extend(self.capture_conflicts(
                     vault_id,
                     &local,
@@ -884,6 +1185,7 @@ impl<'a> SyncEngine<'a> {
                     &conflict.field_key,
                     conflict.is_secret,
                 ),
+                local_version: capture_field_version(local, &conflict.scope, &conflict.field_key),
                 sides: conflict.sides.clone(),
             })
             .collect()
@@ -921,6 +1223,14 @@ impl<'a> SyncEngine<'a> {
 
     /// Same item identity live in two local Vaults. This is the move
     /// collision that whole-file, per-Vault merge cannot resolve by itself.
+    ///
+    /// This is a surviving limitation, not a promise of convergence: a merge
+    /// sees one Vault at a time, so two Devices moving the same identity to
+    /// two different destinations concurrently can leave a live copy in each.
+    /// #47 picks the destination deterministically inside the source Vault;
+    /// reconciling the two destination Vaults needs cross-Vault knowledge that
+    /// this engine does not have. The note exists so nothing is silently
+    /// discarded, not so the caller may claim the two Vaults agree.
     fn duplicate_identity_notes(&self) -> Vec<DuplicateIdentityNote> {
         let mut by_item: BTreeMap<ItemId, Vec<VaultId>> = BTreeMap::new();
 
@@ -967,6 +1277,7 @@ impl<'a> SyncEngine<'a> {
             NetworkError::ConnectionClosed => {
                 VaultError::SyncPeerUnreachable("connection closed".into())
             }
+            NetworkError::Timeout => VaultError::SyncTimeout("the peer did not answer".into()),
             NetworkError::MalformedFrame(detail) => VaultError::SyncRefused(detail),
         }
     }
@@ -976,6 +1287,9 @@ impl<'a> SyncEngine<'a> {
             NetworkError::ConnectionClosed => {
                 VaultError::SyncInterrupted("the peer channel closed".into())
             }
+            NetworkError::Timeout => VaultError::SyncTimeout(
+                "the peer did not answer within the frame timeout".into(),
+            ),
             NetworkError::PeerUnreachable(peer) => VaultError::SyncPeerUnreachable(peer),
             NetworkError::AuthenticationFailed => VaultError::SyncAuthenticationFailed,
             NetworkError::ProtocolMismatch { local, remote } => {
@@ -990,6 +1304,27 @@ impl<'a> SyncEngine<'a> {
             }
             NetworkError::MalformedFrame(detail) => VaultError::SyncRefused(detail),
         }
+    }
+}
+
+/// The local field's last-writer version, captured with the candidates so a
+/// later resolution can tell whether the field moved underneath it.
+fn capture_field_version(
+    vault: &Vault,
+    scope: &ConflictScope,
+    field_key: &str,
+) -> Option<FieldVersion> {
+    match scope {
+        ConflictScope::Item { item_id, .. } => vault
+            .items
+            .iter()
+            .find(|item| item.id == *item_id && !item.is_tombstone())
+            .and_then(|item| item.field_clocks.get(field_key).copied()),
+        ConflictScope::Vault => match field_key {
+            "name" => Some(vault.name_clock),
+            "color" => Some(vault.color_clock),
+            _ => None,
+        },
     }
 }
 
@@ -1034,7 +1369,7 @@ mod tests {
     use crate::network::{
         InMemoryDeviceConfig, InMemoryHub, InMemoryNetwork, PeerChannel, SyncMessage,
     };
-    use crate::{AccountData, NewItemData, PairingCode, SecretInput};
+    use crate::{AccountData, NewItemData, PairingCode, SecretInput, CURRENT_SCHEMA_VERSION};
 
     const MASTER_PW: &str = "Correct-Horse-Battery-Staple-9";
     const SCHEMA_VERSION: u32 = 3;
@@ -1241,6 +1576,18 @@ mod tests {
         }
 
         fn sync(&mut self) -> (SyncOutcome, SyncOutcome) {
+            let (a, b) = self.sync_attempt();
+            (
+                a.expect("Device A completed the sync"),
+                b.expect("Device B completed the sync"),
+            )
+        }
+
+        /// The same exchange, exposing each side's result. Used by tests that
+        /// expect the sync to refuse part-way through.
+        fn sync_attempt(
+            &mut self,
+        ) -> (Result<SyncOutcome, VaultError>, Result<SyncOutcome, VaultError>) {
             let peer = self
                 .a
                 .net
@@ -1283,8 +1630,8 @@ mod tests {
                 .expect("the initiator is waiting");
 
             let sent = engine_a.send_offers(start, &mut noop).unwrap();
-            let outcome_b = engine_b.receive_offers(accepted, &mut noop).unwrap();
-            let outcome_a = engine_a.collect(sent, &mut noop).unwrap();
+            let outcome_b = engine_b.receive_offers(accepted, &mut noop);
+            let outcome_a = engine_a.collect(sent, &mut noop);
 
             (outcome_a, outcome_b)
         }
@@ -1729,6 +2076,7 @@ mod tests {
                 &display.scope,
                 &display.field_key,
                 display.is_secret,
+                display.local_version,
                 display.remote.as_ref(),
             )
             .unwrap());
@@ -1741,6 +2089,7 @@ mod tests {
                 &password.scope,
                 &password.field_key,
                 password.is_secret,
+                password.local_version,
                 password.remote.as_ref(),
             )
             .unwrap());
@@ -1823,6 +2172,7 @@ mod tests {
                 &pending.scope,
                 &pending.field_key,
                 pending.is_secret,
+                pending.local_version,
                 pending.remote.as_ref(),
             )
             .unwrap();
@@ -2093,5 +2443,944 @@ mod tests {
                 .as_deref(),
             Some("Renamed on A")
         );
+    }
+
+    // ============ Pairing gates the sync seam ============
+
+    /// A [`PeerNetwork`] whose channels claim to belong to another Device.
+    struct ImpersonatingNetwork<'a> {
+        inner: &'a InMemoryNetwork,
+        claims: DeviceId,
+    }
+
+    impl PeerNetwork for ImpersonatingNetwork<'_> {
+        fn start_advertising(&self) -> Result<(), NetworkError> {
+            self.inner.start_advertising()
+        }
+
+        fn stop_advertising(&self) -> Result<(), NetworkError> {
+            self.inner.stop_advertising()
+        }
+
+        fn discover(&self) -> Result<Vec<DiscoveredPeer>, NetworkError> {
+            self.inner.discover()
+        }
+
+        fn connect(&self, peer: &DiscoveredPeer) -> Result<Box<dyn PeerChannel>, NetworkError> {
+            Ok(Box::new(ImpersonatingChannel {
+                inner: self.inner.connect(peer)?,
+                claims: self.claims,
+            }))
+        }
+
+        fn accept(&self) -> Result<Option<Box<dyn PeerChannel>>, NetworkError> {
+            self.inner.accept()
+        }
+    }
+
+    struct ImpersonatingChannel {
+        inner: Box<dyn PeerChannel>,
+        claims: DeviceId,
+    }
+
+    impl PeerChannel for ImpersonatingChannel {
+        fn peer_device_id(&self) -> DeviceId {
+            self.claims
+        }
+
+        fn send(&mut self, message: SyncMessage) -> Result<(), NetworkError> {
+            self.inner.send(message)
+        }
+
+        fn receive(&mut self) -> Result<SyncMessage, NetworkError> {
+            self.inner.receive()
+        }
+
+        fn receive_timeout(
+            &mut self,
+            timeout: std::time::Duration,
+        ) -> Result<SyncMessage, NetworkError> {
+            self.inner.receive_timeout(timeout)
+        }
+
+        fn close(&mut self) {
+            self.inner.close()
+        }
+    }
+
+    /// A [`PeerNetwork`] whose channels stop answering after `frames` replies,
+    /// standing in for a transport-level read timeout.
+    struct SilentAfterNetwork<'a> {
+        inner: &'a InMemoryNetwork,
+        frames: usize,
+    }
+
+    impl PeerNetwork for SilentAfterNetwork<'_> {
+        fn start_advertising(&self) -> Result<(), NetworkError> {
+            self.inner.start_advertising()
+        }
+
+        fn stop_advertising(&self) -> Result<(), NetworkError> {
+            self.inner.stop_advertising()
+        }
+
+        fn discover(&self) -> Result<Vec<DiscoveredPeer>, NetworkError> {
+            self.inner.discover()
+        }
+
+        fn connect(&self, peer: &DiscoveredPeer) -> Result<Box<dyn PeerChannel>, NetworkError> {
+            Ok(Box::new(SilentChannel {
+                inner: self.inner.connect(peer)?,
+                remaining: self.frames,
+            }))
+        }
+
+        fn accept(&self) -> Result<Option<Box<dyn PeerChannel>>, NetworkError> {
+            Ok(self.inner.accept()?.map(|inner| {
+                Box::new(SilentChannel {
+                    inner,
+                    remaining: self.frames,
+                }) as Box<dyn PeerChannel>
+            }))
+        }
+    }
+
+    struct SilentChannel {
+        inner: Box<dyn PeerChannel>,
+        remaining: usize,
+    }
+
+    impl SilentChannel {
+        fn tick(&mut self) -> Result<(), NetworkError> {
+            if self.remaining == 0 {
+                return Err(NetworkError::Timeout);
+            }
+            self.remaining -= 1;
+            Ok(())
+        }
+    }
+
+    impl PeerChannel for SilentChannel {
+        fn peer_device_id(&self) -> DeviceId {
+            self.inner.peer_device_id()
+        }
+
+        fn send(&mut self, message: SyncMessage) -> Result<(), NetworkError> {
+            self.inner.send(message)
+        }
+
+        fn receive(&mut self) -> Result<SyncMessage, NetworkError> {
+            self.tick()?;
+            self.inner.receive()
+        }
+
+        fn receive_timeout(
+            &mut self,
+            timeout: std::time::Duration,
+        ) -> Result<SyncMessage, NetworkError> {
+            self.tick()?;
+            self.inner.receive_timeout(timeout)
+        }
+
+        fn close(&mut self) {
+            self.inner.close()
+        }
+    }
+
+    macro_rules! device_engine {
+        ($fixture:ident, $side:ident) => {
+            SyncEngine::new(
+                &$fixture.$side.net,
+                &mut $fixture.$side.vaults,
+                &$fixture.$side.user,
+                $fixture.$side.sync.scope(&$fixture.$side.user_id),
+                SyncCredentials {
+                    master_password: MASTER_PW,
+                    secret_key: &$fixture.$side.secret_key,
+                },
+            )
+        };
+    }
+
+    fn shared_vaults(device: &Device) -> VaultRegistry {
+        device
+            .user
+            .get_shared_profile(&device.user_id)
+            .unwrap()
+            .vaults
+    }
+
+    fn discovered_b(fixture: &Fixture) -> DiscoveredPeer {
+        fixture
+            .a
+            .net
+            .discover()
+            .unwrap()
+            .into_iter()
+            .find(|peer| peer.device_id() == fixture.b.user.device_id())
+            .expect("b is advertising")
+    }
+
+    #[test]
+    fn test_an_unpaired_advertiser_is_refused_before_any_offer() {
+        let mut fixture = Fixture::new();
+
+        // The transports know each other (the in-memory seam models mutual
+        // pairing), but this User's registry does not: no pairing ever
+        // happened. An unknown Device is not "merely unrevoked".
+        let mut shared = fixture
+            .a
+            .user
+            .get_shared_profile(&fixture.a.user_id)
+            .unwrap();
+        shared.devices = crate::DeviceRegistry::new();
+        fixture.a.user.save_shared_profile(&shared).unwrap();
+
+        let peer = discovered_b(&fixture);
+        let mut noop = |_: SyncProgress| {};
+        let mut engine = device_engine!(fixture, a);
+
+        assert!(matches!(
+            engine.start_with_peer(&peer, &mut noop),
+            Err(VaultError::SyncPeerNotPaired(_))
+        ));
+        assert!(
+            fixture.b.net.accept().unwrap().is_none(),
+            "refusal must happen before a channel is opened, so nothing is offered"
+        );
+    }
+
+    #[test]
+    fn test_a_channel_that_leads_to_another_device_is_refused() {
+        let mut fixture = Fixture::new();
+        let peer = discovered_b(&fixture);
+        let impostor = Uuid::new_v4();
+        let impersonating = ImpersonatingNetwork {
+            inner: &fixture.a.net,
+            claims: impostor,
+        };
+
+        let mut noop = |_: SyncProgress| {};
+        let mut engine = SyncEngine::new(
+            &impersonating,
+            &mut fixture.a.vaults,
+            &fixture.a.user,
+            fixture.a.sync.scope(&fixture.a.user_id),
+            SyncCredentials {
+                master_password: MASTER_PW,
+                secret_key: &fixture.a.secret_key,
+            },
+        );
+
+        assert!(matches!(
+            engine.start_with_peer(&peer, &mut noop),
+            Err(VaultError::SyncWrongPeer)
+        ));
+    }
+
+    // ============ Timeouts, cancellation and one sync at a time ============
+
+    #[test]
+    fn test_a_silent_peer_times_out_instead_of_waiting_forever() {
+        let mut fixture = Fixture::new();
+        let peer = discovered_b(&fixture);
+        let silent = SilentAfterNetwork {
+            inner: &fixture.a.net,
+            frames: 0,
+        };
+
+        let mut noop = |_: SyncProgress| {};
+        let mut engine = SyncEngine::new(
+            &silent,
+            &mut fixture.a.vaults,
+            &fixture.a.user,
+            fixture.a.sync.scope(&fixture.a.user_id),
+            SyncCredentials {
+                master_password: MASTER_PW,
+                secret_key: &fixture.a.secret_key,
+            },
+        );
+        let start = engine.start_with_peer(&peer, &mut noop).unwrap();
+
+        assert!(matches!(
+            engine.send_offers(start, &mut noop),
+            Err(VaultError::SyncTimeout(_))
+        ));
+    }
+
+    #[test]
+    fn test_a_cancelled_sync_sends_nothing() {
+        let mut fixture = Fixture::new();
+        let peer = discovered_b(&fixture);
+        let cancel = SyncCancel::new();
+        cancel.cancel();
+
+        let mut noop = |_: SyncProgress| {};
+        let mut engine = device_engine!(fixture, a).with_cancel(cancel);
+
+        assert!(matches!(
+            engine.start_with_peer(&peer, &mut noop),
+            Err(VaultError::SyncCancelled)
+        ));
+        assert!(fixture.b.net.accept().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_two_simultaneous_syncs_do_not_interleave() {
+        let control = SyncControl::default();
+
+        let first = control.begin().unwrap();
+        assert!(control.is_active());
+        assert!(matches!(
+            control.begin(),
+            Err(VaultError::SyncRefused(_))
+        ));
+
+        // Cancelling reaches the running sync without any lock the exchange
+        // is holding, which is why the token lives in this control rather
+        // than in the application state.
+        assert!(!first.token().is_cancelled());
+        control.cancel();
+        assert!(first.token().is_cancelled());
+
+        // Finishing releases the slot even after a failure.
+        drop(first);
+        assert!(!control.is_active());
+        assert!(control.begin().is_ok());
+    }
+
+    // ============ Integration-boundary checks ============
+
+    #[test]
+    fn test_a_vault_blob_from_another_schema_is_refused_at_the_boundary() {
+        let mut fixture = Fixture::new();
+        fixture.sync();
+
+        let mut tampered = fixture.b.vaults.get_vault(fixture.vault_id).unwrap().clone();
+        tampered.schema_version = CURRENT_SCHEMA_VERSION + 1;
+        fixture.b.vaults.replace_vault(tampered).unwrap();
+
+        let (a_result, _) = fixture.sync_attempt();
+
+        assert!(matches!(
+            a_result,
+            Err(VaultError::SyncSchemaMismatch { local, remote })
+                if local == CURRENT_SCHEMA_VERSION && remote == CURRENT_SCHEMA_VERSION + 1
+        ));
+        assert_eq!(
+            fixture
+                .a
+                .vaults
+                .get_vault(fixture.vault_id)
+                .unwrap()
+                .schema_version,
+            CURRENT_SCHEMA_VERSION,
+            "the refused blob must not be integrated"
+        );
+    }
+
+    #[test]
+    fn test_an_item_kind_disagreement_is_refused_rather_than_holding_the_session_open() {
+        let mut fixture = Fixture::new();
+        fixture.sync();
+
+        // No local operation can change an Item's kind, so this is a
+        // malformed peer copy: there is no honest value to offer the User.
+        fixture
+            .a
+            .vaults
+            .update_item(
+                fixture.vault_id,
+                fixture.item_id,
+                Some("Renamed on A".to_string()),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+        let mut tampered = fixture.b.vaults.get_vault(fixture.vault_id).unwrap().clone();
+        let device = fixture.b.vaults.device_id();
+        let item = tampered
+            .items
+            .iter_mut()
+            .find(|item| item.id == fixture.item_id)
+            .unwrap();
+        item.kind = Some(crate::ItemKind::Note(crate::NoteData {
+            title: Some("Not an account".to_string()),
+            body: "tampered".to_string(),
+        }));
+        item.clock.increment(device);
+        fixture.b.vaults.replace_vault(tampered).unwrap();
+
+        let (_a_result, b_result) = fixture.sync_attempt();
+
+        assert!(
+            matches!(b_result, Err(VaultError::SyncRefused(_))),
+            "the side that merged the malformed copy refuses it"
+        );
+        assert_eq!(
+            live_item(&fixture.a, fixture.vault_id, fixture.item_id)
+                .display_name
+                .as_deref(),
+            Some("Renamed on A"),
+            "nothing is written for a Vault whose merge was refused"
+        );
+        assert!(
+            account_data(live_item(&fixture.a, fixture.vault_id, fixture.item_id))
+                .username
+                .eq("alice")
+        );
+    }
+
+    #[test]
+    fn test_resolving_a_conflict_after_an_intervening_local_edit_is_refused() {
+        let mut fixture = Fixture::new();
+        fixture.sync();
+
+        fixture
+            .a
+            .vaults
+            .update_item(
+                fixture.vault_id,
+                fixture.item_id,
+                Some("A-name".to_string()),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        fixture
+            .b
+            .vaults
+            .update_item(
+                fixture.vault_id,
+                fixture.item_id,
+                Some("B-name".to_string()),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+        let (a_outcome, _) = fixture.sync();
+        let display = pending_for(&a_outcome, "display_name");
+        let captured_version = display.local_version;
+        let candidate = display.remote.clone();
+
+        // The User edits the contested field before answering the prompt.
+        fixture
+            .a
+            .vaults
+            .update_item(
+                fixture.vault_id,
+                fixture.item_id,
+                Some("A-newer".to_string()),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+        let result = fixture.a.vaults.resolve_conflict_field(
+            fixture.vault_id,
+            &display.scope,
+            &display.field_key,
+            display.is_secret,
+            captured_version,
+            candidate.as_ref(),
+        );
+
+        assert!(matches!(
+            result,
+            Err(VaultError::SyncConflictResolution(_))
+        ));
+        assert_eq!(
+            live_item(&fixture.a, fixture.vault_id, fixture.item_id)
+                .display_name
+                .as_deref(),
+            Some("A-newer"),
+            "the newer local edit must survive a stale choice"
+        );
+    }
+
+    // ============ Vault deletion and the three removal operations ============
+
+    #[test]
+    fn test_deleting_a_vault_travels_as_a_tombstone_and_becomes_local_trash() {
+        let mut fixture = Fixture::new();
+        fixture.sync();
+
+        fixture
+            .a
+            .user
+            .delete_vault(fixture.vault_id, Utc::now())
+            .unwrap();
+        fixture.a.vaults.move_to_trash(fixture.vault_id).unwrap();
+
+        fixture.sync();
+
+        for device in [&fixture.a, &fixture.b] {
+            let registry = shared_vaults(device);
+            assert!(registry.is_tombstoned(&fixture.vault_id));
+            assert!(!registry.contains(&fixture.vault_id));
+            assert!(
+                !device.vaults.has_vault_file(fixture.vault_id),
+                "a tombstoned Vault has no live file on any Device"
+            );
+            assert!(
+                device.vaults.vault_trash_path(fixture.vault_id).exists(),
+                "a deleted Vault is kept as trash, not destroyed"
+            );
+        }
+
+        // Repeating the sync cannot resurrect it from a stale copy.
+        fixture.sync();
+        assert!(!fixture.b.vaults.has_vault_file(fixture.vault_id));
+        assert!(shared_vaults(&fixture.b).is_tombstoned(&fixture.vault_id));
+    }
+
+    #[test]
+    fn test_stop_syncing_remove_local_copy_and_delete_everywhere_stay_distinct() {
+        let mut fixture = Fixture::new();
+        fixture.sync();
+        let user_id = fixture.b.user_id;
+
+        // 1. Stop syncing: the copy stays, keeps working, drifts, and the
+        //    shared registry is untouched.
+        let registry = shared_vaults(&fixture.b);
+        fixture
+            .b
+            .sync
+            .set_vault_syncing(&user_id, fixture.vault_id, false, &registry)
+            .unwrap();
+        fixture
+            .b
+            .vaults
+            .update_item(
+                fixture.vault_id,
+                fixture.item_id,
+                Some("B-only".to_string()),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+        fixture.sync();
+
+        assert!(fixture.b.vaults.has_vault_file(fixture.vault_id));
+        assert_eq!(
+            live_item(&fixture.a, fixture.vault_id, fixture.item_id)
+                .display_name
+                .as_deref(),
+            Some("Mail"),
+            "a Vault outside the Sync Set is not sent"
+        );
+        let registry = shared_vaults(&fixture.b);
+        assert!(registry.contains(&fixture.vault_id));
+        assert!(!registry.is_tombstoned(&fixture.vault_id));
+
+        // 2. Remove local copy: this Device's file only. No Tombstone, and
+        //    the other Device still has its copy. It leaves the Sync Set, or
+        //    the next sync would immediately install it again.
+        fixture.b.vaults.remove_local_copy(fixture.vault_id).unwrap();
+        fixture
+            .b
+            .sync
+            .set_vault_syncing(&user_id, fixture.vault_id, false, &shared_vaults(&fixture.b))
+            .unwrap();
+
+        fixture.sync();
+
+        assert!(!fixture.b.vaults.has_vault_file(fixture.vault_id));
+        assert!(
+            !fixture.b.vaults.vault_trash_path(fixture.vault_id).exists(),
+            "removing a local copy is not a deletion"
+        );
+        assert!(
+            fixture.a.vaults.has_vault_file(fixture.vault_id),
+            "other Devices keep their copy"
+        );
+        let registry = shared_vaults(&fixture.b);
+        assert!(registry.contains(&fixture.vault_id));
+        assert!(!registry.is_tombstoned(&fixture.vault_id));
+
+        // Re-enabling brings it back, from the peer.
+        fixture
+            .b
+            .sync
+            .set_vault_syncing(&user_id, fixture.vault_id, true, &registry)
+            .unwrap();
+        fixture.sync();
+        assert!(fixture.b.vaults.has_vault_file(fixture.vault_id));
+
+        // 3. Delete everywhere: a Tombstone that travels, and trash on both.
+        fixture
+            .a
+            .user
+            .delete_vault(fixture.vault_id, Utc::now())
+            .unwrap();
+        fixture.a.vaults.move_to_trash(fixture.vault_id).unwrap();
+
+        fixture.sync();
+
+        assert!(shared_vaults(&fixture.a).is_tombstoned(&fixture.vault_id));
+        assert!(shared_vaults(&fixture.b).is_tombstoned(&fixture.vault_id));
+        assert!(!fixture.b.vaults.has_vault_file(fixture.vault_id));
+        assert!(fixture.b.vaults.vault_trash_path(fixture.vault_id).exists());
+    }
+
+    #[test]
+    fn test_re_enabling_a_vault_merges_the_divergence_it_accrued() {
+        let mut fixture = Fixture::new();
+        fixture.sync();
+        let user_id = fixture.b.user_id;
+
+        fixture
+            .b
+            .sync
+            .set_vault_syncing(&user_id, fixture.vault_id, false, &shared_vaults(&fixture.b))
+            .unwrap();
+
+        // Both sides edit while B is out of the Sync Set.
+        let note = fixture
+            .b
+            .vaults
+            .add_item(
+                fixture.vault_id,
+                Some("B-only note".to_string()),
+                None,
+                NewItemData::Note(crate::NoteData {
+                    title: None,
+                    body: "written while not syncing".to_string(),
+                }),
+                None,
+            )
+            .unwrap();
+        let note_id = match note {
+            crate::SafeItem::Note(note) => note.id,
+            _ => panic!("expected a note"),
+        };
+        fixture
+            .a
+            .vaults
+            .update_item(
+                fixture.vault_id,
+                fixture.item_id,
+                Some("Renamed while B was away".to_string()),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+        fixture.sync();
+        assert!(
+            !fixture
+                .a
+                .vaults
+                .get_vault(fixture.vault_id)
+                .unwrap()
+                .items
+                .iter()
+                .any(|item| item.id == note_id),
+            "the divergence stays local until sync is re-enabled"
+        );
+
+        fixture
+            .b
+            .sync
+            .set_vault_syncing(&user_id, fixture.vault_id, true, &shared_vaults(&fixture.b))
+            .unwrap();
+        fixture.sync();
+
+        for device in [&fixture.a, &fixture.b] {
+            let vault = device.vaults.get_vault(fixture.vault_id).unwrap();
+            assert!(vault.items.iter().any(|item| item.id == note_id));
+            assert_eq!(
+                live_item(device, fixture.vault_id, fixture.item_id)
+                    .display_name
+                    .as_deref(),
+                Some("Renamed while B was away")
+            );
+        }
+    }
+
+    #[test]
+    fn test_re_enabling_a_vault_applies_a_tombstone_that_arrived_while_it_was_out() {
+        let mut fixture = Fixture::new();
+        fixture.sync();
+        let user_id = fixture.b.user_id;
+
+        fixture
+            .b
+            .sync
+            .set_vault_syncing(&user_id, fixture.vault_id, false, &shared_vaults(&fixture.b))
+            .unwrap();
+
+        // The other Device deletes the Vault while B is not syncing it.
+        fixture
+            .a
+            .user
+            .delete_vault(fixture.vault_id, Utc::now())
+            .unwrap();
+        fixture.a.vaults.move_to_trash(fixture.vault_id).unwrap();
+        fixture.sync();
+
+        // B re-enables. The pending Tombstone has already arrived with the
+        // registry, so there is nothing left to sync: the file is trash.
+        fixture
+            .b
+            .sync
+            .set_vault_syncing(&user_id, fixture.vault_id, true, &shared_vaults(&fixture.b))
+            .unwrap();
+        fixture.sync();
+
+        assert!(shared_vaults(&fixture.b).is_tombstoned(&fixture.vault_id));
+        assert!(!fixture.b.vaults.has_vault_file(fixture.vault_id));
+        assert!(fixture.b.vaults.vault_trash_path(fixture.vault_id).exists());
+        assert!(!fixture
+            .b
+            .sync
+            .sync_set(&user_id, &shared_vaults(&fixture.b))
+            .contains(&fixture.vault_id));
+    }
+
+    #[test]
+    fn test_a_vault_created_on_the_peer_transfers_in_the_same_sync() {
+        let mut fixture = Fixture::new();
+        fixture.sync();
+
+        let second = fixture
+            .b
+            .vaults
+            .create_vault(
+                "Created on B".to_string(),
+                "#112233".to_string(),
+                MASTER_PW,
+                &fixture.b.secret_key,
+            )
+            .unwrap();
+        fixture.b.user.add_vault_to_user(second.id).unwrap();
+
+        fixture.sync();
+
+        assert!(
+            fixture.a.vaults.has_vault_file(second.id),
+            "the initiator must learn the peer's new Vault in one round"
+        );
+        assert!(shared_vaults(&fixture.a).contains(&second.id));
+    }
+
+    // ============ Revocation and interruption during the transfer ============
+
+    #[test]
+    fn test_a_revocation_arriving_mid_sync_stops_the_transfer() {
+        let mut fixture = Fixture::new();
+        fixture.sync();
+        fixture
+            .a
+            .vaults
+            .update_item(
+                fixture.vault_id,
+                fixture.item_id,
+                Some("Renamed on A".to_string()),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+        let peer = discovered_b(&fixture);
+        let mut noop = |_: SyncProgress| {};
+
+        let start = {
+            let mut engine_a = device_engine!(fixture, a);
+            engine_a.start_with_peer(&peer, &mut noop).unwrap()
+        };
+        let accepted = {
+            let mut engine_b = device_engine!(fixture, b);
+            engine_b.accept(&mut noop).unwrap().unwrap()
+        };
+
+        // B revokes A while the channel is open. A knows nothing about it.
+        fixture
+            .b
+            .user
+            .revoke_device(fixture.a.user.device_id(), Utc::now())
+            .unwrap();
+
+        {
+            let mut engine_a = device_engine!(fixture, a);
+            engine_a.send_offers(start, &mut noop).unwrap();
+        }
+
+        {
+            let mut engine_b = device_engine!(fixture, b);
+            assert!(matches!(
+                engine_b.receive_offers(accepted, &mut noop),
+                Err(VaultError::SyncPeerRevoked(_))
+            ));
+        }
+        assert_eq!(
+            fixture
+                .b
+                .vaults
+                .get_vault(fixture.vault_id)
+                .unwrap()
+                .items
+                .iter()
+                .find(|item| item.id == fixture.item_id)
+                .unwrap()
+                .display_name
+                .as_deref(),
+            Some("Mail"),
+            "a revoked peer's vault content must not be integrated"
+        );
+    }
+
+    #[test]
+    fn test_an_interruption_during_the_first_copy_install_never_leaves_half_a_vault() {
+        let mut fixture = Fixture::new();
+        fixture.sync();
+
+        // B no longer holds the Vault, so this sync is a first-copy install.
+        fixture.b.vaults.remove_local_copy(fixture.vault_id).unwrap();
+        fixture
+            .a
+            .vaults
+            .update_item(
+                fixture.vault_id,
+                fixture.item_id,
+                Some("Renamed on A".to_string()),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+        let mut noop = |_: SyncProgress| {};
+        let peer = discovered_b(&fixture);
+
+        // Drop after the scope and the vault frame: the install itself
+        // completes before the channel fails.
+        let dropping = DroppingNetwork {
+            inner: &fixture.b.net,
+            max_received: 2,
+        };
+        let start = {
+            let mut engine_a = device_engine!(fixture, a);
+            engine_a.start_with_peer(&peer, &mut noop).unwrap()
+        };
+        let accepted = {
+            let mut engine_b = SyncEngine::new(
+                &dropping,
+                &mut fixture.b.vaults,
+                &fixture.b.user,
+                fixture.b.sync.scope(&fixture.b.user_id),
+                SyncCredentials {
+                    master_password: MASTER_PW,
+                    secret_key: &fixture.b.secret_key,
+                },
+            );
+            engine_b.accept(&mut noop).unwrap().unwrap()
+        };
+        {
+            let mut engine_a = device_engine!(fixture, a);
+            engine_a.send_offers(start, &mut noop).unwrap();
+        }
+        let mut engine_b = SyncEngine::new(
+            &dropping,
+            &mut fixture.b.vaults,
+            &fixture.b.user,
+            fixture.b.sync.scope(&fixture.b.user_id),
+            SyncCredentials {
+                master_password: MASTER_PW,
+                secret_key: &fixture.b.secret_key,
+            },
+        );
+        assert!(matches!(
+            engine_b.receive_offers(accepted, &mut noop),
+            Err(VaultError::SyncInterrupted(_))
+        ));
+        drop(engine_b);
+        fixture.b.vaults.lock_vault(Some(fixture.vault_id));
+        assert!(
+            fixture
+                .b
+                .vaults
+                .unlock_vault(fixture.vault_id, MASTER_PW, &fixture.b.secret_key)
+                .is_ok(),
+            "the installed first copy must be whole and readable"
+        );
+
+        // Drop before the vault frame: no file is written at all.
+        fixture.b.vaults.remove_local_copy(fixture.vault_id).unwrap();
+        let dropping = DroppingNetwork {
+            inner: &fixture.b.net,
+            max_received: 1,
+        };
+        let start = {
+            let mut engine_a = device_engine!(fixture, a);
+            engine_a.start_with_peer(&peer, &mut noop).unwrap()
+        };
+        let accepted = {
+            let mut engine_b = SyncEngine::new(
+                &dropping,
+                &mut fixture.b.vaults,
+                &fixture.b.user,
+                fixture.b.sync.scope(&fixture.b.user_id),
+                SyncCredentials {
+                    master_password: MASTER_PW,
+                    secret_key: &fixture.b.secret_key,
+                },
+            );
+            engine_b.accept(&mut noop).unwrap().unwrap()
+        };
+        {
+            let mut engine_a = device_engine!(fixture, a);
+            engine_a.send_offers(start, &mut noop).unwrap();
+        }
+        let mut engine_b = SyncEngine::new(
+            &dropping,
+            &mut fixture.b.vaults,
+            &fixture.b.user,
+            fixture.b.sync.scope(&fixture.b.user_id),
+            SyncCredentials {
+                master_password: MASTER_PW,
+                secret_key: &fixture.b.secret_key,
+            },
+        );
+        assert!(matches!(
+            engine_b.receive_offers(accepted, &mut noop),
+            Err(VaultError::SyncInterrupted(_))
+        ));
+        drop(engine_b);
+        assert!(
+            !fixture.b.vaults.has_vault_file(fixture.vault_id),
+            "nothing may be half-installed"
+        );
+        assert!(!fixture
+            .b
+            .vaults
+            .vault_trash_path(fixture.vault_id)
+            .exists());
     }
 }

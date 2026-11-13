@@ -56,6 +56,15 @@ pub enum VaultError {
     #[error("Sync peer has been revoked: {0}")]
     SyncPeerRevoked(String),
 
+    #[error("Sync refused: Device {0} is not paired with this Device")]
+    SyncPeerNotPaired(String),
+
+    #[error("Sync was cancelled before it completed")]
+    SyncCancelled,
+
+    #[error("Sync timed out: {0}")]
+    SyncTimeout(String),
+
     #[error("This Device has been revoked and may no longer sync: {0}")]
     SyncThisDeviceRevoked(String),
 
