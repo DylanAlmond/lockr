@@ -294,7 +294,7 @@ impl fmt::Debug for SyncMessage {
 /// The protocol version is checked on every frame, so a peer speaking a
 /// different protocol is refused rather than half-read.
 const MAGIC: [u8; 4] = *b"LKRS";
-const HEADER_LEN: usize = 11;
+pub(crate) const HEADER_LEN: usize = 11;
 const KIND_VAULT: u8 = 1;
 const KIND_REGISTRY: u8 = 2;
 const KIND_COMPLETE: u8 = 3;
@@ -346,14 +346,19 @@ pub(crate) fn encode_frame(message: &SyncMessage) -> Result<Vec<u8>, NetworkErro
     Ok(frame)
 }
 
-fn decode_frame(frame: &[u8]) -> Result<SyncMessage, NetworkError> {
-    if frame.len() < HEADER_LEN || frame[..4] != MAGIC {
+/// Validate a frame header and return the payload length it announces.
+///
+/// Streaming transports read the header first so they can size the payload
+/// read without ever trusting an unbounded length; the magic, protocol
+/// version, and ceiling are checked before a single payload byte is read.
+pub(crate) fn frame_payload_len(header: &[u8; HEADER_LEN]) -> Result<usize, NetworkError> {
+    if header[..4] != MAGIC {
         return Err(NetworkError::MalformedFrame(
             "missing Lockr frame header".into(),
         ));
     }
 
-    let version = u16::from_be_bytes([frame[4], frame[5]]);
+    let version = u16::from_be_bytes([header[4], header[5]]);
     if version != SYNC_PROTOCOL_VERSION {
         return Err(NetworkError::ProtocolMismatch {
             local: SYNC_PROTOCOL_VERSION,
@@ -361,13 +366,25 @@ fn decode_frame(frame: &[u8]) -> Result<SyncMessage, NetworkError> {
         });
     }
 
-    let kind = frame[6];
-    let payload_len = u32::from_be_bytes([frame[7], frame[8], frame[9], frame[10]]) as usize;
+    let payload_len = u32::from_be_bytes([header[7], header[8], header[9], header[10]]) as usize;
     if payload_len > MAX_FRAME_PAYLOAD {
         return Err(NetworkError::MalformedFrame(
             "frame payload is too large".into(),
         ));
     }
+
+    Ok(payload_len)
+}
+
+pub(crate) fn decode_frame(frame: &[u8]) -> Result<SyncMessage, NetworkError> {
+    if frame.len() < HEADER_LEN {
+        return Err(NetworkError::MalformedFrame(
+            "missing Lockr frame header".into(),
+        ));
+    }
+
+    let kind = frame[6];
+    let payload_len = frame_payload_len(frame[..HEADER_LEN].try_into().expect("fixed length"))?;
     if frame.len() != HEADER_LEN + payload_len {
         return Err(NetworkError::MalformedFrame(
             "frame length does not match its payload".into(),
@@ -489,6 +506,53 @@ pub trait PeerNetwork: Send + Sync {
         Err(NetworkError::TransportUnavailable(
             "the secure pairing transport is not wired up".into(),
         ))
+    }
+
+    /// Hand a transport the identity this Device proves on a paired channel
+    /// and the Device Registry it verifies peers against, for one signed-in
+    /// session.
+    ///
+    /// This is deliberately part of the seam rather than an argument to
+    /// `connect`: the sync and pairing engines must not carry key material,
+    /// and the same session serves both halves of a connection. A transport
+    /// that does not authenticate peers (the in-memory seam) ignores it.
+    fn set_session(&self, _session: &TransportSession) -> Result<(), NetworkError> {
+        Ok(())
+    }
+
+    /// Forget the session identity and its registry snapshot. A logout must
+    /// not leave a signing key reachable from the network layer.
+    fn clear_session(&self) {}
+}
+
+/// What a transport needs from the Device Registry to authenticate a peer.
+///
+/// Implementations answer for the *current* registry, so a revoked Device is
+/// refused on the next connection. A Device that is absent and a Device that
+/// is revoked are both `None`: neither may authenticate, and the transport
+/// must not help a caller distinguish them before the proof is checked.
+pub trait DeviceDirectory: Send + Sync {
+    /// The Base64 Ed25519 public key of an admitted, unrevoked Device.
+    fn admitted_public_key(&self, device_id: &DeviceId) -> Option<String>;
+}
+
+/// The identity and registry a transport uses for one session.
+///
+/// The keypair is held behind an `Arc` so the transport and the `UserManager`
+/// share one unwrapped signing key for the session, and dropping it at logout
+/// drops it everywhere.
+pub struct TransportSession {
+    pub device_id: DeviceId,
+    pub keypair: Arc<crate::device::DeviceKeypair>,
+    pub devices: Arc<dyn DeviceDirectory>,
+}
+
+impl fmt::Debug for TransportSession {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Never print the signing key or a peer's public key set.
+        f.debug_struct("TransportSession")
+            .field("device_id", &self.device_id)
+            .finish_non_exhaustive()
     }
 }
 

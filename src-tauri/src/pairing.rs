@@ -190,6 +190,21 @@ impl PairingClaim {
         }
     }
 
+    /// The bytes a transport proof may be derived from, and whether they are
+    /// the full 128-bit secret.
+    ///
+    /// The typed fallback carries only its 40-bit prefix, so a channel where
+    /// either side presents the typed form can never be stronger than that
+    /// prefix. This is the trade-off ADR-0002 §3 accepts for pairing without a
+    /// camera; a transport must truncate to these bytes on both sides rather
+    /// than pretend the full secret was proven.
+    pub(crate) fn transport_material(&self) -> (&[u8], bool) {
+        match &self.kind {
+            ClaimKind::Full(secret) => (&secret.0, true),
+            ClaimKind::Typed(prefix) => (prefix, false),
+        }
+    }
+
     /// Whether two presentations name the same secret. Used by the transport
     /// seam to decide if an inbound channel is authenticated by the offer it
     /// registered.

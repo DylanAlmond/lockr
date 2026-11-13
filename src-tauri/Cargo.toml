@@ -33,3 +33,6 @@ rand = "0.10.1"
 zeroize = { version = "1.9.0", features = ["derive"] }
 zxcvbn = { version = "3.1.1", features = ["ser"] }
 mdns-sd = { version = "0.21.7", default-features = false }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+rcgen = { version = "0.14", default-features = false, features = ["ring"] }
+ring = "0.17"

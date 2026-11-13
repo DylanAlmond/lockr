@@ -1,6 +1,7 @@
 use argon2::password_hash::rand_core::{OsRng, RngCore};
 use chrono::{DateTime, TimeDelta, Utc};
 use std::path::PathBuf;
+use std::sync::Arc;
 use uuid::Uuid;
 use zeroize::Zeroize;
 
@@ -25,8 +26,10 @@ pub struct UserManager {
     device_id: DeviceId,
 
     /// The Device signing key, unwrapped for the current session. Pairing and
-    /// revocation sign with it; it is dropped on logout.
-    session_keypair: Option<DeviceKeypair>,
+    /// revocation sign with it, and the peer transport shares it for the
+    /// session so a paired channel can prove this Device's identity. It is
+    /// dropped on logout.
+    session_keypair: Option<Arc<DeviceKeypair>>,
 
     /// The live offer this Device is hosting, if any.
     pairing_host: Option<PairingHost>,
@@ -59,6 +62,15 @@ impl UserManager {
     /// This installation's Device identity.
     pub fn device_id(&self) -> DeviceId {
         self.device_id
+    }
+
+    /// The unwrapped Device signing key for the current session, if a User is
+    /// signed in.
+    ///
+    /// Shared with the transport rather than duplicated: both parties hold the
+    /// same `Arc`, so logging out drops the last copy.
+    pub(crate) fn session_keypair(&self) -> Option<Arc<DeviceKeypair>> {
+        self.session_keypair.clone()
     }
 
     // ============ Paths ============
@@ -225,7 +237,7 @@ impl UserManager {
         };
 
         self.active_user_id = Some(user_id);
-        self.session_keypair = Some(keypair);
+        self.session_keypair = Some(Arc::new(keypair));
         self.pairing_host = None;
         self.pending_join = None;
         self.save_local_profile(&local)?;
@@ -268,7 +280,7 @@ impl UserManager {
         }
 
         self.active_user_id = Some(local.id);
-        self.session_keypair = Some(keypair);
+        self.session_keypair = Some(Arc::new(keypair));
         self.pairing_host = None;
         self.pending_join = None;
 
@@ -457,7 +469,7 @@ impl UserManager {
             request.platform,
             self.device_id,
             now,
-            keypair,
+            keypair.as_ref(),
         );
         shared.devices.admit(record)?;
         self.save_shared_profile(&shared)?;
@@ -599,7 +611,7 @@ impl UserManager {
         self.save_local_profile(&local)?;
         self.save_shared_profile(&shared)?;
         self.active_user_id = Some(local.id);
-        self.session_keypair = Some(pending.keypair);
+        self.session_keypair = Some(Arc::new(pending.keypair));
 
         Ok(user_view(&local, &shared))
     }
@@ -805,7 +817,7 @@ impl UserManager {
         let mut shared = self.get_shared_profile(user_id)?;
         shared
             .devices
-            .revoke(&device_id, now, &self.device_id, keypair)?;
+            .revoke(&device_id, now, &self.device_id, keypair.as_ref())?;
         self.save_shared_profile(&shared)
     }
 

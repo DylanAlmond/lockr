@@ -10,12 +10,13 @@ use uuid::Uuid;
 use zeroize::Zeroize;
 use zxcvbn::{zxcvbn, Entropy};
 
-use crate::mdns::{DiscoverySession, MdnsDiscovery};
-use crate::network::{NetworkError, PeerNetwork};
+use crate::mdns::DiscoverySession;
+use crate::network::{NetworkError, PeerNetwork, TransportSession};
 use crate::sync::{
     PendingSync, SyncControl, SyncCredentials, SyncEngine, SyncOutcome, SyncProgress, SyncReport,
     SyncStateStore,
 };
+use crate::transport::TlsNetwork;
 use crate::user_manager::UserManager;
 use crate::vault_manager::VaultManager;
 use crate::{
@@ -71,8 +72,18 @@ impl ManagerState {
             UserManager::new(app_data_dir.clone()),
         ) {
             (Ok(vault_manager), Ok(user_manager)) => {
-                let network: Arc<dyn PeerNetwork> =
-                    Arc::new(MdnsDiscovery::new(vault_manager.device_id()));
+                // The production transport binds an ephemeral port now and
+                // advertises it for the duration of a discovery or sync
+                // session. If the socket cannot be bound, sync is reported as
+                // unavailable rather than silently falling back to anything.
+                let network: Option<Arc<dyn PeerNetwork>> =
+                    match TlsNetwork::new(vault_manager.device_id()) {
+                        Ok(transport) => Some(Arc::new(transport)),
+                        Err(error) => {
+                            eprintln!("Lockr could not start the peer transport: {error}");
+                            None
+                        }
+                    };
                 let sync_state = SyncStateStore::new(&app_data_dir).ok();
                 Self {
                     app_data_dir,
@@ -82,7 +93,7 @@ impl ManagerState {
                     secret_key: None,
                     startup_error: None,
                     device_identity_damaged: false,
-                    network: Some(network),
+                    network,
                     discovery: None,
                     sync_state,
                     pending_syncs: HashMap::new(),
@@ -118,6 +129,44 @@ impl ManagerState {
                 }
             }
         }
+    }
+
+    /// Hand the transport the identity this Device proves on a paired channel
+    /// and the Device Registry it must verify peers against.
+    ///
+    /// The registry is read here, at the start of a network session and after
+    /// any local revocation, so the transport cannot authenticate a Device the
+    /// User has since revoked. The sync engine independently re-checks the live
+    /// registry at every frame boundary; this is the pre-connection refusal.
+    fn configure_network_session(&self) -> Result<(), String> {
+        let network = self.network.clone().ok_or_else(|| {
+            VaultError::SyncTransportUnavailable("the peer transport is unavailable".into())
+                .to_string()
+        })?;
+        let user_manager = self
+            .user_manager
+            .as_ref()
+            .ok_or_else(|| VaultError::SyncNotLoggedIn.to_string())?;
+        let user_id = user_manager
+            .active_user_id
+            .ok_or_else(|| VaultError::SyncNotLoggedIn.to_string())?;
+        let keypair = user_manager
+            .session_keypair()
+            .ok_or_else(|| VaultError::SyncNotLoggedIn.to_string())?;
+        let devices = Arc::new(
+            user_manager
+                .get_shared_profile(&user_id)
+                .map_err(|error| error.to_string())?
+                .devices,
+        );
+
+        network
+            .set_session(&TransportSession {
+                device_id: user_manager.device_id(),
+                keypair,
+                devices,
+            })
+            .map_err(|error| error.to_string())
     }
 
     fn startup_message(&self) -> String {
@@ -197,6 +246,12 @@ impl ManagerState {
 
         for (_, mut pending) in self.pending_syncs.drain() {
             pending.forget();
+        }
+
+        // The session signing key and registry snapshot must not outlive the
+        // session that authorised them.
+        if let Some(network) = &self.network {
+            network.clear_session();
         }
     }
 
@@ -1066,6 +1121,8 @@ fn run_sync_with_device(
         })?
         .scope(&user_id);
 
+    state.configure_network_session()?;
+
     let network = state.network.clone().ok_or_else(|| {
         VaultError::SyncTransportUnavailable("no network seam".into()).to_string()
     })?;
@@ -1179,6 +1236,8 @@ pub fn start_discovery(state: AppState) -> Result<(), String> {
     if state.discovery.is_some() {
         return Ok(());
     }
+
+    state.configure_network_session()?;
 
     let network = state.network.clone().ok_or_else(|| {
         VaultError::SyncTransportUnavailable("no network seam".into()).to_string()
@@ -1534,7 +1593,14 @@ pub fn revoke_device(state: AppState, device_id: String) -> Result<(), String> {
 
     user_manager
         .revoke_device(device_id, Utc::now())
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+
+    // A transport session that was configured before the revocation must not
+    // keep authenticating the revoked Device. Refresh its registry snapshot.
+    // Best effort: the revocation itself has already succeeded and must not be
+    // reported as failed because the transport is unavailable.
+    let _ = state.configure_network_session();
+    Ok(())
 }
 
 #[cfg(test)]

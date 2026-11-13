@@ -11,6 +11,7 @@ mod network;
 mod pairing;
 mod registry;
 mod sync;
+mod transport;
 mod user_manager;
 mod vault_manager;
 
@@ -25,6 +26,7 @@ pub use network::*;
 pub use pairing::*;
 pub use registry::*;
 pub use sync::*;
+pub use transport::{TlsNetwork, TlsTransportConfig};
 use tauri::Manager;
 
 use crate::commands::ManagerState;
