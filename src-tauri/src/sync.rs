@@ -939,11 +939,20 @@ impl<'a> SyncEngine<'a> {
     }
 
     /// Receive one frame, refusing to wait forever and honouring cancellation.
+    ///
+    /// A transport may only observe the cancel token at the next frame
+    /// boundary, so a cancel that arrives while a frame is in flight is
+    /// reported as a cancellation rather than as a timeout. Cancellation
+    /// latency is therefore bounded by [`SYNC_FRAME_TIMEOUT`].
     fn receive_frame(&self, channel: &mut dyn PeerChannel) -> Result<SyncMessage, VaultError> {
         self.check_cancelled()?;
-        channel
-            .receive_timeout(SYNC_FRAME_TIMEOUT)
-            .map_err(Self::map_channel_error)
+        match channel.receive_timeout(SYNC_FRAME_TIMEOUT) {
+            Ok(message) => Ok(message),
+            Err(error) => {
+                self.check_cancelled()?;
+                Err(Self::map_channel_error(error))
+            }
+        }
     }
 
     fn receive_scope(&self, channel: &mut dyn PeerChannel) -> Result<ScopeState, VaultError> {
@@ -2340,6 +2349,14 @@ mod tests {
             self.inner.receive()
         }
 
+        fn receive_timeout(
+            &mut self,
+            _timeout: std::time::Duration,
+        ) -> Result<SyncMessage, NetworkError> {
+            // The simulated drop is immediate; it is not a deadline expiry.
+            self.receive()
+        }
+
         fn close(&mut self) {
             self.inner.close()
         }
@@ -2587,6 +2604,113 @@ mod tests {
         }
     }
 
+    /// A [`PeerNetwork`] whose channel waits in `receive_timeout` until the
+    /// test releases it, standing in for a transport blocked on the network.
+    struct GatedNetwork<'a> {
+        inner: &'a InMemoryNetwork,
+        gate: Arc<Gate>,
+    }
+
+    impl PeerNetwork for GatedNetwork<'_> {
+        fn start_advertising(&self) -> Result<(), NetworkError> {
+            self.inner.start_advertising()
+        }
+
+        fn stop_advertising(&self) -> Result<(), NetworkError> {
+            self.inner.stop_advertising()
+        }
+
+        fn discover(&self) -> Result<Vec<DiscoveredPeer>, NetworkError> {
+            self.inner.discover()
+        }
+
+        fn connect(&self, peer: &DiscoveredPeer) -> Result<Box<dyn PeerChannel>, NetworkError> {
+            Ok(Box::new(GatedChannel {
+                inner: self.inner.connect(peer)?,
+                gate: Arc::clone(&self.gate),
+            }))
+        }
+
+        fn accept(&self) -> Result<Option<Box<dyn PeerChannel>>, NetworkError> {
+            self.inner.accept()
+        }
+    }
+
+    /// Handshake between the engine thread and the test thread.
+    struct Gate {
+        entered: Mutex<bool>,
+        released: Mutex<bool>,
+        signal: std::sync::Condvar,
+    }
+
+    impl Gate {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                entered: Mutex::new(false),
+                released: Mutex::new(false),
+                signal: std::sync::Condvar::new(),
+            })
+        }
+
+        /// Block until the engine is waiting for a frame.
+        fn wait_until_waiting(&self) {
+            let mut entered = self.entered.lock().unwrap();
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while !*entered {
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                assert!(!remaining.is_zero(), "the engine never waited for a frame");
+                let (guard, _) = self.signal.wait_timeout(entered, remaining).unwrap();
+                entered = guard;
+            }
+        }
+
+        fn release(&self) {
+            *self.released.lock().unwrap() = true;
+            self.signal.notify_all();
+        }
+    }
+
+    struct GatedChannel {
+        inner: Box<dyn PeerChannel>,
+        gate: Arc<Gate>,
+    }
+
+    impl PeerChannel for GatedChannel {
+        fn peer_device_id(&self) -> DeviceId {
+            self.inner.peer_device_id()
+        }
+
+        fn send(&mut self, message: SyncMessage) -> Result<(), NetworkError> {
+            self.inner.send(message)
+        }
+
+        fn receive(&mut self) -> Result<SyncMessage, NetworkError> {
+            self.inner.receive()
+        }
+
+        fn receive_timeout(&mut self, timeout: Duration) -> Result<SyncMessage, NetworkError> {
+            *self.gate.entered.lock().unwrap() = true;
+            self.gate.signal.notify_all();
+
+            let mut released = self.gate.released.lock().unwrap();
+            let deadline = std::time::Instant::now() + timeout;
+            while !*released {
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                if remaining.is_zero() {
+                    break;
+                }
+                let (guard, _) = self.gate.signal.wait_timeout(released, remaining).unwrap();
+                released = guard;
+            }
+
+            Err(NetworkError::Timeout)
+        }
+
+        fn close(&mut self) {
+            self.inner.close();
+        }
+    }
+
     macro_rules! device_engine {
         ($fixture:ident, $side:ident) => {
             SyncEngine::new(
@@ -2723,6 +2847,60 @@ mod tests {
             Err(VaultError::SyncCancelled)
         ));
         assert!(fixture.b.net.accept().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_cancel_reaches_a_sync_already_waiting_for_a_frame() {
+        let mut fixture = Fixture::new();
+        let peer = discovered_b(&fixture);
+        let gate = Gate::new();
+        let gated = GatedNetwork {
+            inner: &fixture.a.net,
+            gate: Arc::clone(&gate),
+        };
+        let control = Arc::new(SyncControl::default());
+
+        let vaults = &mut fixture.a.vaults;
+        let user = &fixture.a.user;
+        let secret_key = &fixture.a.secret_key;
+        let user_id = fixture.a.user_id;
+        let sync = &fixture.a.sync;
+
+        let outcome = std::thread::scope(|scope| {
+            let runner = Arc::clone(&control);
+            let handle = scope.spawn(move || {
+                let lease = runner.begin().expect("the first sync claims the slot");
+                let mut noop = |_: SyncProgress| {};
+                let mut engine = SyncEngine::new(
+                    &gated,
+                    vaults,
+                    user,
+                    sync.scope(&user_id),
+                    SyncCredentials {
+                        master_password: MASTER_PW,
+                        secret_key,
+                    },
+                )
+                .with_cancel(lease.token());
+
+                let start = engine.start_with_peer(&peer, &mut noop).unwrap();
+                engine.send_offers(start, &mut noop)
+            });
+
+            // Cancel only after the exchange is genuinely blocked on the
+            // transport, so this cannot pass by cancelling before it starts.
+            gate.wait_until_waiting();
+            control.cancel();
+            gate.release();
+
+            handle.join().unwrap()
+        });
+
+        assert!(
+            matches!(outcome, Err(VaultError::SyncCancelled)),
+            "cancel must interrupt a sync waiting on the transport"
+        );
+        assert!(!control.is_active(), "the cancelled sync releases the slot");
     }
 
     #[test]
