@@ -8,6 +8,7 @@ mod mdns;
 mod merge;
 mod models;
 mod network;
+mod pairing;
 mod registry;
 mod user_manager;
 mod vault_manager;
@@ -20,6 +21,7 @@ pub use mdns::{DiscoverySession, MdnsDiscovery};
 pub use merge::*;
 pub use models::*;
 pub use network::*;
+pub use pairing::*;
 pub use registry::*;
 use tauri::Manager;
 
@@ -56,6 +58,13 @@ pub fn run() {
             commands::delete_user,
             commands::get_device_identity_error,
             commands::start_with_new_device_identity,
+            // Pairing
+            commands::start_pairing,
+            commands::receive_pairing_request,
+            commands::approve_pairing,
+            commands::cancel_pairing,
+            commands::join_pairing,
+            commands::complete_pairing,
             // Vaults
             commands::list_vault_ids,
             commands::get_unlocked_vaults,

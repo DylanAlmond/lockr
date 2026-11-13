@@ -19,6 +19,7 @@ use serde::Serialize;
 use thiserror::Error;
 use uuid::Uuid;
 
+use crate::pairing::{PairingClaim, PairingMessage};
 use crate::{DeviceId, VaultId};
 
 /// The mDNS service type this app advertises. Paired with a [`DeviceId`] it
@@ -219,6 +220,11 @@ pub enum SyncMessage {
         blob: EncryptedVaultBlob,
     },
     Registry(RegistryState),
+
+    /// A pairing exchange. Valid only on a channel a pairing secret
+    /// authenticated; it is the one place a secret key legitimately travels.
+    Pairing(PairingMessage),
+
     Complete,
 }
 
@@ -231,6 +237,7 @@ impl fmt::Debug for SyncMessage {
                 .field("blob", blob)
                 .finish(),
             Self::Registry(state) => f.debug_tuple("Registry").field(state).finish(),
+            Self::Pairing(message) => f.debug_tuple("Pairing").field(message).finish(),
             Self::Complete => f.write_str("Complete"),
         }
     }
@@ -252,12 +259,13 @@ const HEADER_LEN: usize = 11;
 const KIND_VAULT: u8 = 1;
 const KIND_REGISTRY: u8 = 2;
 const KIND_COMPLETE: u8 = 3;
+const KIND_PAIRING: u8 = 4;
 
 /// Ceiling on a single frame, so a damaged length field cannot make the app
 /// allocate without bound. Whole encrypted vault files are far smaller.
 const MAX_FRAME_PAYLOAD: usize = 64 * 1024 * 1024;
 
-fn encode_frame(message: &SyncMessage) -> Result<Vec<u8>, NetworkError> {
+pub(crate) fn encode_frame(message: &SyncMessage) -> Result<Vec<u8>, NetworkError> {
     let (kind, payload) = match message {
         SyncMessage::Vault { vault_id, blob } => {
             let mut payload = Vec::with_capacity(16 + blob.len());
@@ -266,6 +274,12 @@ fn encode_frame(message: &SyncMessage) -> Result<Vec<u8>, NetworkError> {
             (KIND_VAULT, payload)
         }
         SyncMessage::Registry(state) => (KIND_REGISTRY, state.as_bytes().to_vec()),
+        SyncMessage::Pairing(message) => (
+            KIND_PAIRING,
+            serde_json::to_vec(message).map_err(|err| {
+                NetworkError::MalformedFrame(format!("pairing frame cannot be encoded: {err}"))
+            })?,
+        ),
         SyncMessage::Complete => (KIND_COMPLETE, Vec::new()),
     };
 
@@ -332,6 +346,12 @@ fn decode_frame(frame: &[u8]) -> Result<SyncMessage, NetworkError> {
         KIND_REGISTRY => Ok(SyncMessage::Registry(RegistryState::from_bytes(
             payload.to_vec(),
         ))),
+        KIND_PAIRING => {
+            let message = serde_json::from_slice(payload).map_err(|err| {
+                NetworkError::MalformedFrame(format!("pairing frame cannot be decoded: {err}"))
+            })?;
+            Ok(SyncMessage::Pairing(message))
+        }
         KIND_COMPLETE if payload.is_empty() => Ok(SyncMessage::Complete),
         KIND_COMPLETE => Err(NetworkError::MalformedFrame(
             "complete frame carries a payload".into(),
@@ -373,6 +393,44 @@ pub trait PeerNetwork: Send + Sync {
 
     /// Take the responder side of the next inbound connection, if any.
     fn accept(&self) -> Result<Option<Box<dyn PeerChannel>>, NetworkError>;
+
+    /// Accept inbound pairing connections authenticated by `claim` until the
+    /// offer ends. The production transport binds its ephemeral certificate to
+    /// this one-time secret; the in-memory seam compares it directly.
+    fn begin_pairing(&self, _claim: &PairingClaim) -> Result<(), NetworkError> {
+        Err(NetworkError::TransportUnavailable(
+            "the secure pairing transport is not wired up".into(),
+        ))
+    }
+
+    /// Stop accepting pairing connections and forget the one-time secret.
+    fn end_pairing(&self) -> Result<(), NetworkError> {
+        Ok(())
+    }
+
+    /// Open a pairing channel to an unpaired peer, authenticated solely by the
+    /// single-use `claim`. Pairing is the only grant of access, so this is the
+    /// one connection that does not require a prior mutual admission.
+    fn connect_for_pairing(
+        &self,
+        _peer: &DiscoveredPeer,
+        _claim: &PairingClaim,
+    ) -> Result<Box<dyn PeerChannel>, NetworkError> {
+        Err(NetworkError::TransportUnavailable(
+            "the secure pairing transport is not wired up".into(),
+        ))
+    }
+
+    /// Take the responder side of the next inbound pairing connection, if it
+    /// authenticated with `claim`.
+    fn accept_for_pairing(
+        &self,
+        _claim: &PairingClaim,
+    ) -> Result<Option<Box<dyn PeerChannel>>, NetworkError> {
+        Err(NetworkError::TransportUnavailable(
+            "the secure pairing transport is not wired up".into(),
+        ))
+    }
 }
 
 /// Configuration for one in-memory Device.
@@ -424,7 +482,10 @@ struct InMemoryDevice {
     reachable: bool,
     advertising: bool,
     paired_devices: HashSet<DeviceId>,
+    /// The one-time claim this Device is currently accepting for pairing.
+    pairing_claim: Option<PairingClaim>,
     inbound: VecDeque<InMemoryPipe>,
+    pairing_inbound: VecDeque<InMemoryPipe>,
 }
 
 struct InMemoryPipe {
@@ -492,7 +553,9 @@ impl InMemoryHub {
                 reachable: config.reachable,
                 advertising: false,
                 paired_devices: config.paired_devices,
+                pairing_claim: None,
                 inbound: VecDeque::new(),
+                pairing_inbound: VecDeque::new(),
             },
         );
 
@@ -620,6 +683,119 @@ impl PeerNetwork for InMemoryNetwork {
             .ok_or_else(|| NetworkError::DiscoveryFailed("device is not registered".into()))?;
 
         Ok(local.inbound.pop_front().map(|pipe| {
+            Box::new(InMemoryChannel {
+                peer_device_id: pipe.initiator,
+                outbound: Arc::clone(&pipe.to_initiator),
+                inbound: Arc::clone(&pipe.to_responder),
+                closed: pipe.closed,
+            }) as Box<dyn PeerChannel>
+        }))
+    }
+
+    fn begin_pairing(&self, claim: &PairingClaim) -> Result<(), NetworkError> {
+        let mut devices = self.hub.devices.lock().unwrap();
+        let device = devices
+            .get_mut(&self.device_id)
+            .ok_or_else(|| NetworkError::DiscoveryFailed("device is not registered".into()))?;
+        device.pairing_claim = Some(claim.clone());
+        Ok(())
+    }
+
+    fn end_pairing(&self) -> Result<(), NetworkError> {
+        let mut devices = self.hub.devices.lock().unwrap();
+        let device = devices
+            .get_mut(&self.device_id)
+            .ok_or_else(|| NetworkError::DiscoveryFailed("device is not registered".into()))?;
+        device.pairing_claim = None;
+        device.pairing_inbound.clear();
+        Ok(())
+    }
+
+    fn connect_for_pairing(
+        &self,
+        peer: &DiscoveredPeer,
+        claim: &PairingClaim,
+    ) -> Result<Box<dyn PeerChannel>, NetworkError> {
+        let peer_id = peer.device_id();
+        let mut devices = self.hub.devices.lock().unwrap();
+
+        if peer.endpoint.as_str() != format!("in-memory://{}", peer_id) {
+            return Err(NetworkError::PeerUnreachable(peer_id.to_string()));
+        }
+
+        let local = devices
+            .get(&self.device_id)
+            .ok_or_else(|| NetworkError::PeerUnreachable(format!("unknown peer {peer_id}")))?;
+        let remote = devices
+            .get(&peer_id)
+            .ok_or_else(|| NetworkError::PeerUnreachable(peer_id.to_string()))?;
+
+        if !remote.reachable {
+            return Err(NetworkError::PeerUnreachable(peer_id.to_string()));
+        }
+
+        // The one-time pairing secret replaces mutual admission here. It is
+        // the only thing that authenticates an otherwise unpaired peer.
+        let authenticated = remote
+            .pairing_claim
+            .as_ref()
+            .is_some_and(|expected| expected.matches_claim(claim));
+        if !authenticated {
+            return Err(NetworkError::AuthenticationFailed);
+        }
+
+        if local.protocol_version != remote.protocol_version {
+            return Err(NetworkError::ProtocolMismatch {
+                local: local.protocol_version,
+                remote: remote.protocol_version,
+            });
+        }
+
+        // The vault schema is deliberately not checked at the transport: the
+        // pairing protocol exchanges it and must report the mismatch as its
+        // own distinct failure before any secret key moves.
+
+        let pipe = InMemoryPipe {
+            initiator: self.device_id,
+            to_responder: Arc::new(Mutex::new(VecDeque::new())),
+            to_initiator: Arc::new(Mutex::new(VecDeque::new())),
+            closed: Arc::new(AtomicBool::new(false)),
+        };
+
+        let channel = InMemoryChannel {
+            peer_device_id: peer_id,
+            outbound: Arc::clone(&pipe.to_responder),
+            inbound: Arc::clone(&pipe.to_initiator),
+            closed: Arc::clone(&pipe.closed),
+        };
+
+        devices
+            .get_mut(&peer_id)
+            .expect("peer checked above")
+            .pairing_inbound
+            .push_back(pipe);
+
+        Ok(Box::new(channel))
+    }
+
+    fn accept_for_pairing(
+        &self,
+        claim: &PairingClaim,
+    ) -> Result<Option<Box<dyn PeerChannel>>, NetworkError> {
+        let mut devices = self.hub.devices.lock().unwrap();
+        let local = devices
+            .get_mut(&self.device_id)
+            .ok_or_else(|| NetworkError::DiscoveryFailed("device is not registered".into()))?;
+
+        let authenticated = local
+            .pairing_claim
+            .as_ref()
+            .is_some_and(|expected| expected.matches_claim(claim));
+        if !authenticated {
+            return Err(NetworkError::AuthenticationFailed);
+        }
+
+        Ok(local.pairing_inbound.pop_front().map(|pipe| {
             Box::new(InMemoryChannel {
                 peer_device_id: pipe.initiator,
                 outbound: Arc::clone(&pipe.to_initiator),
@@ -872,6 +1048,59 @@ mod tests {
         assert!(RegistryState::from_bytes(b"not registry state".to_vec())
             .to_registries()
             .is_err());
+    }
+
+    #[test]
+    fn test_frame_roundtrips_a_pairing_message() {
+        use crate::pairing::{PairingMessage, PairingRequest};
+
+        let message = SyncMessage::Pairing(PairingMessage::Join(PairingRequest {
+            device_id: uuid::Uuid::new_v4(),
+            name: "New Laptop".to_string(),
+            platform: "windows".to_string(),
+            public_key: "public-key".to_string(),
+            schema_version: 3,
+        }));
+
+        let frame = encode_frame(&message).unwrap();
+        assert!(frame.starts_with(b"LKRS"));
+        assert_eq!(decode_frame(&frame).unwrap(), message);
+    }
+
+    #[test]
+    fn test_a_pairing_channel_requires_the_one_time_secret() {
+        let hub = InMemoryHub::new();
+        let a_id = uuid::Uuid::new_v4();
+        let b_id = uuid::Uuid::new_v4();
+        let a = hub.join(InMemoryDeviceConfig::new(a_id, 3));
+        let b = hub.join(InMemoryDeviceConfig::new(b_id, 3));
+        b.start_advertising().unwrap();
+
+        let offer =
+            crate::pairing::PairingHost::start(a_id, a_id, 3, [1u8; 32], chrono::Utc::now()).1;
+        let correct = offer.claim();
+        let wrong = crate::pairing::PairingCode::typed(
+            a_id,
+            crate::pairing::PairingSecret::generate().typed_code(),
+        )
+        .claim()
+        .unwrap();
+
+        let peer = a.discover().unwrap().remove(0);
+
+        // Nothing is registered to accept pairing yet.
+        assert_eq!(
+            a.connect_for_pairing(&peer, &correct).err(),
+            Some(NetworkError::AuthenticationFailed)
+        );
+
+        b.begin_pairing(&correct).unwrap();
+        assert_eq!(
+            a.connect_for_pairing(&peer, &wrong).err(),
+            Some(NetworkError::AuthenticationFailed),
+            "a different one-time secret must not authenticate"
+        );
+        assert!(a.connect_for_pairing(&peer, &correct).is_ok());
     }
 
     #[test]
