@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use tauri::{Emitter, State};
+use tauri::{Emitter, Manager, State};
 use uuid::Uuid;
 use zeroize::Zeroize;
 use zxcvbn::{zxcvbn, Entropy};
@@ -1011,19 +1011,42 @@ fn sync_discovery_error(err: NetworkError) -> String {
 /// Sync with one paired, discovered Device. Progress is emitted as
 /// `sync-progress` Tauri events; the engine itself only knows a callback.
 ///
-/// `SyncControl` is deliberately held outside the global state: it is what
-/// lets `cancel_sync` interrupt this exchange, and what makes a second
-/// simultaneous sync fail instead of racing this one over the same files.
-/// Each frame has a deadline, so holding the state lock is bounded.
+/// The exchange blocks (it waits on the network and holds the vault state), so
+/// the command is async and hands the work to Tauri's blocking pool. That
+/// keeps the main thread free to dispatch `cancel_sync` while this runs.
 #[tauri::command]
-pub fn sync_with_device(
+pub async fn sync_with_device(
     app: tauri::AppHandle,
-    state: AppState,
-    control: tauri::State<'_, SyncControl>,
     device_id: String,
 ) -> Result<SyncReport, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<Mutex<ManagerState>>();
+        let control = app.state::<SyncControl>();
+        run_sync_with_device(&state, &control, &device_id, |progress| {
+            let _ = app.emit("sync-progress", &progress);
+        })
+    })
+    .await
+    .map_err(|error| format!("the sync task did not finish: {error}"))?
+}
+
+/// The body of [`sync_with_device`], separate from Tauri so the command's
+/// ordering can be tested: a second sync must be refused by the control
+/// before it ever waits on the shared state.
+fn run_sync_with_device(
+    state: &Mutex<ManagerState>,
+    control: &SyncControl,
+    device_id: &str,
+    mut progress: impl FnMut(SyncProgress),
+) -> Result<SyncReport, String> {
+    let peer_device_id: crate::DeviceId = Uuid::parse_str(device_id).map_err(|e| e.to_string())?;
+
+    // Claim the single sync slot before touching the shared state. A second
+    // invocation is refused here, immediately, instead of queueing behind the
+    // first on that state and finding the slot free only once it finishes.
+    let lease = control.begin().map_err(|error| error.to_string())?;
+
     let mut state = state.lock().map_err(|e| e.to_string())?;
-    let peer_device_id: crate::DeviceId = Uuid::parse_str(&device_id).map_err(|e| e.to_string())?;
 
     let user_id = state
         .user_manager
@@ -1064,16 +1087,6 @@ pub fn sync_with_device(
         return Err(VaultError::SyncPeerUnreachable(peer_device_id.to_string()).to_string());
     };
 
-    let lease = match control.begin() {
-        Ok(lease) => lease,
-        Err(error) => {
-            // Nothing was transferred, so this Device must go back to being
-            // invisible rather than stay advertised by a refused sync.
-            let _ = network.stop_advertising();
-            return Err(error.to_string());
-        }
-    };
-
     let result = (|| -> Result<SyncOutcome, VaultError> {
         // Borrow only the fields the engine needs; the network and state
         // store are used again after the sync ends.
@@ -1107,10 +1120,6 @@ pub fn sync_with_device(
             },
         )
         .with_cancel(lease.token());
-
-        let mut progress = |progress: SyncProgress| {
-            let _ = app.emit("sync-progress", &progress);
-        };
 
         let start = engine.start_with_peer(&peer, &mut progress)?;
         let sent = engine.send_offers(start, &mut progress)?;
@@ -1629,6 +1638,44 @@ mod tests {
             local_version: None,
             sides: [conflict_side(Uuid::new_v4()), conflict_side(Uuid::new_v4())],
         }
+    }
+
+    #[test]
+    fn test_a_second_sync_is_refused_from_the_command_path_without_queueing() {
+        let temp_dir = setup();
+        let state = Mutex::new(ManagerState::initialize(temp_dir.clone()));
+        let control = SyncControl::default();
+
+        // A first sync is in flight: it owns the one sync slot and the shared
+        // state, exactly as the command does for the duration of an exchange.
+        let first = control.begin().unwrap();
+        let held = state.lock().unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                let result =
+                    run_sync_with_device(&state, &control, &Uuid::new_v4().to_string(), |_| {});
+                let _ = sender.send(result.map(|_| ()));
+            });
+
+            let received = receiver.recv_timeout(std::time::Duration::from_secs(2));
+            // Release the probe first: if the command wrongly queued on the
+            // state, this lets it finish instead of hanging the failing test.
+            drop(held);
+            let result = received.expect("a second sync must be refused, not queued");
+            assert!(
+                matches!(result, Err(ref message) if message.contains("already in progress")),
+                "unexpected result: {result:?}"
+            );
+        });
+
+        drop(first);
+        assert!(
+            !control.is_active(),
+            "a refused sync must not claim the slot"
+        );
+        std::fs::remove_dir_all(temp_dir).ok();
     }
 
     #[test]
