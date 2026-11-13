@@ -13,7 +13,8 @@ use zxcvbn::{zxcvbn, Entropy};
 use crate::mdns::{DiscoverySession, MdnsDiscovery};
 use crate::network::{NetworkError, PeerNetwork};
 use crate::sync::{
-    PendingSync, SyncCredentials, SyncEngine, SyncOutcome, SyncProgress, SyncReport, SyncStateStore,
+    PendingSync, SyncControl, SyncCredentials, SyncEngine, SyncOutcome, SyncProgress, SyncReport,
+    SyncStateStore,
 };
 use crate::user_manager::UserManager;
 use crate::vault_manager::VaultManager;
@@ -49,7 +50,7 @@ pub struct ManagerState {
 
     /// The single network seam, kept in the state so discovery commands and
     /// the sync engine share one implementation.
-    pub network: Option<Arc<MdnsDiscovery>>,
+    pub network: Option<Arc<dyn PeerNetwork>>,
 
     /// The active discovery session. Dropping it stops advertising.
     pub discovery: Option<DiscoverySession>,
@@ -70,7 +71,8 @@ impl ManagerState {
             UserManager::new(app_data_dir.clone()),
         ) {
             (Ok(vault_manager), Ok(user_manager)) => {
-                let network = Arc::new(MdnsDiscovery::new(vault_manager.device_id()));
+                let network: Arc<dyn PeerNetwork> =
+                    Arc::new(MdnsDiscovery::new(vault_manager.device_id()));
                 let sync_state = SyncStateStore::new(&app_data_dir).ok();
                 Self {
                     app_data_dir,
@@ -180,6 +182,56 @@ impl ManagerState {
             _ => Err(message),
         }
     }
+
+    /// Drop everything that belongs to one signed-in session's network and
+    /// conflict state.
+    ///
+    /// A logout or a user switch must stop advertising (an idle app is
+    /// invisible on the network) and forget the plaintext secret candidates an
+    /// open conflict session was holding. Neither can ever be resolved once
+    /// the session that produced them is gone.
+    pub fn end_sync_session(&mut self) {
+        if let Some(session) = self.discovery.take() {
+            session.finish();
+        }
+
+        for (_, mut pending) in self.pending_syncs.drain() {
+            pending.forget();
+        }
+    }
+
+    /// Record what a completed exchange produced.
+    ///
+    /// The last-sync time is recorded even when conflicts hold the session
+    /// open: the sync did happen, and a stale timestamp while the User works
+    /// through the prompt would be a lie. The pending candidates are kept
+    /// only for as long as the session that produced them.
+    fn remember_sync_outcome(
+        &mut self,
+        user_id: UserId,
+        peer_device_id: crate::DeviceId,
+        outcome: SyncOutcome,
+    ) -> Result<SyncReport, String> {
+        let SyncOutcome { report, pending } = outcome;
+
+        if let Some(store) = self.sync_state.as_mut() {
+            store
+                .record_sync(&user_id, peer_device_id, Utc::now())
+                .map_err(|error| error.to_string())?;
+        }
+
+        if !pending.is_empty() {
+            self.pending_syncs.insert(
+                report.session_id,
+                PendingSync {
+                    user_id,
+                    conflicts: pending,
+                },
+            );
+        }
+
+        Ok(report)
+    }
 }
 
 type AppState<'a> = State<'a, Mutex<ManagerState>>;
@@ -272,6 +324,8 @@ pub fn login_user(
 ) -> Result<Vec<SafeVault>, String> {
     let mut state = state.lock().map_err(|e| e.to_string())?;
 
+    state.end_sync_session();
+
     let (vault_manager, user_manager, mp_state, sk_state) = state.parts_mut()?;
 
     let user_id: UserId = Uuid::parse_str(&id).map_err(|e| e.to_string())?;
@@ -301,6 +355,10 @@ pub fn login_user(
 pub fn logout(state: AppState) -> Result<(), String> {
     let mut state = state.lock().map_err(|e| e.to_string())?;
 
+    // Stop advertising and forget open conflict candidates before the
+    // credentials that could resolve them are gone.
+    state.end_sync_session();
+
     let (vault_manager, user_manager, mp_state, sk_state) = state.parts_mut()?;
 
     user_manager.logout().map_err(|e| e.to_string())?;
@@ -323,6 +381,8 @@ pub fn logout(state: AppState) -> Result<(), String> {
 #[tauri::command]
 pub fn delete_user(state: AppState) -> Result<(), String> {
     let mut state = state.lock().map_err(|e| e.to_string())?;
+
+    state.end_sync_session();
 
     let (vault_manager, user_manager, mp_state, sk_state) = state.parts_mut()?;
 
@@ -589,6 +649,13 @@ pub fn update_vault(
         .map_err(|e| e.to_string())
 }
 
+/// Delete a Vault **everywhere**: record a Tombstone in the shared Vault
+/// Registry and keep this Device's encrypted file as local trash.
+///
+/// This is the only one of the three removal operations that travels. It is
+/// deliberately distinct from `set_vault_syncing(.., false)` (stop syncing:
+/// the copy stays and drifts) and `remove_local_vault` (this Device only, no
+/// Tombstone).
 #[tauri::command]
 pub fn delete_vault(state: AppState, vault_id: String) -> Result<(), String> {
     let mut state = state.lock().map_err(|e| e.to_string())?;
@@ -596,10 +663,54 @@ pub fn delete_vault(state: AppState, vault_id: String) -> Result<(), String> {
     let id = Uuid::parse_str(&vault_id).map_err(|e| e.to_string())?;
 
     user_manager
-        .remove_vault_from_user(id)
+        .delete_vault(id, Utc::now())
         .map_err(|e| e.to_string())?;
 
-    vault_manager.delete_vault(id).map_err(|e| e.to_string())
+    // Never a hard delete on a deletion trigger: the User may have deleted
+    // the wrong Vault, on any Device.
+    vault_manager
+        .move_to_trash(id)
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Remove this Device's copy of a Vault, and nothing else.
+///
+/// The Vault stays in the shared Vault Registry (other Devices keep theirs)
+/// and no Tombstone is written. It also leaves this Device's Sync Set, because
+/// leaving it there would let the next sync install it again from a peer.
+#[tauri::command]
+pub fn remove_local_vault(state: AppState, vault_id: String) -> Result<(), String> {
+    let mut state = state.lock().map_err(|e| e.to_string())?;
+    let id = Uuid::parse_str(&vault_id).map_err(|e| e.to_string())?;
+
+    let user_id = state
+        .user_manager
+        .as_ref()
+        .and_then(|manager| manager.active_user_id)
+        .ok_or_else(|| VaultError::SyncNotLoggedIn.to_string())?;
+    let registry = state
+        .user_manager
+        .as_ref()
+        .expect("checked above")
+        .get_shared_profile(&user_id)
+        .map_err(|e| e.to_string())?
+        .vaults;
+
+    state
+        .vault_manager
+        .as_mut()
+        .ok_or_else(|| "Lockr is not initialized".to_string())?
+        .remove_local_copy(id)
+        .map_err(|e| e.to_string())?;
+
+    if let Some(store) = state.sync_state.as_mut() {
+        store
+            .set_vault_syncing(&user_id, id, false, &registry)
+            .map_err(|e| e.to_string())?;
+    }
+
+    Ok(())
 }
 
 #[tauri::command]
@@ -899,10 +1010,16 @@ fn sync_discovery_error(err: NetworkError) -> String {
 
 /// Sync with one paired, discovered Device. Progress is emitted as
 /// `sync-progress` Tauri events; the engine itself only knows a callback.
+///
+/// `SyncControl` is deliberately held outside the global state: it is what
+/// lets `cancel_sync` interrupt this exchange, and what makes a second
+/// simultaneous sync fail instead of racing this one over the same files.
+/// Each frame has a deadline, so holding the state lock is bounded.
 #[tauri::command]
 pub fn sync_with_device(
     app: tauri::AppHandle,
     state: AppState,
+    control: tauri::State<'_, SyncControl>,
     device_id: String,
 ) -> Result<SyncReport, String> {
     let mut state = state.lock().map_err(|e| e.to_string())?;
@@ -947,6 +1064,16 @@ pub fn sync_with_device(
         return Err(VaultError::SyncPeerUnreachable(peer_device_id.to_string()).to_string());
     };
 
+    let lease = match control.begin() {
+        Ok(lease) => lease,
+        Err(error) => {
+            // Nothing was transferred, so this Device must go back to being
+            // invisible rather than stay advertised by a refused sync.
+            let _ = network.stop_advertising();
+            return Err(error.to_string());
+        }
+    };
+
     let result = (|| -> Result<SyncOutcome, VaultError> {
         // Borrow only the fields the engine needs; the network and state
         // store are used again after the sync ends.
@@ -978,7 +1105,8 @@ pub fn sync_with_device(
                 master_password,
                 secret_key,
             },
-        );
+        )
+        .with_cancel(lease.token());
 
         let mut progress = |progress: SyncProgress| {
             let _ = app.emit("sync-progress", &progress);
@@ -991,25 +1119,15 @@ pub fn sync_with_device(
 
     let _ = network.stop_advertising();
     let outcome = result.map_err(|error| error.to_string())?;
-    let SyncOutcome { report, pending } = outcome;
 
-    if pending.is_empty() {
-        if let Some(store) = state.sync_state.as_mut() {
-            store
-                .record_sync(&user_id, peer_device_id, Utc::now())
-                .map_err(|error| error.to_string())?;
-        }
-    } else {
-        state.pending_syncs.insert(
-            report.session_id,
-            PendingSync {
-                user_id,
-                conflicts: pending,
-            },
-        );
-    }
+    state.remember_sync_outcome(user_id, peer_device_id, outcome)
+}
 
-    Ok(report)
+/// Stop an in-flight sync at its next frame boundary.
+#[tauri::command]
+pub fn cancel_sync(control: tauri::State<'_, SyncControl>) -> Result<(), String> {
+    control.cancel();
+    Ok(())
 }
 
 /// Paired Devices, including this one, with last-sync state per peer.
@@ -1234,7 +1352,7 @@ pub fn resolve_sync_conflict(
         .and_then(|manager| manager.active_user_id)
         .ok_or_else(|| VaultError::SyncNotLoggedIn.to_string())?;
 
-    let (scope, is_secret, value) = {
+    let (scope, is_secret, expected_local, value) = {
         let pending = state.pending_syncs.get(&session_id).ok_or_else(|| {
             VaultError::SyncConflictResolution("this sync session is no longer open".into())
                 .to_string()
@@ -1272,6 +1390,7 @@ pub fn resolve_sync_conflict(
         (
             conflict.scope.clone(),
             conflict.is_secret,
+            conflict.local_version,
             match choice {
                 ConflictChoice::Local => conflict.local.clone(),
                 ConflictChoice::Remote => conflict.remote.clone(),
@@ -1283,7 +1402,14 @@ pub fn resolve_sync_conflict(
         .vault_manager
         .as_mut()
         .ok_or_else(|| VaultError::SyncRefused("vault manager is unavailable".into()).to_string())?
-        .resolve_conflict_field(vault_id, &scope, &field_key, is_secret, value.as_ref())
+        .resolve_conflict_field(
+            vault_id,
+            &scope,
+            &field_key,
+            is_secret,
+            expected_local,
+            value.as_ref(),
+        )
         .map_err(|e| e.to_string())?;
 
     if !applied {
@@ -1360,6 +1486,14 @@ pub fn adopt_vault(state: AppState, vault_id: String) -> Result<(), String> {
             VaultError::SyncRefused(format!("Vault {vault_id} is already registered")).to_string(),
         );
     }
+    if shared.vaults.is_tombstoned(&vault_id) {
+        // Deletion is permanent. Adopting the file again would resurrect a
+        // Vault every Device has already deleted.
+        return Err(VaultError::SyncRefused(format!(
+            "Vault {vault_id} was deleted and cannot be adopted again"
+        ))
+        .to_string());
+    }
     if !vault_manager.has_vault_file(vault_id) {
         return Err(VaultError::NotFound(vault_id.to_string()).to_string());
     }
@@ -1397,6 +1531,8 @@ pub fn revoke_device(state: AppState, device_id: String) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::network::{InMemoryDeviceConfig, InMemoryHub};
+    use crate::sync::PendingConflict;
 
     fn setup() -> PathBuf {
         let temp_dir = std::env::temp_dir().join(format!("lockr_commands_test_{}", Uuid::new_v4()));
@@ -1471,6 +1607,114 @@ mod tests {
         let result = state.recover_with_new_device_identity();
 
         assert!(result.is_err());
+        std::fs::remove_dir_all(temp_dir).ok();
+    }
+
+    fn conflict_side(device: crate::DeviceId) -> crate::ConflictSide {
+        crate::ConflictSide {
+            device,
+            counter: 1,
+            value: None,
+        }
+    }
+
+    fn pending_conflict() -> PendingConflict {
+        PendingConflict {
+            vault_id: Uuid::new_v4(),
+            scope: crate::ConflictScope::Vault,
+            field_key: "name".to_string(),
+            is_secret: false,
+            local: Some(crate::merge::FieldValue::Plain("Mine".to_string())),
+            remote: Some(crate::merge::FieldValue::Plain("Theirs".to_string())),
+            local_version: None,
+            sides: [conflict_side(Uuid::new_v4()), conflict_side(Uuid::new_v4())],
+        }
+    }
+
+    #[test]
+    fn test_ending_a_session_stops_advertising_and_forgets_pending_conflicts() {
+        let temp_dir = setup();
+        let mut state = ManagerState::initialize(temp_dir.clone());
+
+        // Swap the real mDNS seam for an in-memory one so advertising is
+        // observable from a peer in this process.
+        let hub = InMemoryHub::new();
+        let device_id = state.vault_manager.as_ref().unwrap().device_id();
+        let network: Arc<dyn PeerNetwork> =
+            Arc::new(hub.join(InMemoryDeviceConfig::new(device_id, 3)));
+        let observer = hub.join(InMemoryDeviceConfig::new(Uuid::new_v4(), 3));
+        state.network = Some(Arc::clone(&network));
+        state.discovery = Some(DiscoverySession::start(&network).unwrap());
+        assert_eq!(
+            observer.discover().unwrap().len(),
+            1,
+            "an open discovery session advertises"
+        );
+
+        state.pending_syncs.insert(
+            Uuid::new_v4(),
+            PendingSync {
+                user_id: Uuid::new_v4(),
+                conflicts: vec![pending_conflict()],
+            },
+        );
+
+        state.end_sync_session();
+
+        assert!(
+            observer.discover().unwrap().is_empty(),
+            "ending the session must stop advertising"
+        );
+        assert!(state.discovery.is_none());
+        assert!(
+            state.pending_syncs.is_empty(),
+            "plaintext conflict candidates must not outlive the session"
+        );
+
+        std::fs::remove_dir_all(temp_dir).ok();
+    }
+
+    #[test]
+    fn test_last_sync_is_recorded_even_when_conflicts_hold_the_session_open() {
+        let temp_dir = setup();
+        let mut state = ManagerState::initialize(temp_dir.clone());
+        let user_id = Uuid::new_v4();
+        let peer_device_id = Uuid::new_v4();
+        let session_id = Uuid::new_v4();
+
+        let outcome = SyncOutcome {
+            report: SyncReport {
+                session_id,
+                peer_device_id,
+                vault_ids: vec![Uuid::new_v4()],
+                conflicts: Vec::new(),
+                duplicate_notes: Vec::new(),
+            },
+            pending: vec![pending_conflict()],
+        };
+
+        let report = state
+            .remember_sync_outcome(user_id, peer_device_id, outcome)
+            .unwrap();
+
+        assert_eq!(report.session_id, session_id);
+        assert!(
+            state
+                .sync_state
+                .as_ref()
+                .unwrap()
+                .last_sync_at(&user_id, peer_device_id)
+                .is_some(),
+            "a sync that surfaced a Conflict still happened"
+        );
+        assert_eq!(
+            state
+                .pending_syncs
+                .get(&session_id)
+                .map(|pending| pending.conflicts.len()),
+            Some(1)
+        );
+
         std::fs::remove_dir_all(temp_dir).ok();
     }
 }

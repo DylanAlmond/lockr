@@ -45,6 +45,10 @@ pub fn run() {
 
             app.manage(Mutex::new(app_state));
 
+            // Sync control lives outside the global state so cancelling a sync
+            // (and refusing a second one) never waits for the exchange's lock.
+            app.manage(sync::SyncControl::default());
+
             Ok(())
         })
         .plugin(tauri_plugin_opener::init())
@@ -69,6 +73,7 @@ pub fn run() {
             commands::complete_pairing,
             // Devices and sync
             commands::sync_with_device,
+            commands::cancel_sync,
             commands::list_paired_devices,
             commands::start_discovery,
             commands::stop_discovery,
@@ -89,6 +94,7 @@ pub fn run() {
             commands::lock_vault,
             commands::update_vault,
             commands::delete_vault,
+            commands::remove_local_vault,
             // Items (the generic surface, all kinds)
             commands::add_item,
             commands::update_item,

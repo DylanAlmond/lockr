@@ -14,6 +14,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -50,6 +51,9 @@ pub enum NetworkError {
 
     #[error("Peer channel is closed")]
     ConnectionClosed,
+
+    #[error("Peer did not respond in time")]
+    Timeout,
 
     #[error("Discovery failed: {0}")]
     DiscoveryFailed(String),
@@ -418,6 +422,14 @@ pub trait PeerChannel: Send {
     fn send(&mut self, message: SyncMessage) -> Result<(), NetworkError>;
 
     fn receive(&mut self) -> Result<SyncMessage, NetworkError>;
+
+    /// Receive with a deadline. A blocking transport must override this so a
+    /// silent peer cannot freeze the caller; the default is the unbounded
+    /// receive, which is correct only for transports that never block (the
+    /// in-memory pipe).
+    fn receive_timeout(&mut self, _timeout: Duration) -> Result<SyncMessage, NetworkError> {
+        self.receive()
+    }
 
     fn close(&mut self);
 }
