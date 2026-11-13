@@ -3383,4 +3383,1014 @@ mod tests {
             .vault_trash_path(fixture.vault_id)
             .exists());
     }
+
+    // ============ End-to-end user scenarios (#45) ============
+    //
+    // These drive two real managers over two vault directories and the
+    // in-memory network seam, and assert only on what a User can observe:
+    // Vault content, secrets, Tombstones, registry state, errors, and files.
+
+    #[test]
+    fn test_pairing_alone_leaves_both_devices_with_the_same_device_and_vault_lists() {
+        let fixture = Fixture::new();
+
+        let a_shared = fixture
+            .a
+            .user
+            .get_shared_profile(&fixture.a.user_id)
+            .unwrap();
+        let b_shared = fixture
+            .b
+            .user
+            .get_shared_profile(&fixture.b.user_id)
+            .unwrap();
+
+        assert_eq!(
+            a_shared.vault_ids(),
+            b_shared.vault_ids(),
+            "both Devices must show one list of Vaults"
+        );
+        assert_eq!(a_shared.vault_ids(), vec![fixture.vault_id]);
+        assert_eq!(
+            a_shared.devices, b_shared.devices,
+            "pairing admits the joining Device on both sides"
+        );
+        assert!(a_shared.devices.contains(&fixture.a.user.device_id()));
+        assert!(a_shared.devices.contains(&fixture.b.user.device_id()));
+
+        // The joining Device holds the secret key transferred at pairing, so
+        // its copy opens without the source Device's password ever moving.
+        assert_eq!(
+            fixture
+                .b
+                .vaults
+                .get_item_secret(fixture.vault_id, fixture.item_id, "password")
+                .unwrap()
+                .as_deref(),
+            Some("hunter2")
+        );
+    }
+
+    #[test]
+    fn test_disjoint_field_edits_on_two_devices_merge_without_a_prompt() {
+        let mut fixture = Fixture::new();
+        fixture.sync();
+
+        // A renames the Item and tags it; B rotates the password and
+        // favourites it. No field is touched on both Devices.
+        fixture
+            .a
+            .vaults
+            .update_item(
+                fixture.vault_id,
+                fixture.item_id,
+                Some("Mail (work)".to_string()),
+                None,
+                None,
+                Some(vec!["work".to_string()]),
+                None,
+                None,
+            )
+            .unwrap();
+        fixture
+            .b
+            .vaults
+            .update_item(
+                fixture.vault_id,
+                fixture.item_id,
+                None,
+                None,
+                Some(true),
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        fixture
+            .b
+            .vaults
+            .update_item_secret(
+                fixture.vault_id,
+                fixture.item_id,
+                "password",
+                Some("rotated-on-b".to_string()),
+            )
+            .unwrap();
+
+        let (a_outcome, b_outcome) = fixture.sync();
+
+        assert!(a_outcome.report.conflicts.is_empty());
+        assert!(b_outcome.report.conflicts.is_empty());
+        for device in [&fixture.a, &fixture.b] {
+            let item = live_item(device, fixture.vault_id, fixture.item_id);
+            assert_eq!(item.display_name.as_deref(), Some("Mail (work)"));
+            assert!(item.favourite, "B's favourite must travel");
+            assert!(item.tags.contains(&"work".to_string()));
+            assert_eq!(
+                device
+                    .vaults
+                    .get_item_secret(fixture.vault_id, fixture.item_id, "password")
+                    .unwrap()
+                    .as_deref(),
+                Some("rotated-on-b")
+            );
+        }
+    }
+
+    #[test]
+    fn test_a_conflict_prompt_names_both_devices_and_withholds_secret_values() {
+        let mut fixture = Fixture::new();
+        fixture.sync();
+
+        // Two contested fields: display_name and password. Both Devices also
+        // make clean edits that must still be saved.
+        for (device, name, username, email, password) in [
+            (
+                &mut fixture.a,
+                "A-name",
+                "alice-a",
+                None,
+                "pw-a",
+            ),
+            (
+                &mut fixture.b,
+                "B-name",
+                "alice",
+                Some("b@example.com"),
+                "pw-b",
+            ),
+        ] {
+            device
+                .vaults
+                .update_item(
+                    fixture.vault_id,
+                    fixture.item_id,
+                    Some(name.to_string()),
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(NewItemData::Account(AccountData {
+                        username: username.to_string(),
+                        email: email.map(str::to_string),
+                    })),
+                )
+                .unwrap();
+            device
+                .vaults
+                .update_item_secret(
+                    fixture.vault_id,
+                    fixture.item_id,
+                    "password",
+                    Some(password.to_string()),
+                )
+                .unwrap();
+        }
+
+        let (a_outcome, b_outcome) = fixture.sync();
+
+        assert_eq!(a_outcome.report.conflicts.len(), 2);
+        assert_eq!(b_outcome.report.conflicts.len(), 2);
+
+        let a_id = fixture.a.user.device_id();
+        let b_id = fixture.b.user.device_id();
+        let display = a_outcome
+            .report
+            .conflicts
+            .iter()
+            .find(|conflict| conflict.conflict.field_key == "display_name")
+            .expect("the display-name disagreement is surfaced");
+        assert!(!display.conflict.is_secret);
+        let writers: BTreeSet<DeviceId> = display
+            .conflict
+            .sides
+            .iter()
+            .map(|side| side.device)
+            .collect();
+        assert_eq!(
+            writers,
+            BTreeSet::from([a_id, b_id]),
+            "a conflict names the Device that wrote each side"
+        );
+        assert!(
+            display.conflict.sides.iter().all(|side| side.value.is_some()),
+            "a non-secret conflict must show both candidate values"
+        );
+
+        let password = a_outcome
+            .report
+            .conflicts
+            .iter()
+            .find(|conflict| conflict.conflict.field_key == "password")
+            .expect("the password disagreement is surfaced");
+        assert!(password.conflict.is_secret);
+        assert!(
+            password
+                .conflict
+                .sides
+                .iter()
+                .all(|side| side.value.is_none()),
+            "neither secret candidate may reach the prompt"
+        );
+
+        // Clean edits were saved even while those two fields conflict.
+        for device in [&fixture.a, &fixture.b] {
+            let item = live_item(device, fixture.vault_id, fixture.item_id);
+            assert_eq!(account_data(item).username, "alice-a");
+            assert_eq!(account_data(item).email.as_deref(), Some("b@example.com"));
+        }
+
+        // The report itself, serialized for the UI, carries no secret value.
+        let wire = serde_json::to_string(&a_outcome.report).unwrap();
+        assert!(!wire.contains("pw-a") && !wire.contains("pw-b"), "{wire}");
+    }
+
+    #[test]
+    fn test_resolving_a_conflict_on_one_device_converges_without_a_second_prompt() {
+        let mut fixture = Fixture::new();
+        fixture.sync();
+
+        fixture
+            .a
+            .vaults
+            .update_item(
+                fixture.vault_id,
+                fixture.item_id,
+                Some("A-name".to_string()),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        fixture
+            .b
+            .vaults
+            .update_item(
+                fixture.vault_id,
+                fixture.item_id,
+                Some("B-name".to_string()),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+        let (a_outcome, _) = fixture.sync();
+        let display = pending_for(&a_outcome, "display_name");
+        fixture
+            .a
+            .vaults
+            .resolve_conflict_field(
+                fixture.vault_id,
+                &display.scope,
+                &display.field_key,
+                display.is_secret,
+                display.local_version,
+                display.remote.as_ref(),
+            )
+            .unwrap();
+
+        let (a_second, b_second) = fixture.sync();
+
+        assert!(
+            a_second.report.conflicts.is_empty() && b_second.report.conflicts.is_empty(),
+            "the choice must settle the field, not prompt the other Device"
+        );
+        for device in [&fixture.a, &fixture.b] {
+            assert_eq!(
+                live_item(device, fixture.vault_id, fixture.item_id)
+                    .display_name
+                    .as_deref(),
+                Some("B-name")
+            );
+        }
+    }
+
+    #[test]
+    fn test_two_lookalike_items_are_suggested_only_after_a_sync_and_keeping_both_silences_both() {
+        let mut fixture = Fixture::new();
+        fixture.sync();
+
+        // The same login, created independently on each Device. Same kind,
+        // same normalised name, same username: one Duplicate pair once the
+        // two copies meet.
+        let a_item = match fixture
+            .a
+            .vaults
+            .add_item(
+                fixture.vault_id,
+                Some("Bank".to_string()),
+                None,
+                NewItemData::Account(AccountData {
+                    username: "bob".to_string(),
+                    email: None,
+                }),
+                Some(vec![SecretInput {
+                    key: "password".to_string(),
+                    value: "made-on-a".to_string(),
+                }]),
+            )
+            .unwrap()
+        {
+            crate::SafeItem::Account(account) => account.id,
+            other => panic!("expected an account, got {other:?}"),
+        };
+        let b_item = match fixture
+            .b
+            .vaults
+            .add_item(
+                fixture.vault_id,
+                Some(" bank ".to_string()),
+                None,
+                NewItemData::Account(AccountData {
+                    username: "bob".to_string(),
+                    email: None,
+                }),
+                Some(vec![SecretInput {
+                    key: "password".to_string(),
+                    value: "made-on-b".to_string(),
+                }]),
+            )
+            .unwrap()
+        {
+            crate::SafeItem::Account(account) => account.id,
+            other => panic!("expected an account, got {other:?}"),
+        };
+
+        // Before the exchange each Device knows only its own copy.
+        assert!(fixture
+            .a
+            .vaults
+            .duplicate_suggestions(fixture.vault_id)
+            .unwrap()
+            .is_empty());
+        assert!(fixture
+            .b
+            .vaults
+            .duplicate_suggestions(fixture.vault_id)
+            .unwrap()
+            .is_empty());
+
+        fixture.sync();
+
+        let suggestion = fixture
+            .a
+            .vaults
+            .duplicate_suggestions(fixture.vault_id)
+            .unwrap()
+            .remove(0);
+        assert_eq!(
+            BTreeSet::from([suggestion.first.item_id, suggestion.second.item_id]),
+            BTreeSet::from([a_item, b_item])
+        );
+        assert_eq!(
+            fixture
+                .b
+                .vaults
+                .duplicate_suggestions(fixture.vault_id)
+                .unwrap()
+                .len(),
+            1,
+            "both Devices see the same suggestion"
+        );
+
+        fixture
+            .a
+            .vaults
+            .resolve_duplicate(
+                fixture.vault_id,
+                a_item,
+                b_item,
+                crate::DuplicateResolution::KeepBoth,
+            )
+            .unwrap();
+
+        fixture.sync();
+
+        assert!(fixture
+            .a
+            .vaults
+            .duplicate_suggestions(fixture.vault_id)
+            .unwrap()
+            .is_empty());
+        assert!(
+            fixture
+                .b
+                .vaults
+                .duplicate_suggestions(fixture.vault_id)
+                .unwrap()
+                .is_empty(),
+            "one decision must silence the prompt on every Device"
+        );
+        for device in [&fixture.a, &fixture.b] {
+            assert!(
+                device
+                    .vaults
+                    .get_vault(fixture.vault_id)
+                    .unwrap()
+                    .is_duplicate_dismissed(a_item, b_item)
+            );
+            assert_eq!(
+                device
+                    .vaults
+                    .get_vault(fixture.vault_id)
+                    .unwrap()
+                    .items
+                    .iter()
+                    .filter(|item| item.id == a_item || item.id == b_item)
+                    .filter(|item| !item.is_tombstone())
+                    .count(),
+                2,
+                "KeepBoth must keep both identities"
+            );
+        }
+    }
+
+    #[test]
+    fn test_combining_duplicates_with_an_explicit_secret_choice_survives_a_sync() {
+        let mut fixture = Fixture::new();
+        fixture.sync();
+
+        let a_item = match fixture
+            .a
+            .vaults
+            .add_item(
+                fixture.vault_id,
+                Some("Bank".to_string()),
+                None,
+                NewItemData::Account(AccountData {
+                    username: "bob".to_string(),
+                    email: None,
+                }),
+                Some(vec![SecretInput {
+                    key: "password".to_string(),
+                    value: "a-bank-password".to_string(),
+                }]),
+            )
+            .unwrap()
+        {
+            crate::SafeItem::Account(account) => account.id,
+            other => panic!("expected an account, got {other:?}"),
+        };
+        let b_item = match fixture
+            .b
+            .vaults
+            .add_item(
+                fixture.vault_id,
+                Some("Bank".to_string()),
+                None,
+                NewItemData::Account(AccountData {
+                    username: "bob".to_string(),
+                    email: None,
+                }),
+                Some(vec![SecretInput {
+                    key: "password".to_string(),
+                    value: "b-bank-password".to_string(),
+                }]),
+            )
+            .unwrap()
+        {
+            crate::SafeItem::Account(account) => account.id,
+            other => panic!("expected an account, got {other:?}"),
+        };
+
+        fixture.sync();
+
+        let suggestion = fixture
+            .b
+            .vaults
+            .duplicate_suggestions(fixture.vault_id)
+            .unwrap()
+            .remove(0);
+        let field_choices: BTreeMap<String, ItemId> = suggestion
+            .colliding_fields
+            .iter()
+            .map(|field| (field.field_key.clone(), a_item))
+            .collect();
+        assert!(
+            field_choices.contains_key("password"),
+            "the password difference must require an explicit choice"
+        );
+
+        fixture
+            .b
+            .vaults
+            .resolve_duplicate(
+                fixture.vault_id,
+                a_item,
+                b_item,
+                crate::DuplicateResolution::Combine {
+                    survivor: a_item,
+                    field_choices,
+                },
+            )
+            .unwrap();
+
+        fixture.sync();
+
+        for device in [&fixture.a, &fixture.b] {
+            let vault = device.vaults.get_vault(fixture.vault_id).unwrap();
+            let live: Vec<_> = vault
+                .items
+                .iter()
+                .filter(|item| item.id == a_item || item.id == b_item)
+                .collect();
+            assert_eq!(live.len(), 2, "the vault keeps identity history");
+            assert!(
+                live.iter().any(|item| item.id == a_item && !item.is_tombstone()),
+                "the survivor stays live"
+            );
+            assert!(
+                live.iter()
+                    .any(|item| item.id == b_item && item.is_tombstone()),
+                "the discarded identity becomes a Tombstone"
+            );
+            assert_eq!(
+                device
+                    .vaults
+                    .get_item_secret(fixture.vault_id, a_item, "password")
+                    .unwrap()
+                    .as_deref(),
+                Some("a-bank-password"),
+                "Combine must carry the chosen secret across the sync"
+            );
+        }
+    }
+
+    // ---- Failure paths ----
+
+    /// Rewrite a travelling registry so one Device's record says something
+    /// its admission signature never covered. No honest manager produces
+    /// this; the seam is the only place a peer could.
+    fn forged_registries(
+        registries: &crate::SharedRegistries,
+        device: DeviceId,
+    ) -> crate::SharedRegistries {
+        let mut value = serde_json::to_value(registries).unwrap();
+        let records = value
+            .get_mut("devices")
+            .and_then(|devices| devices.get_mut("devices"))
+            .and_then(|records| records.as_object_mut())
+            .expect("a registry serializes as a device map");
+        let record = records
+            .get_mut(&device.to_string())
+            .expect("the Device under test is in its own registry");
+        record["name"] = serde_json::Value::String("Attacker's Laptop".to_string());
+        serde_json::from_value(value).expect("the forged registry still parses")
+    }
+
+    struct TamperingNetwork<'a> {
+        inner: &'a InMemoryNetwork,
+        victim: DeviceId,
+    }
+
+    impl PeerNetwork for TamperingNetwork<'_> {
+        fn start_advertising(&self) -> Result<(), NetworkError> {
+            self.inner.start_advertising()
+        }
+
+        fn stop_advertising(&self) -> Result<(), NetworkError> {
+            self.inner.stop_advertising()
+        }
+
+        fn discover(&self) -> Result<Vec<DiscoveredPeer>, NetworkError> {
+            self.inner.discover()
+        }
+
+        fn connect(&self, peer: &DiscoveredPeer) -> Result<Box<dyn PeerChannel>, NetworkError> {
+            Ok(Box::new(TamperingChannel {
+                inner: self.inner.connect(peer)?,
+                victim: self.victim,
+            }))
+        }
+
+        fn accept(&self) -> Result<Option<Box<dyn PeerChannel>>, NetworkError> {
+            Ok(self.inner.accept()?.map(|inner| {
+                Box::new(TamperingChannel {
+                    inner,
+                    victim: self.victim,
+                }) as Box<dyn PeerChannel>
+            }))
+        }
+    }
+
+    struct TamperingChannel {
+        inner: Box<dyn PeerChannel>,
+        victim: DeviceId,
+    }
+
+    impl PeerChannel for TamperingChannel {
+        fn peer_device_id(&self) -> DeviceId {
+            self.inner.peer_device_id()
+        }
+
+        fn send(&mut self, message: SyncMessage) -> Result<(), NetworkError> {
+            let message = match message {
+                SyncMessage::Scope(mut scope) => {
+                    scope.registries = forged_registries(&scope.registries, self.victim);
+                    SyncMessage::Scope(scope)
+                }
+                other => other,
+            };
+            self.inner.send(message)
+        }
+
+        fn receive(&mut self) -> Result<SyncMessage, NetworkError> {
+            self.inner.receive()
+        }
+
+        fn receive_timeout(
+            &mut self,
+            timeout: std::time::Duration,
+        ) -> Result<SyncMessage, NetworkError> {
+            self.inner.receive_timeout(timeout)
+        }
+
+        fn close(&mut self) {
+            self.inner.close()
+        }
+    }
+
+    #[test]
+    fn test_a_tampered_registry_entry_is_refused_before_any_vault_content_is_written() {
+        let mut fixture = Fixture::new();
+        fixture.sync();
+
+        // B would have changed this; if the tampered scope were trusted, the
+        // exchange would go on to deliver it.
+        fixture
+            .b
+            .vaults
+            .update_item(
+                fixture.vault_id,
+                fixture.item_id,
+                Some("should never cross".to_string()),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+        let peer = discovered_b(&fixture);
+        let tampering = TamperingNetwork {
+            inner: &fixture.b.net,
+            victim: fixture.b.user.device_id(),
+        };
+        let mut noop = |_: SyncProgress| {};
+
+        let mut engine_a = device_engine!(fixture, a);
+        let start = engine_a.start_with_peer(&peer, &mut noop).unwrap();
+        let _accepted = {
+            let mut engine_b = SyncEngine::new(
+                &tampering,
+                &mut fixture.b.vaults,
+                &fixture.b.user,
+                fixture.b.sync.scope(&fixture.b.user_id),
+                SyncCredentials {
+                    master_password: MASTER_PW,
+                    secret_key: &fixture.b.secret_key,
+                },
+            );
+            engine_b.accept(&mut noop).unwrap().unwrap()
+        };
+
+        assert!(matches!(
+            engine_a.send_offers(start, &mut noop),
+            Err(VaultError::DeviceRegistry(_))
+        ));
+        assert_eq!(
+            live_item(&fixture.a, fixture.vault_id, fixture.item_id)
+                .display_name
+                .as_deref(),
+            Some("Mail"),
+            "a refused registry must stop the vault exchange"
+        );
+        assert_eq!(
+            account_data(live_item(&fixture.a, fixture.vault_id, fixture.item_id)).username,
+            "alice"
+        );
+    }
+
+    #[test]
+    fn test_an_external_file_change_stops_a_sync_instead_of_being_overwritten() {
+        let mut fixture = Fixture::new();
+        fixture.sync();
+
+        // Keep B's edit in memory so the next save is the one a sync forces.
+        fixture.b.vaults.set_autosave(false);
+        fixture
+            .b
+            .vaults
+            .update_item(
+                fixture.vault_id,
+                fixture.item_id,
+                Some("not yet on disk".to_string()),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+        let path = fixture
+            .b
+            .dir
+            .join("vaults")
+            .join(format!("{}.vault", fixture.vault_id));
+        let externally_written = b"written by another program".to_vec();
+        std::fs::write(&path, &externally_written).unwrap();
+
+        let peer = discovered_b(&fixture);
+        let mut noop = |_: SyncProgress| {};
+        let _start = {
+            let mut engine_a = device_engine!(fixture, a);
+            engine_a.start_with_peer(&peer, &mut noop).unwrap()
+        };
+        let accepted = {
+            let mut engine_b = device_engine!(fixture, b);
+            engine_b.accept(&mut noop)
+        };
+
+        assert!(matches!(accepted, Err(VaultError::ExternalChange(_))));
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            externally_written,
+            "a sync must never blind-overwrite a file changed underneath it"
+        );
+        assert_eq!(
+            live_item(&fixture.a, fixture.vault_id, fixture.item_id)
+                .display_name
+                .as_deref(),
+            Some("Mail"),
+            "the refused sync changes nothing on the other Device"
+        );
+    }
+
+    /// Captures every frame A sends, so the test can prove what did and did
+    /// not travel.
+    struct RecordingNetwork<'a> {
+        inner: &'a InMemoryNetwork,
+        frames: Arc<Mutex<Vec<Vec<u8>>>>,
+    }
+
+    impl PeerNetwork for RecordingNetwork<'_> {
+        fn start_advertising(&self) -> Result<(), NetworkError> {
+            self.inner.start_advertising()
+        }
+
+        fn stop_advertising(&self) -> Result<(), NetworkError> {
+            self.inner.stop_advertising()
+        }
+
+        fn discover(&self) -> Result<Vec<DiscoveredPeer>, NetworkError> {
+            self.inner.discover()
+        }
+
+        fn connect(&self, peer: &DiscoveredPeer) -> Result<Box<dyn PeerChannel>, NetworkError> {
+            Ok(Box::new(RecordingChannel {
+                inner: self.inner.connect(peer)?,
+                frames: Arc::clone(&self.frames),
+            }))
+        }
+
+        fn accept(&self) -> Result<Option<Box<dyn PeerChannel>>, NetworkError> {
+            Ok(self.inner.accept()?.map(|inner| {
+                Box::new(RecordingChannel {
+                    inner,
+                    frames: Arc::clone(&self.frames),
+                }) as Box<dyn PeerChannel>
+            }))
+        }
+    }
+
+    struct RecordingChannel {
+        inner: Box<dyn PeerChannel>,
+        frames: Arc<Mutex<Vec<Vec<u8>>>>,
+    }
+
+    impl PeerChannel for RecordingChannel {
+        fn peer_device_id(&self) -> DeviceId {
+            self.inner.peer_device_id()
+        }
+
+        fn send(&mut self, message: SyncMessage) -> Result<(), NetworkError> {
+            self.frames
+                .lock()
+                .unwrap()
+                .push(crate::network::encode_frame(&message)?);
+            self.inner.send(message)
+        }
+
+        fn receive(&mut self) -> Result<SyncMessage, NetworkError> {
+            self.inner.receive()
+        }
+
+        fn receive_timeout(
+            &mut self,
+            timeout: std::time::Duration,
+        ) -> Result<SyncMessage, NetworkError> {
+            self.inner.receive_timeout(timeout)
+        }
+
+        fn close(&mut self) {
+            self.inner.close()
+        }
+    }
+
+    #[test]
+    fn test_a_sync_carries_no_master_password_and_no_vault_plaintext() {
+        let mut fixture = Fixture::new();
+        fixture.sync();
+
+        let marker = format!("PLAINTEXT-MARKER-{}", Uuid::new_v4());
+        let secret_marker = format!("SECRET-MARKER-{}", Uuid::new_v4());
+        fixture
+            .a
+            .vaults
+            .update_vault(fixture.vault_id, Some(marker.clone()), None)
+            .unwrap();
+        fixture
+            .a
+            .vaults
+            .update_item_secret(
+                fixture.vault_id,
+                fixture.item_id,
+                "password",
+                Some(secret_marker.clone()),
+            )
+            .unwrap();
+
+        let frames = Arc::new(Mutex::new(Vec::new()));
+        let recording = RecordingNetwork {
+            inner: &fixture.a.net,
+            frames: Arc::clone(&frames),
+        };
+        let peer = discovered_b(&fixture);
+        let mut noop = |_: SyncProgress| {};
+
+        let mut engine_a = SyncEngine::new(
+            &recording,
+            &mut fixture.a.vaults,
+            &fixture.a.user,
+            fixture.a.sync.scope(&fixture.a.user_id),
+            SyncCredentials {
+                master_password: MASTER_PW,
+                secret_key: &fixture.a.secret_key,
+            },
+        );
+        let mut engine_b = device_engine!(fixture, b);
+
+        let start = engine_a.start_with_peer(&peer, &mut noop).unwrap();
+        let accepted = engine_b.accept(&mut noop).unwrap().unwrap();
+        let sent = engine_a.send_offers(start, &mut noop).unwrap();
+        engine_b.receive_offers(accepted, &mut noop).unwrap();
+        engine_a.collect(sent, &mut noop).unwrap();
+
+        let frames = frames.lock().unwrap();
+        assert!(!frames.is_empty(), "the exchange must actually occur");
+        assert!(frames.iter().all(|frame| frame.starts_with(b"LKRS")));
+        let wire = frames
+            .iter()
+            .map(|frame| String::from_utf8_lossy(frame).into_owned())
+            .collect::<String>();
+
+        for forbidden in [MASTER_PW, marker.as_str(), secret_marker.as_str()] {
+            assert!(
+                !wire.contains(forbidden),
+                "the wire must not carry {forbidden:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_a_sync_reports_progress_from_start_to_complete() {
+        let mut fixture = Fixture::new();
+        let peer = discovered_b(&fixture);
+
+        let mut a_events = Vec::new();
+        let mut b_events = Vec::new();
+        let mut a_progress = |event: SyncProgress| a_events.push(event);
+        let mut b_progress = |event: SyncProgress| b_events.push(event);
+
+        let mut engine_a = device_engine!(fixture, a);
+        let start = engine_a.start_with_peer(&peer, &mut a_progress).unwrap();
+        let mut engine_b = device_engine!(fixture, b);
+        let accepted = engine_b.accept(&mut b_progress).unwrap().unwrap();
+        let sent = engine_a.send_offers(start, &mut a_progress).unwrap();
+        engine_b.receive_offers(accepted, &mut b_progress).unwrap();
+        engine_a.collect(sent, &mut a_progress).unwrap();
+
+        assert!(matches!(
+            a_events.first(),
+            Some(SyncProgress::Started { .. })
+        ));
+        assert!(a_events
+            .iter()
+            .any(|event| matches!(event, SyncProgress::SendingVault { .. })));
+        assert!(matches!(
+            a_events.last(),
+            Some(SyncProgress::Complete {
+                vaults: 1,
+                conflicts: 0
+            })
+        ));
+
+        assert!(b_events
+            .iter()
+            .any(|event| matches!(event, SyncProgress::ReceivingVault { .. })));
+        assert!(b_events
+            .iter()
+            .any(|event| matches!(event, SyncProgress::VaultMerged { .. })));
+        assert!(matches!(
+            b_events.last(),
+            Some(SyncProgress::Complete {
+                vaults: 1,
+                conflicts: 0
+            })
+        ));
+    }
+
+    #[test]
+    fn test_an_opposite_move_across_two_devices_is_surfaced_as_a_duplicate_note() {
+        let mut fixture = Fixture::new();
+        fixture.sync();
+
+        let archive = fixture
+            .a
+            .vaults
+            .create_vault(
+                "Archive".to_string(),
+                "#111111".to_string(),
+                MASTER_PW,
+                &fixture.a.secret_key,
+            )
+            .unwrap();
+        fixture.a.user.add_vault_to_user(archive.id).unwrap();
+        let holding = fixture
+            .a
+            .vaults
+            .create_vault(
+                "Holding".to_string(),
+                "#222222".to_string(),
+                MASTER_PW,
+                &fixture.a.secret_key,
+            )
+            .unwrap();
+        fixture.a.user.add_vault_to_user(holding.id).unwrap();
+        fixture.sync();
+        assert!(fixture.b.vaults.has_vault_file(archive.id));
+        assert!(fixture.b.vaults.has_vault_file(holding.id));
+
+        // One identity, moved to two different destinations concurrently.
+        fixture
+            .a
+            .vaults
+            .move_item(fixture.vault_id, fixture.item_id, archive.id)
+            .unwrap();
+        fixture
+            .b
+            .vaults
+            .move_item(fixture.vault_id, fixture.item_id, holding.id)
+            .unwrap();
+
+        let (a_outcome, b_outcome) = fixture.sync();
+
+        let notes: Vec<_> = a_outcome
+            .report
+            .duplicate_notes
+            .iter()
+            .chain(b_outcome.report.duplicate_notes.iter())
+            .filter(|note| note.item_id == fixture.item_id)
+            .collect();
+        assert!(
+            !notes.is_empty(),
+            "whole-file, per-Vault merge cannot reconcile opposite moves; the \
+             surviving identity must be surfaced, not claimed converged"
+        );
+        assert!(notes
+            .iter()
+            .any(|note| note.vault_ids.contains(&archive.id) && note.vault_ids.contains(&holding.id)));
+
+        for device in [&fixture.a, &fixture.b] {
+            for destination in [archive.id, holding.id] {
+                assert!(
+                    device
+                        .vaults
+                        .get_vault(destination)
+                        .unwrap()
+                        .items
+                        .iter()
+                        .any(|item| item.id == fixture.item_id && !item.is_tombstone()),
+                    "the limitation leaves a live copy in each destination"
+                );
+            }
+        }
+    }
 }
