@@ -2,6 +2,7 @@ import { createRouter, createWebHistory, RouteRecordRaw } from 'vue-router';
 import AppLayout from '../components/layout/AppLayout.vue';
 import AuthView from '../components/views/AuthView.vue';
 import SettingsView from '../components/views/SettingsView.vue';
+import DevicesView from '../components/views/DevicesView.vue';
 import { useUser } from '../composables/useUser';
 import ItemList from '../components/panel/ItemList.vue';
 import ItemPanel from '../components/panel/ItemPanel.vue';
@@ -58,6 +59,12 @@ const routes: RouteRecordRaw[] = [
     path: '/settings',
     name: 'settings',
     component: SettingsView,
+    meta: { requiresAuth: true }
+  },
+  {
+    path: '/devices',
+    name: 'devices',
+    component: DevicesView,
     meta: { requiresAuth: true }
   },
   {
