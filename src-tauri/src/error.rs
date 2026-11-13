@@ -47,6 +47,48 @@ pub enum VaultError {
     #[error("Pairing error: {0}")]
     Pairing(String),
 
+    #[error("Sync refused: no User is signed in on this Device")]
+    SyncNotLoggedIn,
+
+    #[error("Sync peer is unreachable: {0}")]
+    SyncPeerUnreachable(String),
+
+    #[error("Sync peer has been revoked: {0}")]
+    SyncPeerRevoked(String),
+
+    #[error("This Device has been revoked and may no longer sync: {0}")]
+    SyncThisDeviceRevoked(String),
+
+    #[error("Sync authentication failed")]
+    SyncAuthenticationFailed,
+
+    #[error("Cannot sync with a Device speaking protocol {remote} (this Device speaks {local})")]
+    SyncProtocolMismatch { local: u16, remote: u16 },
+
+    #[error("Cannot sync with a Device using vault schema {remote} (this Device uses {local})")]
+    SyncSchemaMismatch { local: u32, remote: u32 },
+
+    #[error("Sync discovery failed: {0}")]
+    SyncDiscoveryFailed(String),
+
+    #[error("Sync transport is unavailable: {0}")]
+    SyncTransportUnavailable(String),
+
+    #[error("Sync was interrupted before it completed: {0}")]
+    SyncInterrupted(String),
+
+    #[error("Sync refused: the peer sent vault {remote} where {local} was expected")]
+    SyncVaultIdMismatch { local: String, remote: String },
+
+    #[error("Sync refused: the connection did not come from the expected Device")]
+    SyncWrongPeer,
+
+    #[error("Sync refused: {0}")]
+    SyncRefused(String),
+
+    #[error("Conflict resolution failed: {0}")]
+    SyncConflictResolution(String),
+
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 

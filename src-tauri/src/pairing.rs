@@ -24,7 +24,7 @@ use uuid::Uuid;
 use zeroize::Zeroize;
 
 use crate::models::SharedProfile;
-use crate::{DeviceId, UserId, VaultError};
+use crate::{DeviceId, UserId, VaultError, VaultId};
 
 /// How long a pairing offer is usable. Short by design: a code glimpsed over
 /// a shoulder is worthless shortly after it is shown.
@@ -400,6 +400,13 @@ pub struct PairingTransfer {
     pub schema_version: u32,
     pub shared_profile: SharedProfile,
     pub secret_key: PairingSecretKey,
+
+    /// The source Device's pre-checked Sync Set for the joining Device, in
+    /// Vault ids. `None` means the default: every Vault in the shared Vault
+    /// Registry. It is the joining Device's initial device-local state, not
+    /// shared registry state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sync_set: Option<Vec<VaultId>>,
 }
 
 /// The messages that cross a pairing channel.
@@ -982,6 +989,48 @@ mod integration_tests {
             fixture.source_net.accept_for_pairing(&claim).is_err(),
             "a reused pairing secret must not open another channel"
         );
+    }
+
+    #[test]
+    fn test_pairing_carries_the_prechecked_sync_set_for_the_joining_device() {
+        let mut fixture = Fixture::new();
+        let now = Utc::now();
+        let vault_id = Uuid::new_v4();
+        let unknown = Uuid::new_v4();
+        fixture
+            .source
+            .add_vault_to_user(vault_id)
+            .expect("the source's Vault Registry accepts the Vault");
+
+        let offer = fixture
+            .source
+            .start_pairing(&fixture.secret_key, SCHEMA_VERSION, now)
+            .unwrap();
+        let code = PairingCode::qr(offer.qr_payload.clone());
+        let claim = code.claim().unwrap();
+        fixture.source_net.begin_pairing(&claim).unwrap();
+
+        let join = fixture
+            .joiner
+            .join_pairing(&code, SCHEMA_VERSION, now)
+            .unwrap();
+        let (mut initiator, mut responder) = fixture.open_channel(&claim);
+        initiator.send(SyncMessage::Pairing(join)).unwrap();
+        let prompt = fixture
+            .source
+            .receive_pairing_request(pairing_message(responder.receive().unwrap()), now)
+            .unwrap();
+
+        // Ids outside the shared Vault Registry are dropped: the registry is
+        // authoritative on which Vaults exist.
+        let transfer = fixture
+            .source
+            .approve_pairing_with_sync_set(prompt.device_id, Some(vec![vault_id, unknown]), now)
+            .unwrap();
+        let PairingMessage::Transfer(payload) = transfer else {
+            panic!("approval must produce a transfer");
+        };
+        assert_eq!(payload.sync_set, Some(vec![vault_id]));
     }
 
     #[test]

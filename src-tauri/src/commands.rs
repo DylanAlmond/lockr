@@ -1,19 +1,26 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::println;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
-use chrono::Utc;
-use tauri::State;
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use tauri::{Emitter, State};
 use uuid::Uuid;
 use zeroize::Zeroize;
 use zxcvbn::{zxcvbn, Entropy};
 
+use crate::mdns::{DiscoverySession, MdnsDiscovery};
+use crate::network::{NetworkError, PeerNetwork};
+use crate::sync::{
+    PendingSync, SyncCredentials, SyncEngine, SyncOutcome, SyncProgress, SyncReport, SyncStateStore,
+};
 use crate::user_manager::UserManager;
 use crate::vault_manager::VaultManager;
 use crate::{
     DuplicateOutcome, DuplicateResolution, DuplicateSuggestion, IntoSafe, ItemFilter, NewItemData,
     PairingApprovalPrompt, PairingCode, PairingMessage, PairingOffer, SafeItem, SafeVault,
-    SecretInput, User, UserId, CURRENT_SCHEMA_VERSION,
+    SecretInput, User, UserId, VaultError, VaultId, CURRENT_SCHEMA_VERSION,
 };
 
 pub struct ManagerState {
@@ -39,6 +46,19 @@ pub struct ManagerState {
     /// Whether the failure is specifically a damaged Device identity, the one
     /// case where starting with a new identity is a sensible way out.
     pub device_identity_damaged: bool,
+
+    /// The single network seam, kept in the state so discovery commands and
+    /// the sync engine share one implementation.
+    pub network: Option<Arc<MdnsDiscovery>>,
+
+    /// The active discovery session. Dropping it stops advertising.
+    pub discovery: Option<DiscoverySession>,
+
+    /// Device-local Sync Set and last-sync timestamps. Never part of a Vault.
+    pub sync_state: Option<SyncStateStore>,
+
+    /// Conflicts holding a sync open, keyed by the report's session id.
+    pub pending_syncs: HashMap<Uuid, PendingSync>,
 }
 
 impl ManagerState {
@@ -49,15 +69,23 @@ impl ManagerState {
             VaultManager::new(app_data_dir.clone()),
             UserManager::new(app_data_dir.clone()),
         ) {
-            (Ok(vault_manager), Ok(user_manager)) => Self {
-                app_data_dir,
-                vault_manager: Some(vault_manager),
-                user_manager: Some(user_manager),
-                master_password: None,
-                secret_key: None,
-                startup_error: None,
-                device_identity_damaged: false,
-            },
+            (Ok(vault_manager), Ok(user_manager)) => {
+                let network = Arc::new(MdnsDiscovery::new(vault_manager.device_id()));
+                let sync_state = SyncStateStore::new(&app_data_dir).ok();
+                Self {
+                    app_data_dir,
+                    vault_manager: Some(vault_manager),
+                    user_manager: Some(user_manager),
+                    master_password: None,
+                    secret_key: None,
+                    startup_error: None,
+                    device_identity_damaged: false,
+                    network: Some(network),
+                    discovery: None,
+                    sync_state,
+                    pending_syncs: HashMap::new(),
+                }
+            }
             (vault_result, user_result) => {
                 let device_identity_damaged = matches!(
                     &vault_result,
@@ -81,6 +109,10 @@ impl ManagerState {
                     secret_key: None,
                     startup_error: Some(error),
                     device_identity_damaged,
+                    network: None,
+                    discovery: None,
+                    sync_state: None,
+                    pending_syncs: HashMap::new(),
                 }
             }
         }
@@ -373,13 +405,27 @@ pub fn receive_pairing_request(
 /// belongs on the authenticated pairing channel; it carries key material and
 /// is never a view for display.
 #[tauri::command]
-pub fn approve_pairing(state: AppState, device_id: String) -> Result<PairingMessage, String> {
+pub fn approve_pairing(
+    state: AppState,
+    device_id: String,
+    sync_set: Option<Vec<String>>,
+) -> Result<PairingMessage, String> {
     let mut state = state.lock().map_err(|e| e.to_string())?;
     let (_, user_manager) = state.ready_mut()?;
     let device_id = Uuid::parse_str(&device_id).map_err(|e| e.to_string())?;
 
+    // The pre-checked list is the joining Device's initial Sync Set. `None`
+    // leaves the default: every Vault in the shared registry.
+    let sync_set = sync_set
+        .map(|ids| {
+            ids.into_iter()
+                .map(|id| Uuid::parse_str(&id).map_err(|e| e.to_string()))
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .transpose()?;
+
     user_manager
-        .approve_pairing(device_id, Utc::now())
+        .approve_pairing_with_sync_set(device_id, sync_set, Utc::now())
         .map_err(|e| e.to_string())
 }
 
@@ -416,6 +462,12 @@ pub fn complete_pairing(
     let mut state = state.lock().map_err(|e| e.to_string())?;
     let (_, user_manager, master_password_state, secret_key_state) = state.parts_mut()?;
 
+    // The source's pre-checked list becomes this Device's initial Sync Set.
+    // Extract it before the transfer is consumed.
+    let initial_sync_set = message
+        .as_transfer()
+        .and_then(|transfer| transfer.sync_set.clone());
+
     let user = user_manager
         .complete_pairing(message, &master_password, Utc::now())
         .map_err(|e| e.to_string())?;
@@ -428,6 +480,18 @@ pub fn complete_pairing(
 
     *master_password_state = Some(master_password);
     *secret_key_state = Some(secret_key);
+
+    if let Some(ids) = initial_sync_set {
+        let ids = ids
+            .into_iter()
+            .filter(|vault_id| user.vault_ids.contains(vault_id))
+            .collect::<Vec<_>>();
+        if let Some(store) = state.sync_state.as_mut() {
+            store
+                .set_sync_set(&user.id, ids)
+                .map_err(|e| e.to_string())?;
+        }
+    }
 
     Ok(user)
 }
@@ -761,6 +825,572 @@ pub fn resolve_duplicate(
 
     vault_manager
         .resolve_duplicate(vid, first, second, resolution)
+        .map_err(|e| e.to_string())
+}
+
+// ============ Devices, discovery and replication ============
+
+/// A paired Device as the Devices screen needs it. No key material.
+#[derive(Debug, Clone, Serialize)]
+pub struct PairedDeviceView {
+    pub device_id: crate::DeviceId,
+    pub name: String,
+    pub platform: String,
+    pub admitted: bool,
+    pub revoked: bool,
+    pub last_sync_at: Option<DateTime<Utc>>,
+    pub is_this_device: bool,
+}
+
+/// One peer seen by mDNS. The payload is deliberately limited to an opaque
+/// device id, an address, and whether this User has already paired it.
+#[derive(Debug, Clone, Serialize)]
+pub struct DiscoveredPeerView {
+    pub device_id: crate::DeviceId,
+    pub address: String,
+    pub paired: bool,
+}
+
+/// One Vault as the Sync Set editor sees it.
+#[derive(Debug, Clone, Serialize)]
+pub struct SyncSetVaultView {
+    pub vault_id: VaultId,
+    pub name: Option<String>,
+    pub syncing: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SyncSetView {
+    pub vaults: Vec<SyncSetVaultView>,
+}
+
+/// An unregistered `.vault` file found on disk, surfaced for adoption.
+#[derive(Debug, Clone, Serialize)]
+pub struct UnregisteredVaultView {
+    pub vault_id: VaultId,
+    pub file_name: String,
+}
+
+/// Which side of a Conflict the User picked. The backend holds both values,
+/// so a secret never has to cross to the UI to be chosen.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConflictChoice {
+    Local,
+    Remote,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ConflictResolutionResult {
+    pub remaining: usize,
+}
+
+fn sync_discovery_error(err: NetworkError) -> String {
+    match err {
+        NetworkError::DiscoveryFailed(detail) => {
+            VaultError::SyncDiscoveryFailed(detail).to_string()
+        }
+        NetworkError::TransportUnavailable(detail) => {
+            VaultError::SyncTransportUnavailable(detail).to_string()
+        }
+        other => other.to_string(),
+    }
+}
+
+/// Sync with one paired, discovered Device. Progress is emitted as
+/// `sync-progress` Tauri events; the engine itself only knows a callback.
+#[tauri::command]
+pub fn sync_with_device(
+    app: tauri::AppHandle,
+    state: AppState,
+    device_id: String,
+) -> Result<SyncReport, String> {
+    let mut state = state.lock().map_err(|e| e.to_string())?;
+    let peer_device_id: crate::DeviceId = Uuid::parse_str(&device_id).map_err(|e| e.to_string())?;
+
+    let user_id = state
+        .user_manager
+        .as_ref()
+        .and_then(|manager| manager.active_user_id)
+        .ok_or_else(|| VaultError::SyncNotLoggedIn.to_string())?;
+
+    if state.master_password.is_none() || state.secret_key.is_none() {
+        return Err(VaultError::SyncNotLoggedIn.to_string());
+    }
+
+    let sync_set = state
+        .sync_state
+        .as_ref()
+        .ok_or_else(|| {
+            VaultError::SyncRefused("device-local sync state is unavailable".into()).to_string()
+        })?
+        .scope(&user_id);
+
+    let network = state.network.clone().ok_or_else(|| {
+        VaultError::SyncTransportUnavailable("no network seam".into()).to_string()
+    })?;
+
+    network.start_advertising().map_err(sync_discovery_error)?;
+
+    let peer = match network.discover().map_err(sync_discovery_error) {
+        Ok(peers) => peers
+            .into_iter()
+            .find(|peer| peer.device_id() == peer_device_id),
+        Err(error) => {
+            let _ = network.stop_advertising();
+            return Err(error);
+        }
+    };
+
+    let Some(peer) = peer else {
+        let _ = network.stop_advertising();
+        return Err(VaultError::SyncPeerUnreachable(peer_device_id.to_string()).to_string());
+    };
+
+    let result = (|| -> Result<SyncOutcome, VaultError> {
+        // Borrow only the fields the engine needs; the network and state
+        // store are used again after the sync ends.
+        let ManagerState {
+            vault_manager,
+            user_manager,
+            master_password,
+            secret_key,
+            ..
+        } = &mut *state;
+
+        let vault_manager = vault_manager
+            .as_mut()
+            .ok_or_else(|| VaultError::SyncRefused("vault manager is unavailable".into()))?;
+        let user_manager = user_manager
+            .as_ref()
+            .ok_or_else(|| VaultError::SyncRefused("user manager is unavailable".into()))?;
+        let master_password = master_password
+            .as_deref()
+            .ok_or(VaultError::SyncNotLoggedIn)?;
+        let secret_key = secret_key.as_deref().ok_or(VaultError::SyncNotLoggedIn)?;
+
+        let mut engine = SyncEngine::new(
+            network.as_ref(),
+            vault_manager,
+            user_manager,
+            sync_set,
+            SyncCredentials {
+                master_password,
+                secret_key,
+            },
+        );
+
+        let mut progress = |progress: SyncProgress| {
+            let _ = app.emit("sync-progress", &progress);
+        };
+
+        let start = engine.start_with_peer(&peer, &mut progress)?;
+        let sent = engine.send_offers(start, &mut progress)?;
+        engine.collect(sent, &mut progress)
+    })();
+
+    let _ = network.stop_advertising();
+    let outcome = result.map_err(|error| error.to_string())?;
+    let SyncOutcome { report, pending } = outcome;
+
+    if pending.is_empty() {
+        if let Some(store) = state.sync_state.as_mut() {
+            store
+                .record_sync(&user_id, peer_device_id, Utc::now())
+                .map_err(|error| error.to_string())?;
+        }
+    } else {
+        state.pending_syncs.insert(
+            report.session_id,
+            PendingSync {
+                user_id,
+                conflicts: pending,
+            },
+        );
+    }
+
+    Ok(report)
+}
+
+/// Paired Devices, including this one, with last-sync state per peer.
+#[tauri::command]
+pub fn list_paired_devices(state: AppState) -> Result<Vec<PairedDeviceView>, String> {
+    let state = state.lock().map_err(|e| e.to_string())?;
+    let (_, user_manager) = state.ready()?;
+    let user_id = user_manager
+        .active_user_id
+        .ok_or_else(|| VaultError::SyncNotLoggedIn.to_string())?;
+    let shared = user_manager
+        .get_shared_profile(&user_id)
+        .map_err(|e| e.to_string())?;
+
+    let mut devices = Vec::with_capacity(shared.devices.len());
+    for (device_id, record) in shared.devices.iter() {
+        devices.push(PairedDeviceView {
+            device_id: *device_id,
+            name: record.name.clone(),
+            platform: record.platform.clone(),
+            admitted: !record.is_revoked(),
+            revoked: record.is_revoked(),
+            last_sync_at: state
+                .sync_state
+                .as_ref()
+                .and_then(|store| store.last_sync_at(&user_id, *device_id)),
+            is_this_device: *device_id == user_manager.device_id(),
+        });
+    }
+
+    devices.sort_by_key(|device| (device.revoked, device.name.clone(), device.device_id));
+    Ok(devices)
+}
+
+/// Begin an mDNS discovery session. It is stopped explicitly or when the
+/// process ends; an idle app must not be visible.
+#[tauri::command]
+pub fn start_discovery(state: AppState) -> Result<(), String> {
+    let mut state = state.lock().map_err(|e| e.to_string())?;
+    if state.discovery.is_some() {
+        return Ok(());
+    }
+
+    let network = state.network.clone().ok_or_else(|| {
+        VaultError::SyncTransportUnavailable("no network seam".into()).to_string()
+    })?;
+    let session = DiscoverySession::start(&network).map_err(sync_discovery_error)?;
+    state.discovery = Some(session);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn stop_discovery(state: AppState) -> Result<(), String> {
+    let mut state = state.lock().map_err(|e| e.to_string())?;
+    if let Some(session) = state.discovery.take() {
+        session.finish();
+    }
+    Ok(())
+}
+
+/// Peers currently visible on the local network, marked paired or unknown.
+/// The only fields are the opaque device id, its address, and the flag.
+#[tauri::command]
+pub fn list_discovered_peers(state: AppState) -> Result<Vec<DiscoveredPeerView>, String> {
+    let state = state.lock().map_err(|e| e.to_string())?;
+    let network = state.network.clone().ok_or_else(|| {
+        VaultError::SyncTransportUnavailable("no network seam".into()).to_string()
+    })?;
+
+    let paired = state
+        .user_manager
+        .as_ref()
+        .and_then(|manager| manager.active_user_id)
+        .and_then(|user_id| {
+            state
+                .user_manager
+                .as_ref()
+                .and_then(|manager| manager.get_shared_profile(&user_id).ok())
+        })
+        .map(|shared| {
+            shared
+                .devices
+                .iter()
+                .map(|(device_id, _)| *device_id)
+                .collect::<std::collections::HashSet<_>>()
+        })
+        .unwrap_or_default();
+
+    let peers = network.discover().map_err(sync_discovery_error)?;
+    Ok(peers
+        .into_iter()
+        .map(|peer| DiscoveredPeerView {
+            device_id: peer.device_id(),
+            address: peer.address().to_string(),
+            paired: paired.contains(&peer.device_id()),
+        })
+        .collect())
+}
+
+/// Read the Sync Set with per-Vault syncing state.
+#[tauri::command]
+pub fn get_sync_set(state: AppState) -> Result<SyncSetView, String> {
+    let state = state.lock().map_err(|e| e.to_string())?;
+    let (vault_manager, user_manager) = state.ready()?;
+    let user_id = user_manager
+        .active_user_id
+        .ok_or_else(|| VaultError::SyncNotLoggedIn.to_string())?;
+    let shared = user_manager
+        .get_shared_profile(&user_id)
+        .map_err(|e| e.to_string())?;
+
+    let sync_set = state
+        .sync_state
+        .as_ref()
+        .map(|store| store.sync_set(&user_id, &shared.vaults))
+        .unwrap_or_default();
+    let names: HashMap<VaultId, String> = vault_manager
+        .get_unlocked_vaults()
+        .into_iter()
+        .map(|vault| (vault.id, vault.name))
+        .collect();
+
+    let mut vaults: Vec<SyncSetVaultView> = shared
+        .vaults
+        .ids()
+        .into_iter()
+        .map(|vault_id| SyncSetVaultView {
+            vault_id,
+            name: names.get(&vault_id).cloned(),
+            syncing: sync_set.contains(&vault_id),
+        })
+        .collect();
+    vaults.sort_by_key(|vault| (vault.name.clone(), vault.vault_id));
+
+    Ok(SyncSetView { vaults })
+}
+
+/// Replace the Sync Set with the User's explicit choice. Ids outside the
+/// authoritative registry are refused.
+#[tauri::command]
+pub fn set_sync_set(state: AppState, vault_ids: Vec<String>) -> Result<(), String> {
+    let mut state = state.lock().map_err(|e| e.to_string())?;
+    let (_, user_manager) = state.ready()?;
+    let user_id = user_manager
+        .active_user_id
+        .ok_or_else(|| VaultError::SyncNotLoggedIn.to_string())?;
+    let shared = user_manager
+        .get_shared_profile(&user_id)
+        .map_err(|e| e.to_string())?;
+
+    let mut ids = Vec::with_capacity(vault_ids.len());
+    for value in vault_ids {
+        let vault_id: VaultId = Uuid::parse_str(&value).map_err(|e| e.to_string())?;
+        if !shared.vaults.contains(&vault_id) {
+            return Err(VaultError::SyncRefused(format!(
+                "Vault {vault_id} is not in the shared Vault Registry"
+            ))
+            .to_string());
+        }
+        ids.push(vault_id);
+    }
+
+    state
+        .sync_state
+        .as_mut()
+        .ok_or_else(|| VaultError::SyncRefused("sync state is unavailable".into()).to_string())?
+        .set_sync_set(&user_id, ids)
+        .map_err(|e| e.to_string())
+}
+
+/// Toggle one Vault in the Sync Set. Turning syncing off keeps the local copy
+/// and its contents untouched.
+#[tauri::command]
+pub fn set_vault_syncing(state: AppState, vault_id: String, syncing: bool) -> Result<(), String> {
+    let mut state = state.lock().map_err(|e| e.to_string())?;
+    let (_, user_manager) = state.ready()?;
+    let user_id = user_manager
+        .active_user_id
+        .ok_or_else(|| VaultError::SyncNotLoggedIn.to_string())?;
+    let shared = user_manager
+        .get_shared_profile(&user_id)
+        .map_err(|e| e.to_string())?;
+    let vault_id: VaultId = Uuid::parse_str(&vault_id).map_err(|e| e.to_string())?;
+
+    if !shared.vaults.contains(&vault_id) {
+        return Err(VaultError::SyncRefused(format!(
+            "Vault {vault_id} is not in the shared Vault Registry"
+        ))
+        .to_string());
+    }
+
+    state
+        .sync_state
+        .as_mut()
+        .ok_or_else(|| VaultError::SyncRefused("sync state is unavailable".into()).to_string())?
+        .set_vault_syncing(&user_id, vault_id, syncing, &shared.vaults)
+        .map_err(|e| e.to_string())
+}
+
+/// Apply the User's explicit choice for one field or Vault-metadata Conflict.
+/// Only this command writes a contested value; the sync itself left the local
+/// value in place.
+#[tauri::command]
+pub fn resolve_sync_conflict(
+    state: AppState,
+    session_id: String,
+    vault_id: String,
+    item_id: Option<String>,
+    field_key: String,
+    choice: ConflictChoice,
+) -> Result<ConflictResolutionResult, String> {
+    let mut state = state.lock().map_err(|e| e.to_string())?;
+    let session_id: Uuid = Uuid::parse_str(&session_id).map_err(|e| e.to_string())?;
+    let vault_id: VaultId = Uuid::parse_str(&vault_id).map_err(|e| e.to_string())?;
+    let item_id: Option<crate::ItemId> = item_id
+        .map(|value| Uuid::parse_str(&value).map_err(|e| e.to_string()))
+        .transpose()?;
+
+    let user_id = state
+        .user_manager
+        .as_ref()
+        .and_then(|manager| manager.active_user_id)
+        .ok_or_else(|| VaultError::SyncNotLoggedIn.to_string())?;
+
+    let (scope, is_secret, value) = {
+        let pending = state.pending_syncs.get(&session_id).ok_or_else(|| {
+            VaultError::SyncConflictResolution("this sync session is no longer open".into())
+                .to_string()
+        })?;
+
+        if pending.user_id != user_id {
+            return Err(VaultError::SyncConflictResolution(
+                "this sync session belongs to another User".into(),
+            )
+            .to_string());
+        }
+
+        let conflict = pending
+            .conflicts
+            .iter()
+            .find(|conflict| {
+                if conflict.vault_id != vault_id || conflict.field_key != field_key {
+                    return false;
+                }
+                match (&conflict.scope, item_id) {
+                    (crate::ConflictScope::Item { item_id: owned, .. }, Some(requested)) => {
+                        *owned == requested
+                    }
+                    (crate::ConflictScope::Vault, None) => true,
+                    _ => false,
+                }
+            })
+            .ok_or_else(|| {
+                VaultError::SyncConflictResolution(
+                    "no open conflict matches that Vault and field".into(),
+                )
+                .to_string()
+            })?;
+
+        (
+            conflict.scope.clone(),
+            conflict.is_secret,
+            match choice {
+                ConflictChoice::Local => conflict.local.clone(),
+                ConflictChoice::Remote => conflict.remote.clone(),
+            },
+        )
+    };
+
+    let applied = state
+        .vault_manager
+        .as_mut()
+        .ok_or_else(|| VaultError::SyncRefused("vault manager is unavailable".into()).to_string())?
+        .resolve_conflict_field(vault_id, &scope, &field_key, is_secret, value.as_ref())
+        .map_err(|e| e.to_string())?;
+
+    if !applied {
+        return Err(VaultError::SyncConflictResolution(
+            "the contested field no longer exists".into(),
+        )
+        .to_string());
+    }
+
+    let pending = state
+        .pending_syncs
+        .get_mut(&session_id)
+        .expect("checked above");
+    pending.conflicts.retain(|conflict| {
+        !(conflict.vault_id == vault_id
+            && conflict.field_key == field_key
+            && match (&conflict.scope, item_id) {
+                (crate::ConflictScope::Item { item_id: owned, .. }, Some(requested)) => {
+                    *owned == requested
+                }
+                (crate::ConflictScope::Vault, None) => true,
+                _ => false,
+            })
+    });
+    let remaining = pending.conflicts.len();
+    if remaining == 0 {
+        state.pending_syncs.remove(&session_id);
+    }
+
+    Ok(ConflictResolutionResult { remaining })
+}
+
+/// Local `.vault` files absent from the shared Vault Registry. They are never
+/// auto-adopted: adoption shares the Vault's entire contents.
+#[tauri::command]
+pub fn list_unregistered_vaults(state: AppState) -> Result<Vec<UnregisteredVaultView>, String> {
+    let state = state.lock().map_err(|e| e.to_string())?;
+    let (vault_manager, user_manager) = state.ready()?;
+    let user_id = user_manager
+        .active_user_id
+        .ok_or_else(|| VaultError::SyncNotLoggedIn.to_string())?;
+    let shared = user_manager
+        .get_shared_profile(&user_id)
+        .map_err(|e| e.to_string())?;
+
+    Ok(vault_manager
+        .unregistered_vault_files(&shared.vaults)
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .map(|vault_id| UnregisteredVaultView {
+            vault_id,
+            file_name: format!("{vault_id}.vault"),
+        })
+        .collect())
+}
+
+/// Explicitly adopt an unregistered local Vault file. Adoption inserts it
+/// into the authoritative registry *and* this Device's Sync Set, because
+/// adopting it shares it with the other Devices.
+#[tauri::command]
+pub fn adopt_vault(state: AppState, vault_id: String) -> Result<(), String> {
+    let mut state = state.lock().map_err(|e| e.to_string())?;
+    let (vault_manager, user_manager) = state.ready_mut()?;
+    let user_id = user_manager
+        .active_user_id
+        .ok_or_else(|| VaultError::SyncNotLoggedIn.to_string())?;
+    let vault_id: VaultId = Uuid::parse_str(&vault_id).map_err(|e| e.to_string())?;
+
+    let shared = user_manager
+        .get_shared_profile(&user_id)
+        .map_err(|e| e.to_string())?;
+    if shared.vaults.contains(&vault_id) {
+        return Err(
+            VaultError::SyncRefused(format!("Vault {vault_id} is already registered")).to_string(),
+        );
+    }
+    if !vault_manager.has_vault_file(vault_id) {
+        return Err(VaultError::NotFound(vault_id.to_string()).to_string());
+    }
+
+    user_manager
+        .add_vault_to_user(vault_id)
+        .map_err(|e| e.to_string())?;
+
+    let registry = user_manager
+        .get_shared_profile(&user_id)
+        .map_err(|e| e.to_string())?
+        .vaults;
+
+    state
+        .sync_state
+        .as_mut()
+        .ok_or_else(|| VaultError::SyncRefused("sync state is unavailable".into()).to_string())?
+        .adopt(&user_id, vault_id, &registry)
+        .map_err(|e| e.to_string())
+}
+
+/// Revoke a lost Device with the existing signed registry operation. The
+/// revocation travels on the next sync with every other Device.
+#[tauri::command]
+pub fn revoke_device(state: AppState, device_id: String) -> Result<(), String> {
+    let state = state.lock().map_err(|e| e.to_string())?;
+    let (_, user_manager) = state.ready()?;
+    let device_id: crate::DeviceId = Uuid::parse_str(&device_id).map_err(|e| e.to_string())?;
+
+    user_manager
+        .revoke_device(device_id, Utc::now())
         .map_err(|e| e.to_string())
 }
 

@@ -10,6 +10,7 @@ mod models;
 mod network;
 mod pairing;
 mod registry;
+mod sync;
 mod user_manager;
 mod vault_manager;
 
@@ -23,6 +24,7 @@ pub use models::*;
 pub use network::*;
 pub use pairing::*;
 pub use registry::*;
+pub use sync::*;
 use tauri::Manager;
 
 use crate::commands::ManagerState;
@@ -65,6 +67,19 @@ pub fn run() {
             commands::cancel_pairing,
             commands::join_pairing,
             commands::complete_pairing,
+            // Devices and sync
+            commands::sync_with_device,
+            commands::list_paired_devices,
+            commands::start_discovery,
+            commands::stop_discovery,
+            commands::list_discovered_peers,
+            commands::get_sync_set,
+            commands::set_sync_set,
+            commands::set_vault_syncing,
+            commands::resolve_sync_conflict,
+            commands::list_unregistered_vaults,
+            commands::adopt_vault,
+            commands::revoke_device,
             // Vaults
             commands::list_vault_ids,
             commands::get_unlocked_vaults,

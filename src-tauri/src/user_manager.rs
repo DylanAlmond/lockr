@@ -424,6 +424,19 @@ impl UserManager {
         device_id: DeviceId,
         now: DateTime<Utc>,
     ) -> Result<PairingMessage, VaultError> {
+        self.approve_pairing_with_sync_set(device_id, None, now)
+    }
+
+    /// Approve the joining Device and include the source Device's pre-checked
+    /// Sync Set in the one-time transfer. Ids outside the shared Vault
+    /// Registry are dropped: the registry is authoritative. `None` keeps the
+    /// default (all registry Vaults) for the joining Device.
+    pub fn approve_pairing_with_sync_set(
+        &mut self,
+        device_id: DeviceId,
+        sync_set: Option<Vec<VaultId>>,
+        now: DateTime<Utc>,
+    ) -> Result<PairingMessage, VaultError> {
         let host = self
             .pairing_host
             .as_mut()
@@ -449,10 +462,17 @@ impl UserManager {
         shared.devices.admit(record)?;
         self.save_shared_profile(&shared)?;
 
+        let sync_set = sync_set.map(|ids| {
+            ids.into_iter()
+                .filter(|vault_id| shared.vaults.contains(vault_id))
+                .collect()
+        });
+
         Ok(PairingMessage::Transfer(PairingTransfer {
             schema_version,
             shared_profile: shared,
             secret_key,
+            sync_set,
         }))
     }
 
@@ -741,6 +761,33 @@ impl UserManager {
             self.save_shared_profile(&shared)?;
         }
         Ok(())
+    }
+
+    /// Revoke a lost Device from this Device. Signed by this Device's session
+    /// signing key; the registry keeps the record forever and revocation wins
+    /// over any older copy a peer may still hold.
+    pub fn revoke_device(&self, device_id: DeviceId, now: DateTime<Utc>) -> Result<(), VaultError> {
+        let user_id = self
+            .active_user_id
+            .as_ref()
+            .ok_or_else(|| VaultError::UserNotFound("No user is active".into()))?;
+        let keypair = self.session_keypair.as_ref().ok_or_else(|| {
+            VaultError::DeviceRegistry(
+                "this Device has no signing key for the session; sign in again".into(),
+            )
+        })?;
+
+        if device_id == self.device_id {
+            return Err(VaultError::DeviceRegistry(
+                "a Device cannot revoke itself".into(),
+            ));
+        }
+
+        let mut shared = self.get_shared_profile(user_id)?;
+        shared
+            .devices
+            .revoke(&device_id, now, &self.device_id, keypair)?;
+        self.save_shared_profile(&shared)
     }
 
     // Delete the current user

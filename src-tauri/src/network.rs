@@ -15,7 +15,7 @@ use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -131,6 +131,12 @@ impl DiscoveredPeer {
     pub fn advertisement(&self) -> &PeerAdvertisement {
         &self.advertisement
     }
+
+    /// The opaque address, for the one place that may display it: the
+    /// discovered-peer list. The sync engine never reads it.
+    pub(crate) fn address(&self) -> &str {
+        self.endpoint.as_str()
+    }
 }
 
 /// An already-encrypted vault file, opaque to the engine and to discovery.
@@ -211,6 +217,28 @@ impl fmt::Debug for RegistryState {
     }
 }
 
+/// The scope a Device brings to one sync: the Vault ids it participates in,
+/// plus the shared registries that say which Vaults and Devices exist.
+///
+/// It carries identities only. Vault names, item content, and secrets live
+/// inside the encrypted vault files and never appear here. Exchanging scope
+/// before any vault blob is what lets both sides agree on the intersection
+/// without one side offering a Vault the other does not want.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScopeState {
+    pub vault_ids: Vec<VaultId>,
+    pub registries: crate::SharedRegistries,
+}
+
+impl ScopeState {
+    pub fn new(vault_ids: Vec<VaultId>, registries: crate::SharedRegistries) -> Self {
+        Self {
+            vault_ids,
+            registries,
+        }
+    }
+}
+
 /// Everything that may cross an authenticated peer channel. Vault content is
 /// always already encrypted; there is no message for plaintext vault content.
 #[derive(Clone, PartialEq, Eq)]
@@ -220,6 +248,9 @@ pub enum SyncMessage {
         blob: EncryptedVaultBlob,
     },
     Registry(RegistryState),
+
+    /// The sender's Sync Set and shared registries, sent before any blob.
+    Scope(ScopeState),
 
     /// A pairing exchange. Valid only on a channel a pairing secret
     /// authenticated; it is the one place a secret key legitimately travels.
@@ -237,6 +268,10 @@ impl fmt::Debug for SyncMessage {
                 .field("blob", blob)
                 .finish(),
             Self::Registry(state) => f.debug_tuple("Registry").field(state).finish(),
+            Self::Scope(scope) => f
+                .debug_struct("Scope")
+                .field("vault_ids", &scope.vault_ids)
+                .finish_non_exhaustive(),
             Self::Pairing(message) => f.debug_tuple("Pairing").field(message).finish(),
             Self::Complete => f.write_str("Complete"),
         }
@@ -260,6 +295,7 @@ const KIND_VAULT: u8 = 1;
 const KIND_REGISTRY: u8 = 2;
 const KIND_COMPLETE: u8 = 3;
 const KIND_PAIRING: u8 = 4;
+const KIND_SCOPE: u8 = 5;
 
 /// Ceiling on a single frame, so a damaged length field cannot make the app
 /// allocate without bound. Whole encrypted vault files are far smaller.
@@ -274,6 +310,12 @@ pub(crate) fn encode_frame(message: &SyncMessage) -> Result<Vec<u8>, NetworkErro
             (KIND_VAULT, payload)
         }
         SyncMessage::Registry(state) => (KIND_REGISTRY, state.as_bytes().to_vec()),
+        SyncMessage::Scope(scope) => (
+            KIND_SCOPE,
+            serde_json::to_vec(scope).map_err(|err| {
+                NetworkError::MalformedFrame(format!("scope frame cannot be encoded: {err}"))
+            })?,
+        ),
         SyncMessage::Pairing(message) => (
             KIND_PAIRING,
             serde_json::to_vec(message).map_err(|err| {
@@ -346,6 +388,12 @@ fn decode_frame(frame: &[u8]) -> Result<SyncMessage, NetworkError> {
         KIND_REGISTRY => Ok(SyncMessage::Registry(RegistryState::from_bytes(
             payload.to_vec(),
         ))),
+        KIND_SCOPE => {
+            let scope = serde_json::from_slice(payload).map_err(|err| {
+                NetworkError::MalformedFrame(format!("scope frame cannot be decoded: {err}"))
+            })?;
+            Ok(SyncMessage::Scope(scope))
+        }
         KIND_PAIRING => {
             let message = serde_json::from_slice(payload).map_err(|err| {
                 NetworkError::MalformedFrame(format!("pairing frame cannot be decoded: {err}"))
