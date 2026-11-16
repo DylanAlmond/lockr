@@ -14,7 +14,7 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::device::{verify_signature, DeviceKeypair};
-use crate::{DeviceId, VaultError, VaultId};
+use crate::{ClockOrder, DeviceId, ItemId, VaultError, VaultId, VersionVector};
 
 const ADMISSION_DOMAIN: &str = "lockr.device-admission.v1";
 const REVOCATION_DOMAIN: &str = "lockr.device-revocation.v1";
@@ -53,6 +53,15 @@ pub struct DeviceRecord {
     /// Base64 signature over the revocation fields, by `revoked_by`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revocation_signature: Option<String>,
+
+    /// The Tombstone clocks this Device has applied, keyed by Item id.
+    ///
+    /// This is the Device's Acknowledgement, published here so a peer can
+    /// decide when a Tombstone may be forgotten. It is deliberately outside
+    /// the signed admission fields: it changes on every sync while identity
+    /// never does, and a Device may only ever publish its own entry.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub acknowledgements: BTreeMap<ItemId, VersionVector>,
 }
 
 impl DeviceRecord {
@@ -79,9 +88,21 @@ impl DeviceRecord {
             revoked_by: None,
             signature: String::new(),
             revocation_signature: None,
+            acknowledgements: BTreeMap::new(),
         };
         record.signature = signing_key.sign(&admission_payload(&record));
         record
+    }
+
+    /// Whether this Device has published an Acknowledgement covering
+    /// `clock` for the Tombstone named by `item_id`.
+    pub fn has_acknowledged(&self, item_id: &ItemId, clock: &VersionVector) -> bool {
+        self.acknowledgements.get(item_id).is_some_and(|applied| {
+            matches!(
+                applied.compare(clock),
+                ClockOrder::Dominates | ClockOrder::Equal
+            )
+        })
     }
 
     /// Whether this Device has been barred from syncing.
@@ -180,6 +201,57 @@ impl DeviceRegistry {
     /// Whether the registry currently bars this Device from syncing.
     pub fn is_revoked(&self, device_id: &DeviceId) -> bool {
         self.get(device_id).is_some_and(DeviceRecord::is_revoked)
+    }
+
+    /// Publish Tombstone clocks this Device has applied.
+    ///
+    /// Acknowledgements only ever advance: a stale copy or a replay cannot
+    /// narrow one. A revoked Device cannot publish, and an unknown Device is
+    /// a no-op — it cannot sync, so it has nothing to acknowledge. Returns
+    /// whether the registry changed.
+    pub fn acknowledge(
+        &mut self,
+        device_id: &DeviceId,
+        applied: impl IntoIterator<Item = (ItemId, VersionVector)>,
+    ) -> bool {
+        let Some(record) = self.devices.get_mut(device_id) else {
+            return false;
+        };
+        if record.is_revoked() {
+            return false;
+        }
+
+        let mut changed = false;
+        for (item_id, clock) in applied {
+            match record.acknowledgements.get_mut(&item_id) {
+                Some(existing) => {
+                    let before = existing.clone();
+                    existing.merge(&clock);
+                    changed |= *existing != before;
+                }
+                None => {
+                    record.acknowledgements.insert(item_id, clock);
+                    changed = true;
+                }
+            }
+        }
+        changed
+    }
+
+    /// Whether every currently admitted Device has published an
+    /// Acknowledgement covering this Tombstone's clock.
+    ///
+    /// Revoked Devices are excluded: they can never sync again, so waiting
+    /// for them would retain the Tombstone forever. A Device that is admitted
+    /// but silent blocks compaction indefinitely, which is intended.
+    pub fn is_acknowledged(&self, item_id: &ItemId, clock: &VersionVector) -> bool {
+        let mut admitted = self.devices.values().filter(|record| !record.is_revoked());
+        let Some(first) = admitted.next() else {
+            return false;
+        };
+
+        first.has_acknowledged(item_id, clock)
+            && admitted.all(|record| record.has_acknowledged(item_id, clock))
     }
 
     /// Add a record after verifying its signatures. An unsigned or forged
@@ -448,7 +520,9 @@ fn merge_records(first: &DeviceRecord, second: &DeviceRecord) -> Result<DeviceRe
         )));
     }
 
-    Ok(match (first.revoked_at, second.revoked_at) {
+    let acknowledged = merge_acknowledgements(&first.acknowledgements, &second.acknowledgements);
+
+    let mut chosen = match (first.revoked_at, second.revoked_at) {
         (Some(first_at), Some(second_at)) => {
             let order = (
                 first_at,
@@ -469,7 +543,28 @@ fn merge_records(first: &DeviceRecord, second: &DeviceRecord) -> Result<DeviceRe
         (Some(_), None) => first.clone(),
         (None, Some(_)) => second.clone(),
         (None, None) => first.clone(),
-    })
+    };
+    chosen.acknowledgements = acknowledged;
+    Ok(chosen)
+}
+
+/// Pointwise union of two copies of one Device's acknowledgements. Only the
+/// owning Device publishes them, so a copy can lag but never disagree; max
+/// per Item keeps the merge commutative anyway.
+fn merge_acknowledgements(
+    first: &BTreeMap<ItemId, VersionVector>,
+    second: &BTreeMap<ItemId, VersionVector>,
+) -> BTreeMap<ItemId, VersionVector> {
+    let mut merged = first.clone();
+    for (item_id, clock) in second {
+        match merged.get_mut(item_id) {
+            Some(existing) => existing.merge(clock),
+            None => {
+                merged.insert(*item_id, clock.clone());
+            }
+        }
+    }
+    merged
 }
 
 /// What remains of a deleted Vault: its identity, when it was deleted, and
@@ -1415,6 +1510,151 @@ mod tests {
         assert!(registry.remove(&first));
         assert!(!registry.remove(&first));
         assert!(!registry.contains(&first));
+    }
+
+    #[test]
+    fn test_a_tombstone_is_acknowledged_only_when_every_admitted_device_covers_its_clock() {
+        let root = Uuid::from_u128(1);
+        let laptop = Uuid::from_u128(2);
+        let phone = Uuid::from_u128(3);
+        let root_key = DeviceKeypair::generate();
+        let laptop_key = DeviceKeypair::generate();
+        let phone_key = DeviceKeypair::generate();
+
+        let mut registry = root_registry(root, &root_key);
+        for (id, key) in [(laptop, &laptop_key), (phone, &phone_key)] {
+            registry
+                .admit(record(id, key.public_key(), root, at(2_000), &root_key))
+                .unwrap();
+        }
+
+        let item = Uuid::new_v4();
+        let clock = VersionVector::from_version(root, 2);
+
+        assert!(
+            !registry.is_acknowledged(&item, &clock),
+            "no Device has acknowledged anything yet"
+        );
+
+        assert!(registry.acknowledge(&root, [(item, clock.clone())]));
+        assert!(
+            !registry.is_acknowledged(&item, &clock),
+            "two admitted Devices are still unacknowledged"
+        );
+
+        assert!(registry.acknowledge(&laptop, [(item, clock.clone())]));
+        assert!(!registry.is_acknowledged(&item, &clock));
+
+        assert!(registry.acknowledge(&phone, [(item, clock.clone())]));
+        assert!(
+            registry.is_acknowledged(&item, &clock),
+            "every admitted Device now covers the Tombstone's clock"
+        );
+
+        // Publishing the same acknowledgement again changes nothing.
+        assert!(!registry.acknowledge(&phone, [(item, clock.clone())]));
+
+        // A clock strengthened by a later concurrent deletion is no longer
+        // covered by acknowledgements of the earlier one.
+        let strengthened = VersionVector::from_version(root, 3);
+        assert!(!registry.is_acknowledged(&item, &strengthened));
+    }
+
+    #[test]
+    fn test_acknowledgements_merge_pointwise_and_survive_a_roundtrip() {
+        let root = Uuid::from_u128(1);
+        let laptop = Uuid::from_u128(2);
+        let root_key = DeviceKeypair::generate();
+        let laptop_key = DeviceKeypair::generate();
+
+        let mut registry = root_registry(root, &root_key);
+        registry
+            .admit(record(
+                laptop,
+                laptop_key.public_key(),
+                root,
+                at(2_000),
+                &root_key,
+            ))
+            .unwrap();
+
+        let item = Uuid::new_v4();
+        let first = VersionVector::from_version(root, 1);
+        let second = VersionVector::from_version(root, 2);
+
+        let mut earlier = registry.clone();
+        earlier.acknowledge(&root, [(item, first)]);
+        let mut later = registry.clone();
+        later.acknowledge(&root, [(item, second.clone())]);
+
+        let merged = earlier.merge(&later).unwrap();
+        assert_eq!(
+            merged.get(&root).unwrap().acknowledgements.get(&item),
+            Some(&second),
+            "acknowledgements advance, never regress"
+        );
+        assert_eq!(merged, later.merge(&earlier).unwrap());
+        merged.verify().unwrap();
+
+        // An acknowledgement is published state, not signed admission data:
+        // it must survive the wire form without breaking verification.
+        let bytes = serde_json::to_vec(&merged).unwrap();
+        let parsed: DeviceRegistry = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(parsed, merged);
+        parsed.verify().unwrap();
+    }
+
+    #[test]
+    fn test_a_revoked_device_can_neither_block_nor_trigger_compaction() {
+        let root = Uuid::from_u128(1);
+        let laptop = Uuid::from_u128(2);
+        let lost = Uuid::from_u128(3);
+        let root_key = DeviceKeypair::generate();
+        let laptop_key = DeviceKeypair::generate();
+        let lost_key = DeviceKeypair::generate();
+
+        let mut registry = root_registry(root, &root_key);
+        for (id, key) in [(laptop, &laptop_key), (lost, &lost_key)] {
+            registry
+                .admit(record(id, key.public_key(), root, at(2_000), &root_key))
+                .unwrap();
+        }
+
+        let item = Uuid::new_v4();
+        let clock = VersionVector::from_version(root, 2);
+        registry.acknowledge(&root, [(item, clock.clone())]);
+        registry.acknowledge(&laptop, [(item, clock.clone())]);
+        registry.revoke(&lost, at(3_000), &root, &root_key).unwrap();
+
+        assert!(
+            registry.is_acknowledged(&item, &clock),
+            "a revoked Device can never sync again, so its silence must not block compaction"
+        );
+        assert!(
+            !registry.acknowledge(&lost, [(item, clock.clone())]),
+            "a revoked Device cannot publish an acknowledgement"
+        );
+
+        let other = Uuid::new_v4();
+        assert!(
+            !registry.is_acknowledged(&other, &clock),
+            "one admitted Device has not acknowledged the other Tombstone"
+        );
+    }
+
+    #[test]
+    fn test_acknowledging_from_an_unknown_device_is_a_no_op() {
+        let root = Uuid::from_u128(1);
+        let root_key = DeviceKeypair::generate();
+        let mut registry = root_registry(root, &root_key);
+
+        let changed = registry.acknowledge(
+            &Uuid::from_u128(99),
+            [(Uuid::new_v4(), VersionVector::from_version(root, 1))],
+        );
+
+        assert!(!changed);
+        assert_eq!(registry, root_registry(root, &root_key));
     }
 
     #[test]
