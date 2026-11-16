@@ -855,12 +855,6 @@ fn run_await_pairing_request(
                                 active.channel = Some(channel);
                                 return Ok(prompt);
                             }
-                            Err(VaultError::PairingRateLimited) => {
-                                // Two joins arrived too close together. The
-                                // offer is still live; drop this channel and
-                                // keep listening rather than burning it.
-                                channel.close();
-                            }
                             Err(error) => {
                                 channel.close();
                                 state.teardown_pairing_for(&claim);

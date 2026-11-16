@@ -38,9 +38,6 @@ pub enum VaultError {
     #[error("Pairing refused: incompatible vault schema (local {local}, remote {remote})")]
     PairingSchemaMismatch { local: u32, remote: u32 },
 
-    #[error("Pairing refused: too many attempts, start again")]
-    PairingRateLimited,
-
     #[error("No pairing is in progress")]
     PairingNotStarted,
 
@@ -131,7 +128,6 @@ impl VaultError {
             Self::DeviceRegistry(_) => "device.registry",
             Self::PairingSecretStale => "pairing.secret_stale",
             Self::PairingSchemaMismatch { .. } => "pairing.schema_mismatch",
-            Self::PairingRateLimited => "pairing.rate_limited",
             Self::PairingNotStarted => "pairing.not_started",
             Self::Pairing(_) => "pairing.failed",
             Self::SyncNotLoggedIn => "sync.not_logged_in",
