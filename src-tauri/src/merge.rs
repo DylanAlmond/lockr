@@ -99,6 +99,17 @@ impl Conflict {
     pub fn is_vault_metadata(&self) -> bool {
         self.scope == ConflictScope::Vault
     }
+
+    /// Mark which side, if any, was written by `local_device`.
+    ///
+    /// Merge itself stays device-agnostic and canonical: the same two copies
+    /// produce the same report on either side. This is applied after the merge,
+    /// when the Device surfacing the Conflict is known.
+    pub(crate) fn identify_local_side(&mut self, local_device: DeviceId) {
+        for side in &mut self.sides {
+            side.is_local = side.device == local_device;
+        }
+    }
 }
 
 /// The owner of a contested field.
@@ -124,6 +135,13 @@ pub struct ConflictSide {
 
     /// That Device's counter for this field.
     pub counter: u64,
+
+    /// Whether this side was written by the Device reporting the Conflict.
+    ///
+    /// At most one side is local. A Conflict whose two writers are both other
+    /// Devices has no local side, and the prompt must not guess which hidden
+    /// value this Device holds.
+    pub is_local: bool,
 
     /// The non-secret value, as JSON. Always `None` for secret fields.
     pub value: Option<Value>,
@@ -212,11 +230,13 @@ fn merge_vault_field(
     let left_side = ConflictSide {
         device: left_version.device,
         counter: left_version.counter,
+        is_local: false,
         value: Some(Value::String(left_value.to_string())),
     };
     let right_side = ConflictSide {
         device: right_version.device,
         counter: right_version.counter,
+        is_local: false,
         value: Some(Value::String(right_value.to_string())),
     };
 
@@ -811,11 +831,13 @@ fn merge_live_items(
             ConflictSide {
                 device: left_version.device,
                 counter: left_version.counter,
+                is_local: false,
                 value: Some(Value::String(kind_tag(left_kind).to_string())),
             },
             ConflictSide {
                 device: right_version.device,
                 counter: right_version.counter,
+                is_local: false,
                 value: Some(Value::String(kind_tag(right_kind).to_string())),
             },
         ];
@@ -1112,6 +1134,7 @@ fn conflict_side(state: &FieldState, is_secret: bool) -> ConflictSide {
     ConflictSide {
         device: state.version.device,
         counter: state.version.counter,
+        is_local: false,
         value: if is_secret {
             None
         } else {
@@ -1481,6 +1504,57 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&report.merged).unwrap(),
             serde_json::to_value(&reverse.merged).unwrap()
+        );
+    }
+
+    #[test]
+    fn test_identifying_the_local_side_marks_exactly_one_writer() {
+        let (base, item_id, owner) = base_fixture();
+        let other = device(2);
+
+        let mut left = base.clone();
+        write_display_name(&mut left, item_id, owner, "Left name");
+
+        let mut right = base.clone();
+        write_display_name(&mut right, item_id, other, "Right name");
+
+        let report = expect_conflicts(merge_vaults(&left, &right));
+        let mut conflict = report.conflicts[0].clone();
+        assert!(
+            conflict.sides.iter().all(|side| !side.is_local),
+            "merge stays device-agnostic; the sync layer marks the local side"
+        );
+
+        conflict.identify_local_side(owner);
+        let local: Vec<&ConflictSide> =
+            conflict.sides.iter().filter(|side| side.is_local).collect();
+        assert_eq!(
+            local.len(),
+            1,
+            "a genuine two-sided conflict has one local side"
+        );
+        assert_eq!(local[0].device, owner);
+    }
+
+    #[test]
+    fn test_a_conflict_between_two_other_devices_has_no_local_side() {
+        let (base, item_id, owner) = base_fixture();
+        let other = device(2);
+        let this_device = device(3);
+
+        let mut left = base.clone();
+        write_display_name(&mut left, item_id, owner, "Left name");
+
+        let mut right = base.clone();
+        write_display_name(&mut right, item_id, other, "Right name");
+
+        let report = expect_conflicts(merge_vaults(&left, &right));
+        let mut conflict = report.conflicts[0].clone();
+        conflict.identify_local_side(this_device);
+
+        assert!(
+            conflict.sides.iter().all(|side| !side.is_local),
+            "a conflict wholly written by other Devices has no local side"
         );
     }
 

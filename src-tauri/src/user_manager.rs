@@ -649,6 +649,14 @@ impl UserManager {
         Ok(())
     }
 
+    /// The shared profile's path for a User.
+    ///
+    /// Exposed so a long-lived network session can re-read the Device Registry
+    /// for each connection instead of holding the view it started with.
+    pub fn shared_profile_path(&self, id: &UserId) -> PathBuf {
+        self.shared_path(id)
+    }
+
     fn load_shared_profile(&self, id: &UserId) -> Result<SharedProfile, VaultError> {
         let path = self.shared_path(id);
         if !path.exists() {
