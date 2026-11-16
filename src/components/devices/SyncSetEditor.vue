@@ -3,6 +3,7 @@ import { computed, markRaw, ref, watch } from 'vue';
 import { TriangleAlert, Upload } from '@lucide/vue';
 import Button from '../ui/Button.vue';
 import AlertModal from '../ui/AlertModal.vue';
+import VaultRemovalActions from './VaultRemovalActions.vue';
 import { useModal } from '../../composables/useModal';
 import { useSync } from '../../composables/useSync';
 import { useVault } from '../../composables/useVault';
@@ -249,55 +250,15 @@ function confirmAdopt(vault: UnregisteredVault) {
         </p>
       </header>
 
-      <article v-for="vault in vaults" :key="`removal-${vault.vault_id}`" class="removal-vault">
-        <header class="removal-vault-header">
-          <strong>{{ vaultLabel(vault) }}</strong>
-          <span class="sync-indicator" :class="{ 'sync-indicator--off': !vault.syncing }">
-            {{ vault.syncing ? 'In the Sync Set' : 'Not syncing' }}
-          </span>
-        </header>
-
-        <div class="removal-grid">
-          <section class="removal-card removal-card--stop">
-            <h4>Stop syncing</h4>
-            <p>Keep the Vault here. It stops travelling and its copies may drift.</p>
-            <Button
-              variant="outline"
-              size="xs"
-              :disabled="busy || !vault.syncing"
-              @click="confirmStopSyncing(vault)"
-            >
-              Stop syncing
-            </Button>
-          </section>
-
-          <section class="removal-card removal-card--remove">
-            <h4>Remove from this Device</h4>
-            <p>Delete this Device’s copy only. Other Devices keep theirs; no deletion travels.</p>
-            <Button
-              variant="outline"
-              size="xs"
-              :disabled="busy"
-              @click="confirmRemoveLocal(vault)"
-            >
-              Remove local copy
-            </Button>
-          </section>
-
-          <section class="removal-card removal-card--delete">
-            <h4>Delete everywhere</h4>
-            <p>Record a deletion that travels to every Device. The copy remains only as trash.</p>
-            <Button
-              variant="danger"
-              size="xs"
-              :disabled="busy"
-              @click="confirmDeleteEverywhere(vault)"
-            >
-              Delete everywhere
-            </Button>
-          </section>
-        </div>
-      </article>
+      <VaultRemovalActions
+        v-for="vault in vaults"
+        :key="`removal-${vault.vault_id}`"
+        :vault="vault"
+        :busy="busy"
+        @stop-syncing="confirmStopSyncing(vault)"
+        @remove-local="confirmRemoveLocal(vault)"
+        @delete-everywhere="confirmDeleteEverywhere(vault)"
+      />
     </section>
 
     <section v-if="unregistered.length > 0" class="unregistered-section">
@@ -330,209 +291,4 @@ function confirmAdopt(vault: UnregisteredVault) {
   </section>
 </template>
 
-<style scoped>
-.sync-set-editor {
-  display: flex;
-  flex-direction: column;
-  gap: 1rem;
-}
-
-.section-header {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 1rem;
-
-  h2 {
-    font-family: var(--font-geo);
-    font-size: 1.125rem;
-    font-weight: 500;
-  }
-}
-
-.section-hint {
-  margin-top: 0.25rem;
-  color: var(--color-text-muted);
-  font-size: 0.8125rem;
-  line-height: 1.4;
-}
-
-.vault-selection-list {
-  display: flex;
-  flex-direction: column;
-  border: 1px solid var(--color-border);
-  border-radius: 0.625rem;
-  overflow: hidden;
-  list-style: none;
-}
-
-.vault-check {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 1rem;
-  padding: 0.75rem 1rem;
-  background: var(--color-bg);
-
-  & + & {
-    border-top: 1px solid var(--color-border);
-  }
-
-  label {
-    display: flex;
-    align-items: center;
-    gap: 0.625rem;
-    flex: 1;
-    cursor: pointer;
-  }
-
-  input {
-    width: 1rem;
-    height: 1rem;
-    accent-color: var(--color-accent);
-    cursor: pointer;
-  }
-}
-
-.vault-name {
-  font-size: 0.875rem;
-}
-
-.sync-indicator {
-  padding: 0.125rem 0.5rem;
-  border-radius: 999px;
-  background: var(--color-accent-hover);
-  color: var(--color-accent);
-  font-size: 0.6875rem;
-  white-space: nowrap;
-}
-
-.sync-indicator--off {
-  background: var(--color-hover);
-  color: var(--color-text-muted);
-}
-
-.re-enable-warning {
-  color: hsl(30 60% 32%);
-  font-size: 0.6875rem;
-  line-height: 1.3;
-  max-width: 14rem;
-}
-
-.removal-section,
-.unregistered-section {
-  display: flex;
-  flex-direction: column;
-  gap: 0.75rem;
-
-  h3 {
-    display: flex;
-    align-items: center;
-    gap: 0.375rem;
-    font-family: var(--font-geo);
-    font-size: 1rem;
-    font-weight: 500;
-  }
-}
-
-.removal-vault {
-  display: flex;
-  flex-direction: column;
-  gap: 0.625rem;
-  padding: 0.875rem;
-  border: 1px solid var(--color-border);
-  border-radius: 0.625rem;
-}
-
-.removal-vault-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 1rem;
-  font-size: 0.875rem;
-}
-
-.removal-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr));
-  gap: 0.625rem;
-}
-
-.removal-card {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 0.5rem;
-  padding: 0.75rem;
-  border-radius: 0.5rem;
-
-  h4 {
-    font-size: 0.8125rem;
-    font-weight: 600;
-  }
-
-  p {
-    flex: 1;
-    font-size: 0.75rem;
-    line-height: 1.4;
-  }
-}
-
-.removal-card--stop {
-  background: var(--color-bg-nav);
-  border: 1px solid var(--color-border);
-  color: var(--color-text-secondary);
-}
-
-.removal-card--remove {
-  background: hsl(38 90% 97%);
-  border: 1px solid hsl(38 80% 82%);
-  color: hsl(30 55% 28%);
-}
-
-.removal-card--delete {
-  background: hsl(0 70% 97%);
-  border: 1px solid hsl(0 70% 85%);
-  color: hsl(0 60% 32%);
-}
-
-.unregistered-list {
-  display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
-  list-style: none;
-
-  li {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 1rem;
-    padding: 0.625rem 0.75rem;
-    border: 1px solid var(--color-border);
-    border-radius: 0.5rem;
-  }
-
-  code {
-    overflow-wrap: anywhere;
-    font-size: 0.8125rem;
-  }
-}
-
-.empty-state {
-  padding: 1rem;
-  border: 1px dashed var(--color-border);
-  border-radius: 0.5rem;
-  color: var(--color-text-muted);
-  font-size: 0.875rem;
-}
-
-.error-text {
-  color: var(--color-red);
-  font-size: 0.8125rem;
-}
-
-.outcome {
-  color: var(--color-green);
-  font-size: 0.8125rem;
-}
-</style>
+<style scoped src="./SyncSetEditor.css"></style>

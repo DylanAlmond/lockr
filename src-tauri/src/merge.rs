@@ -27,8 +27,8 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::{
-    allowed_secret_keys, item_field_keys, ClockOrder, DeviceId, FieldVersion, ItemId, ItemKind,
-    ItemSecrets, SecretField, Vault, VaultId, VaultItem, VersionVector,
+    allowed_secret_keys, item_field_keys, kind_fields, ClockOrder, DeviceId, FieldVersion,
+    ItemId, ItemKind, ItemSecrets, SecretField, Vault, VaultId, VaultItem, VersionVector,
 };
 
 /// Why two vault copies cannot be merged.
@@ -149,23 +149,7 @@ pub struct ConflictSide {
 
 /// A field value as it exists in one vault copy. Shared with Combine, which
 /// needs the same field-key read/write surface as merge.
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) enum FieldValue {
-    /// An optional text field; `None` means "not set".
-    Text(Option<String>),
-
-    /// A required text field.
-    Plain(String),
-
-    Bool(bool),
-
-    Tags(Vec<String>),
-
-    Number(u64),
-
-    /// A secret value. It never leaves the backend through a `Conflict`.
-    Secret(String),
-}
+pub(crate) use crate::models::FieldValue;
 
 impl FieldValue {
     pub(crate) fn conflict_value(&self) -> Option<Value> {
@@ -1163,36 +1147,10 @@ pub(crate) fn read_item_field(item: &VaultItem, key: &str) -> Option<FieldValue>
         "color" => Some(FieldValue::Plain(item.color.clone())),
         _ => {
             let kind = item.kind.as_ref()?;
-            match kind {
-                ItemKind::Account(data) => match key {
-                    "username" => Some(FieldValue::Plain(data.username.clone())),
-                    "email" => Some(FieldValue::Text(data.email.clone())),
-                    _ => None,
-                },
-                ItemKind::Card(data) => match key {
-                    "cardholder_name" => Some(FieldValue::Plain(data.cardholder_name.clone())),
-                    "expiry_month" => Some(FieldValue::Number(u64::from(data.expiry_month))),
-                    "expiry_year" => Some(FieldValue::Number(u64::from(data.expiry_year))),
-                    "brand" => Some(FieldValue::Text(data.brand.clone())),
-                    _ => None,
-                },
-                ItemKind::Note(data) => match key {
-                    "title" => Some(FieldValue::Text(data.title.clone())),
-                    "body" => Some(FieldValue::Plain(data.body.clone())),
-                    _ => None,
-                },
-                ItemKind::Identity(data) => match key {
-                    "full_name" => Some(FieldValue::Plain(data.full_name.clone())),
-                    "email" => Some(FieldValue::Text(data.email.clone())),
-                    "phone" => Some(FieldValue::Text(data.phone.clone())),
-                    "address_line1" => Some(FieldValue::Text(data.address_line1.clone())),
-                    "address_line2" => Some(FieldValue::Text(data.address_line2.clone())),
-                    "city" => Some(FieldValue::Text(data.city.clone())),
-                    "postal_code" => Some(FieldValue::Text(data.postal_code.clone())),
-                    "country" => Some(FieldValue::Text(data.country.clone())),
-                    _ => None,
-                },
-            }
+            kind_fields(kind)
+                .iter()
+                .find(|field| field.key == key)
+                .and_then(|field| field.read(kind))
         }
     }
 }
@@ -1233,57 +1191,13 @@ pub(crate) fn write_item_field(item: &mut VaultItem, key: &str, value: &FieldVal
             let Some(kind) = item.kind.as_mut() else {
                 return false;
             };
-            match (kind, key, value) {
-                (ItemKind::Account(data), "username", FieldValue::Plain(value)) => {
-                    data.username = value.clone();
-                }
-                (ItemKind::Account(data), "email", FieldValue::Text(value)) => {
-                    data.email = value.clone();
-                }
-                (ItemKind::Card(data), "cardholder_name", FieldValue::Plain(value)) => {
-                    data.cardholder_name = value.clone();
-                }
-                (ItemKind::Card(data), "expiry_month", FieldValue::Number(value)) => {
-                    data.expiry_month = *value as u8;
-                }
-                (ItemKind::Card(data), "expiry_year", FieldValue::Number(value)) => {
-                    data.expiry_year = *value as u16;
-                }
-                (ItemKind::Card(data), "brand", FieldValue::Text(value)) => {
-                    data.brand = value.clone();
-                }
-                (ItemKind::Note(data), "title", FieldValue::Text(value)) => {
-                    data.title = value.clone();
-                }
-                (ItemKind::Note(data), "body", FieldValue::Plain(value)) => {
-                    data.body = value.clone();
-                }
-                (ItemKind::Identity(data), "full_name", FieldValue::Plain(value)) => {
-                    data.full_name = value.clone();
-                }
-                (ItemKind::Identity(data), "email", FieldValue::Text(value)) => {
-                    data.email = value.clone();
-                }
-                (ItemKind::Identity(data), "phone", FieldValue::Text(value)) => {
-                    data.phone = value.clone();
-                }
-                (ItemKind::Identity(data), "address_line1", FieldValue::Text(value)) => {
-                    data.address_line1 = value.clone();
-                }
-                (ItemKind::Identity(data), "address_line2", FieldValue::Text(value)) => {
-                    data.address_line2 = value.clone();
-                }
-                (ItemKind::Identity(data), "city", FieldValue::Text(value)) => {
-                    data.city = value.clone();
-                }
-                (ItemKind::Identity(data), "postal_code", FieldValue::Text(value)) => {
-                    data.postal_code = value.clone();
-                }
-                (ItemKind::Identity(data), "country", FieldValue::Text(value)) => {
-                    data.country = value.clone();
-                }
-                _ => return false,
-            }
+            return match kind_fields(kind)
+                .iter()
+                .find(|field| field.key == key)
+            {
+                Some(field) => field.write(kind, value),
+                None => false,
+            };
         }
     }
 
@@ -1513,8 +1427,8 @@ mod tests {
 
     use crate::vault_manager::VaultManager;
     use crate::{
-        AccountData, CardData, NewItemData, SecretInput, CURRENT_SCHEMA_VERSION,
-        SECRET_FIELD_PASSWORD,
+        kind_field_keys, AccountData, CardData, IdentityData, NewItemData, NoteData,
+        SecretInput, CURRENT_SCHEMA_VERSION, SECRET_FIELD_PASSWORD,
     };
 
     fn device(n: u128) -> DeviceId {
@@ -1580,6 +1494,139 @@ mod tests {
             .iter()
             .find(|item| item.id == item_id)
             .expect("fixture item exists")
+    }
+
+    /// Characterisation: every kind exposes exactly these wire field keys, and
+    /// each one reads and writes its own payload. Collapsing the `ItemKind`
+    /// cascades into one table must not move a key, reorder a key, or change
+    /// which `FieldValue` variant a field accepts.
+    #[test]
+    fn test_kind_field_keys_and_accessors_round_trip() {
+        let now = fixture_time(1_700_000_000);
+        let item_for = |kind: ItemKind| VaultItem {
+            id: Uuid::from_u128(0xBBBB),
+            vault_id: Uuid::from_u128(0xAAAA),
+            display_name: Some("Octocat".to_string()),
+            favourite: true,
+            tags: vec!["work".to_string()],
+            icon: Some("github".to_string()),
+            color: "#6240BF".to_string(),
+            created_at: now,
+            updated_at: now,
+            clock: VersionVector::new(),
+            field_clocks: BTreeMap::new(),
+            deleted: false,
+            moved_to: None,
+            kind: Some(kind),
+        };
+
+        let text = |value: &str| FieldValue::Text(Some(value.to_string()));
+        let plain = |value: &str| FieldValue::Plain(value.to_string());
+
+        let cases = [
+            (
+                ItemKind::Account(AccountData {
+                    username: "octocat".to_string(),
+                    email: Some("octo@example.com".to_string()),
+                }),
+                vec!["username", "email"],
+                vec![
+                    ("username", plain("octocat")),
+                    ("email", text("octo@example.com")),
+                ],
+            ),
+            (
+                ItemKind::Card(CardData {
+                    cardholder_name: "Ada Lovelace".to_string(),
+                    expiry_month: 7,
+                    expiry_year: 2031,
+                    brand: Some("Visa".to_string()),
+                }),
+                vec!["cardholder_name", "expiry_month", "expiry_year", "brand"],
+                vec![
+                    ("cardholder_name", plain("Ada Lovelace")),
+                    ("expiry_month", FieldValue::Number(7)),
+                    ("expiry_year", FieldValue::Number(2031)),
+                    ("brand", text("Visa")),
+                ],
+            ),
+            (
+                ItemKind::Note(NoteData {
+                    title: Some("Home".to_string()),
+                    body: "Door code".to_string(),
+                }),
+                vec!["title", "body"],
+                vec![("title", text("Home")), ("body", plain("Door code"))],
+            ),
+            (
+                ItemKind::Identity(IdentityData {
+                    full_name: "Ada Lovelace".to_string(),
+                    email: Some("ada@example.com".to_string()),
+                    phone: Some("0123".to_string()),
+                    address_line1: Some("1 Analytical Way".to_string()),
+                    address_line2: Some("Flat 2".to_string()),
+                    city: Some("London".to_string()),
+                    postal_code: Some("N1".to_string()),
+                    country: Some("GB".to_string()),
+                }),
+                vec![
+                    "full_name",
+                    "email",
+                    "phone",
+                    "address_line1",
+                    "address_line2",
+                    "city",
+                    "postal_code",
+                    "country",
+                ],
+                vec![
+                    ("full_name", plain("Ada Lovelace")),
+                    ("email", text("ada@example.com")),
+                    ("phone", text("0123")),
+                    ("address_line1", text("1 Analytical Way")),
+                    ("address_line2", text("Flat 2")),
+                    ("city", text("London")),
+                    ("postal_code", text("N1")),
+                    ("country", text("GB")),
+                ],
+            ),
+        ];
+
+        for (kind, expected_keys, values) in cases {
+            assert_eq!(
+                kind_field_keys(&kind).iter().copied().collect::<Vec<_>>(),
+                expected_keys,
+                "kind field keys and their order are part of the wire format"
+            );
+
+            let item = item_for(kind);
+            for (key, expected) in &values {
+                assert_eq!(
+                    read_item_field(&item, key).as_ref(),
+                    Some(expected),
+                    "{key} reads its kind payload"
+                );
+
+                let replacement = match expected {
+                    FieldValue::Text(_) => FieldValue::Text(Some("replacement".to_string())),
+                    FieldValue::Plain(_) => FieldValue::Plain("replacement".to_string()),
+                    FieldValue::Number(_) => FieldValue::Number(99),
+                    other => other.clone(),
+                };
+                let mut written = item.clone();
+                assert!(write_item_field(&mut written, key, &replacement));
+                assert_eq!(read_item_field(&written, key).as_ref(), Some(&replacement));
+            }
+
+            // A variant mismatch is refused and leaves the item untouched.
+            let mut written = item.clone();
+            assert!(!write_item_field(
+                &mut written,
+                expected_keys[0],
+                &FieldValue::Tags(vec!["wrong".to_string()])
+            ));
+            assert_eq!(written, item);
+        }
     }
 
     fn bump(item: &mut VaultItem, writer: DeviceId) -> FieldVersion {

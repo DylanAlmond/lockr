@@ -15,7 +15,7 @@ use crate::crypto::{
 };
 use crate::device::load_or_create_device_id;
 use crate::{
-    allowed_secret_keys, item_to_safe, CURRENT_SCHEMA_VERSION, DeviceId,
+    allowed_secret_keys, item_to_safe, kind_fields, CURRENT_SCHEMA_VERSION, DeviceId,
     FieldVersion, IntoSafe, ItemFilter, ItemId, ItemKind, ItemSecrets, LegacyVault, NewItemData,
     SafeItem, SafeVault, SecretInput, Vault, VaultError, VaultId, VaultItem, VersionVector,
     SECRET_FIELD_PASSWORD,
@@ -51,71 +51,24 @@ fn validate_kind_data(current: &ItemKind, data: &NewItemData) -> Result<(), Vaul
 /// The kind-specific wire fields that actually differ between the current
 /// data and the proposed replacement. Stamping only these keeps per-field
 /// clocks honest: changing an account's username must not restamp its email.
+///
+/// Both sides are read through the one field table in `models`, so this cannot
+/// drift from merge's read/write surface.
 fn changed_kind_fields(current: &ItemKind, data: &NewItemData) -> Vec<&'static str> {
-    let mut changed = Vec::new();
-
-    match (current, data) {
-        (ItemKind::Account(current), NewItemData::Account(new)) => {
-            if current.username != new.username {
-                changed.push("username");
-            }
-            if current.email != new.email {
-                changed.push("email");
-            }
-        }
-        (ItemKind::Note(current), NewItemData::Note(new)) => {
-            if current.title != new.title {
-                changed.push("title");
-            }
-            if current.body != new.body {
-                changed.push("body");
-            }
-        }
-        (ItemKind::Card(current), NewItemData::Card(new)) => {
-            if current.cardholder_name != new.cardholder_name {
-                changed.push("cardholder_name");
-            }
-            if current.expiry_month != new.expiry_month {
-                changed.push("expiry_month");
-            }
-            if current.expiry_year != new.expiry_year {
-                changed.push("expiry_year");
-            }
-            if current.brand != new.brand {
-                changed.push("brand");
-            }
-        }
-        (ItemKind::Identity(current), NewItemData::Identity(new)) => {
-            if current.full_name != new.full_name {
-                changed.push("full_name");
-            }
-            if current.email != new.email {
-                changed.push("email");
-            }
-            if current.phone != new.phone {
-                changed.push("phone");
-            }
-            if current.address_line1 != new.address_line1 {
-                changed.push("address_line1");
-            }
-            if current.address_line2 != new.address_line2 {
-                changed.push("address_line2");
-            }
-            if current.city != new.city {
-                changed.push("city");
-            }
-            if current.postal_code != new.postal_code {
-                changed.push("postal_code");
-            }
-            if current.country != new.country {
-                changed.push("country");
-            }
-        }
+    let proposed = match (current, data) {
+        (ItemKind::Account(_), NewItemData::Account(new)) => ItemKind::Account(new.clone()),
+        (ItemKind::Card(_), NewItemData::Card(new)) => ItemKind::Card(new.clone()),
+        (ItemKind::Note(_), NewItemData::Note(new)) => ItemKind::Note(new.clone()),
+        (ItemKind::Identity(_), NewItemData::Identity(new)) => ItemKind::Identity(new.clone()),
         // Kind mismatches are rejected by `validate_kind_data` first.
-        _ => {}
-    }
+        _ => return Vec::new(),
+    };
 
-    changed
+    kind_fields(current)
+        .iter()
+        .filter(|field| field.read(current) != field.read(&proposed))
+        .map(|field| field.key)
+        .collect()
 }
 
 /// Refuse to save over a file whose contents no longer match what the
@@ -1521,6 +1474,76 @@ mod tests {
 
     const MASTER_PW: &str = "SuperSecret123";
     const KEY: [u8; 32] = [0u8; 32];
+
+    /// Characterisation: the kind-field stamping surface reports exactly the
+    /// wire fields that differ, in wire order. It is driven by the same field
+    /// table as merge's read/write accessors.
+    #[test]
+    fn test_changed_kind_fields_reports_only_the_fields_that_differ() {
+        let account = ItemKind::Account(crate::AccountData {
+            username: "octocat".to_string(),
+            email: Some("octo@example.com".to_string()),
+        });
+        let same_account = NewItemData::Account(crate::AccountData {
+            username: "octocat".to_string(),
+            email: Some("octo@example.com".to_string()),
+        });
+        assert_eq!(changed_kind_fields(&account, &same_account), Vec::<&str>::new());
+
+        let renamed = NewItemData::Account(crate::AccountData {
+            username: "hubot".to_string(),
+            email: Some("octo@example.com".to_string()),
+        });
+        assert_eq!(changed_kind_fields(&account, &renamed), vec!["username"]);
+
+        let card = ItemKind::Card(crate::CardData {
+            cardholder_name: "Ada".to_string(),
+            expiry_month: 7,
+            expiry_year: 2031,
+            brand: Some("Visa".to_string()),
+        });
+        let reissued = NewItemData::Card(crate::CardData {
+            cardholder_name: "Ada".to_string(),
+            expiry_month: 8,
+            expiry_year: 2031,
+            brand: Some("Mastercard".to_string()),
+        });
+        assert_eq!(
+            changed_kind_fields(&card, &reissued),
+            vec!["expiry_month", "brand"]
+        );
+
+        let identity = ItemKind::Identity(crate::IdentityData {
+            full_name: "Ada".to_string(),
+            email: None,
+            phone: Some("0123".to_string()),
+            address_line1: None,
+            address_line2: None,
+            city: None,
+            postal_code: None,
+            country: Some("GB".to_string()),
+        });
+        let moved = NewItemData::Identity(crate::IdentityData {
+            full_name: "Ada".to_string(),
+            email: None,
+            phone: Some("0456".to_string()),
+            address_line1: None,
+            address_line2: None,
+            city: None,
+            postal_code: None,
+            country: Some("FR".to_string()),
+        });
+        assert_eq!(changed_kind_fields(&identity, &moved), vec!["phone", "country"]);
+
+        // A kind mismatch is rejected by `validate_kind_data` first.
+        assert_eq!(
+            changed_kind_fields(&identity, &NewItemData::Note(crate::NoteData {
+                title: None,
+                body: "x".to_string(),
+            })),
+            Vec::<&str>::new()
+        );
+    }
 
     // ============ Legacy (v1) vault file fixtures ============
 

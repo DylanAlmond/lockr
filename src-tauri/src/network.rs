@@ -10,10 +10,14 @@
 //! mDNS, TLS, and raw addresses live behind a [`PeerNetwork`] implementation,
 //! never in front of one.
 
+#[cfg(test)]
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
+#[cfg(test)]
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+#[cfg(test)]
+use std::sync::Mutex;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -587,6 +591,7 @@ impl fmt::Debug for TransportSession {
 }
 
 /// Configuration for one in-memory Device.
+#[cfg(test)]
 #[derive(Debug, Clone)]
 pub struct InMemoryDeviceConfig {
     device_id: DeviceId,
@@ -596,6 +601,7 @@ pub struct InMemoryDeviceConfig {
     paired_devices: HashSet<DeviceId>,
 }
 
+#[cfg(test)]
 impl InMemoryDeviceConfig {
     pub fn new(device_id: DeviceId, schema_version: u32) -> Self {
         Self {
@@ -629,6 +635,7 @@ impl InMemoryDeviceConfig {
     }
 }
 
+#[cfg(test)]
 struct InMemoryDevice {
     schema_version: u32,
     protocol_version: u16,
@@ -641,6 +648,7 @@ struct InMemoryDevice {
     pairing_inbound: VecDeque<InMemoryPipe>,
 }
 
+#[cfg(test)]
 struct InMemoryPipe {
     initiator: DeviceId,
     to_responder: Arc<Mutex<VecDeque<Vec<u8>>>>,
@@ -648,6 +656,7 @@ struct InMemoryPipe {
     closed: Arc<AtomicBool>,
 }
 
+#[cfg(test)]
 struct InMemoryChannel {
     peer_device_id: Option<DeviceId>,
     outbound: Arc<Mutex<VecDeque<Vec<u8>>>>,
@@ -655,6 +664,7 @@ struct InMemoryChannel {
     closed: Arc<AtomicBool>,
 }
 
+#[cfg(test)]
 impl PeerChannel for InMemoryChannel {
     fn peer_device_id(&self) -> Option<DeviceId> {
         self.peer_device_id
@@ -692,10 +702,12 @@ impl PeerChannel for InMemoryChannel {
 
 /// A process-local network used by tests. Devices join a shared hub, which
 /// serves the static peer list for discovery.
+#[cfg(test)]
 pub struct InMemoryHub {
     devices: Mutex<HashMap<DeviceId, InMemoryDevice>>,
 }
 
+#[cfg(test)]
 impl InMemoryHub {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
@@ -727,11 +739,13 @@ impl InMemoryHub {
 
 /// The in-memory [`PeerNetwork`]. A static peer list (the hub) plus an
 /// in-process pipe stands in for mDNS and TLS.
+#[cfg(test)]
 pub struct InMemoryNetwork {
     device_id: DeviceId,
     hub: Arc<InMemoryHub>,
 }
 
+#[cfg(test)]
 impl PeerNetwork for InMemoryNetwork {
     fn start_advertising(&self) -> Result<(), NetworkError> {
         let mut devices = self.hub.devices.lock().unwrap();
