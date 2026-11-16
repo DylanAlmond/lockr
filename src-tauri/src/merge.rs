@@ -1290,6 +1290,181 @@ pub(crate) fn write_item_field(item: &mut VaultItem, key: &str, value: &FieldVal
     true
 }
 
+// ============ Cross-Vault move reconciliation ============
+
+/// One live copy that reconciliation retires from a Vault.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MoveRetirement {
+    pub(crate) vault_id: VaultId,
+    pub(crate) item_id: ItemId,
+    pub(crate) destination: VaultId,
+    pub(crate) clock: VersionVector,
+}
+
+/// What cross-Vault move reconciliation found in one sync session.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct MoveReconciliation {
+    /// Live duplicates resolved by leaving a Move Record behind.
+    pub(crate) retirements: Vec<MoveRetirement>,
+
+    /// `(Item, destination)` pairs named by a Move Record that this session
+    /// could not follow. The Item may still live there, so nothing is retired
+    /// against such a record.
+    pub(crate) unfollowed: Vec<(ItemId, VaultId)>,
+}
+
+/// Reconcile Move Records against destination Vaults present in one session.
+///
+/// A per-Vault merge cannot see that a Move Record's destination also holds a
+/// live copy: two Devices moving one identity to two destinations at once
+/// leave it live in both. This walk is the cross-Vault step that compares
+/// them. It looks only at the Vaults of this session, so both Devices derive
+/// it from the same post-merge state and reach the same answer.
+///
+/// It never creates content. A losing live copy becomes a Move Record naming
+/// the winner - exactly the record that Vault would have held had the
+/// duplicate never been made. A copy is retired only when a Move Record
+/// causally covers it; a later copy (a move back) is never discarded.
+pub(crate) fn reconcile_moves<'a>(
+    session: impl IntoIterator<Item = &'a Vault>,
+) -> MoveReconciliation {
+    let vaults: BTreeMap<VaultId, &Vault> =
+        session.into_iter().map(|vault| (vault.id, vault)).collect();
+
+    let mut identities: BTreeMap<ItemId, Identity<'_>> = BTreeMap::new();
+    for (vault_id, vault) in &vaults {
+        for item in &vault.items {
+            let identity = identities.entry(item.id).or_default();
+            if item.deleted {
+                identity.tombstones.insert(*vault_id);
+            } else if item.moved_to.is_some() {
+                identity.records.insert(*vault_id, item);
+            } else {
+                identity.live.insert(*vault_id, item);
+            }
+        }
+    }
+
+    let mut reconciliation = MoveReconciliation::default();
+
+    for (item_id, identity) in identities {
+        // Follow every Move Record to the Vault that holds the Item now.
+        // Several records may name the same terminal; each describes a move
+        // that led there, so their clocks are joined into one authority.
+        let mut winners: BTreeMap<VaultId, VersionVector> = BTreeMap::new();
+        for source in identity.records.keys() {
+            match identity.follow(*source) {
+                FollowedMove::Live { vault_id, clock } => {
+                    winners
+                        .entry(vault_id)
+                        .and_modify(|joined| joined.merge(clock))
+                        .or_insert_with(|| clock.clone());
+                }
+                FollowedMove::Deleted => {}
+                FollowedMove::Unfollowed(destination) => {
+                    reconciliation.unfollowed.push((item_id, destination));
+                }
+            }
+        }
+
+        if identity.live.len() < 2 {
+            continue;
+        }
+
+        // The smallest destination a resolvable record names. Both Devices
+        // compute the same map, so the same winner. With no authority there
+        // is nothing to retire anything against: leave the copies and let the
+        // report explain.
+        let Some((winner, authority)) = winners.iter().next() else {
+            continue;
+        };
+
+        for (vault_id, live) in &identity.live {
+            if vault_id == winner {
+                continue;
+            }
+
+            // Only retire a copy the naming record causally covers. A later
+            // live copy is a move back, and discarding it would lose the Item.
+            if !matches!(
+                authority.compare(&live.clock),
+                ClockOrder::Dominates | ClockOrder::Equal
+            ) {
+                continue;
+            }
+
+            reconciliation.retirements.push(MoveRetirement {
+                vault_id: *vault_id,
+                item_id,
+                destination: *winner,
+                clock: authority.clone(),
+            });
+        }
+    }
+
+    reconciliation.unfollowed.sort();
+    reconciliation.unfollowed.dedup();
+    reconciliation
+}
+
+/// Everything the session knows about one Item identity, by Vault.
+#[derive(Default)]
+struct Identity<'a> {
+    live: BTreeMap<VaultId, &'a VaultItem>,
+    records: BTreeMap<VaultId, &'a VaultItem>,
+    tombstones: BTreeSet<VaultId>,
+}
+
+enum FollowedMove<'a> {
+    Live {
+        vault_id: VaultId,
+        /// The clock of the Move Record that names this terminal.
+        clock: &'a VersionVector,
+    },
+    Deleted,
+    /// The chain left this session, or looped. Nothing may be retired
+    /// against it: another Device could be holding the Item there.
+    Unfollowed(VaultId),
+}
+
+impl<'a> Identity<'a> {
+    /// Walk one Move Record's destination chain to the Vault that holds the
+    /// Item now. Records may point at other records (a move out of a Vault
+    /// the Item had itself moved into), so this follows them in order.
+    fn follow(&self, source: VaultId) -> FollowedMove<'a> {
+        let mut visited = BTreeSet::from([source]);
+        let Some(mut record) = self.records.get(&source) else {
+            return FollowedMove::Unfollowed(source);
+        };
+        let Some(mut destination) = record.moved_to else {
+            return FollowedMove::Unfollowed(source);
+        };
+
+        loop {
+            if self.live.contains_key(&destination) {
+                return FollowedMove::Live {
+                    vault_id: destination,
+                    clock: &record.clock,
+                };
+            }
+            if self.tombstones.contains(&destination) {
+                return FollowedMove::Deleted;
+            }
+            if !visited.insert(destination) {
+                return FollowedMove::Unfollowed(destination);
+            }
+            let Some(next) = self.records.get(&destination) else {
+                return FollowedMove::Unfollowed(destination);
+            };
+            record = next;
+            let Some(next_destination) = record.moved_to else {
+                return FollowedMove::Unfollowed(destination);
+            };
+            destination = next_destination;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1740,6 +1915,112 @@ mod tests {
         )];
         moved.secrets.clear();
         moved
+    }
+
+    /// The fixture's contents under another Vault id, as a session would see
+    /// the same identity in a second Vault.
+    fn vault_copy(base: &Vault, vault_id: VaultId) -> Vault {
+        let mut vault = base.clone();
+        vault.id = vault_id;
+        for item in &mut vault.items {
+            item.vault_id = vault_id;
+        }
+        vault
+    }
+
+    #[test]
+    fn test_reconciliation_follows_a_chain_of_move_records() {
+        let (base, item_id, owner) = base_fixture();
+        let source = base.id;
+        let middle = Uuid::from_u128(0xB000);
+        let home = Uuid::from_u128(0xC000);
+
+        let mut source_vault = vault_copy(&base, source);
+        source_vault.items = vec![VaultItem::move_record(
+            item_id,
+            source,
+            VersionVector::from_version(owner, 2),
+            middle,
+        )];
+        source_vault.secrets.clear();
+
+        let mut middle_vault = vault_copy(&base, middle);
+        middle_vault.items = vec![VaultItem::move_record(
+            item_id,
+            middle,
+            VersionVector::from_version(owner, 3),
+            home,
+        )];
+        middle_vault.secrets.clear();
+
+        let home_vault = vault_copy(&base, home);
+
+        let reconciliation = reconcile_moves([&source_vault, &middle_vault, &home_vault]);
+
+        assert!(
+            reconciliation.retirements.is_empty(),
+            "the Item is live once, at the end of the chain"
+        );
+        assert!(reconciliation.unfollowed.is_empty());
+    }
+
+    #[test]
+    fn test_reconciliation_never_retires_a_causally_later_live_copy() {
+        let (base, item_id, owner) = base_fixture();
+        let other = device(2);
+        let source = base.id;
+        let first = Uuid::from_u128(0xB000);
+        let second = Uuid::from_u128(0xC000);
+
+        let mut source_vault = vault_copy(&base, source);
+        source_vault.items = vec![VaultItem::move_record(
+            item_id,
+            source,
+            VersionVector::from_version(owner, 2),
+            first,
+        )];
+        source_vault.secrets.clear();
+
+        let mut first_vault = vault_copy(&base, first);
+        first_vault.items[0].clock = VersionVector::from_version(owner, 2);
+
+        // A live copy written after the move record cannot be explained by
+        // it: this may be a move back, so discarding it would lose the Item.
+        let mut second_vault = vault_copy(&base, second);
+        second_vault.items[0].clock = VersionVector::from_version(other, 4);
+
+        let reconciliation = reconcile_moves([&source_vault, &first_vault, &second_vault]);
+
+        assert!(
+            reconciliation.retirements.is_empty(),
+            "a copy the Move Record does not causally cover must be left alone"
+        );
+    }
+
+    #[test]
+    fn test_reconciliation_reports_an_unfollowed_destination_without_retiring() {
+        let (base, item_id, owner) = base_fixture();
+        let source = base.id;
+        let first = Uuid::from_u128(0xB000);
+        let second = Uuid::from_u128(0xC000);
+        let outside = Uuid::from_u128(0xD000);
+
+        let mut source_vault = vault_copy(&base, source);
+        source_vault.items = vec![VaultItem::move_record(
+            item_id,
+            source,
+            VersionVector::from_version(owner, 2),
+            outside,
+        )];
+        source_vault.secrets.clear();
+
+        let first_vault = vault_copy(&base, first);
+        let second_vault = vault_copy(&base, second);
+
+        let reconciliation = reconcile_moves([&source_vault, &first_vault, &second_vault]);
+
+        assert!(reconciliation.retirements.is_empty());
+        assert_eq!(reconciliation.unfollowed, vec![(item_id, outside)]);
     }
 
     #[test]
