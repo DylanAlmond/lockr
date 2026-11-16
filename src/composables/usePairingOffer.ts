@@ -1,5 +1,6 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue';
 import { useSync } from './useSync';
+import { pairingHandoffText } from '../util/pairing';
 import type {
   PairingApprovalPrompt,
   PairingOffer,
@@ -31,6 +32,7 @@ export function usePairingOffer() {
   const approval = ref<PairingApprovalPrompt | null>(null);
   const outcome = ref<PairingOutcome | null>(null);
   const copied = ref(false);
+  const handoffCopied = ref(false);
 
   const now = ref(Date.now());
   let timer: ReturnType<typeof setInterval> | null = null;
@@ -126,6 +128,23 @@ export function usePairingOffer() {
     }
   }
 
+  /**
+   * Both values the typed join path asks for, in one clipboard entry. The
+   * Device id is not otherwise visible outside the QR payload.
+   */
+  async function copyHandoff() {
+    if (!offer.value) return;
+    try {
+      await navigator.clipboard.writeText(pairingHandoffText(offer.value));
+      handoffCopied.value = true;
+      setTimeout(() => {
+        handoffCopied.value = false;
+      }, 2000);
+    } catch {
+      localError.value = 'Could not copy the pairing code and Device id.';
+    }
+  }
+
   async function approve() {
     if (!approval.value) return;
 
@@ -169,11 +188,13 @@ export function usePairingOffer() {
     approval,
     outcome,
     copied,
+    handoffCopied,
     secondsLeft,
     offerExpired,
     toggleVault,
     beginOffer,
     copyPayload,
+    copyHandoff,
     approve,
     reset
   };

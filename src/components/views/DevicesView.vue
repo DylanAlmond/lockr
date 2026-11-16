@@ -147,8 +147,7 @@ onBeforeRouteLeave(() => syncControl.blockNavigation() === null);
           :devices="pairedPeers"
           :loading="loadingDevices"
           :syncing="isSyncing"
-          @pair="openPairing('source')"
-          @join="openPairing('join')"
+          @pair="openPairing"
           @sync="syncNow"
           @revoke="confirmRevoke"
         />
@@ -161,7 +160,7 @@ onBeforeRouteLeave(() => syncControl.blockNavigation() === null);
           :syncing="isSyncing"
           @refresh="refreshPeers"
           @sync="syncNow"
-          @pair="openPairing('source')"
+          @pair="openPairing"
         />
 
         <DuplicateReview

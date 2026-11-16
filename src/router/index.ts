@@ -8,6 +8,7 @@ import ItemList from '../components/panel/ItemList.vue';
 import ItemPanel from '../components/panel/ItemPanel.vue';
 import RegisterView from '../components/views/RegisterView.vue';
 import LoginView from '../components/views/LoginView.vue';
+import JoinDeviceView from '../components/views/JoinDeviceView.vue';
 
 const routes: RouteRecordRaw[] = [
   {
@@ -78,6 +79,11 @@ const routes: RouteRecordRaw[] = [
       {
         path: 'new',
         component: RegisterView
+      },
+      {
+        path: 'join',
+        name: 'join-device',
+        component: JoinDeviceView
       }
     ]
   },

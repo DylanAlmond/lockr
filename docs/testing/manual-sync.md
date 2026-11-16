@@ -62,20 +62,13 @@ These are observations from the code at the time of writing. They are listed so
 a run records what actually happened instead of quietly passing a step that was
 never reachable.
 
-1. **The joining side of pairing has no reachable UI entry point.** The Devices
-   screen requires a signed-in User, but `join_pairing` refuses when any local
-   User is registered ("this Device already belongs to a User"). A fresh
-   installation therefore cannot open the screen that offers **Join a Device**.
-   Step M3 is marked **BLOCKED** until this is fixed. Source-side pairing and
-   everything after it still need a joining Device, so M2, M4 and later sync
-   steps inherit the block unless the run uses a build that adds the entry
-   point.
-2. **The typed pairing fallback cannot be completed from the UI.** The joining
-   form asks for the source **Device id**, but the offer card shows only the
-   typed code and the QR payload. The Device id is the third field of the QR
-   payload (`lockr-pair:v1:<source-device-id>:...`). Use the paste-the-payload
-   form unless the source Device id is supplied some other way.
-3. **A conflict with no local side cannot be constructed by hand.** It needs a
+1. **The join entry point is on the sign-in screen, not the Devices screen.**
+   A fresh Device pairs through **Join a Device instead of creating a User**,
+   which is only offered while no local User exists. A Device that already has
+   a User says so on that screen and cannot join; add Devices from the Devices
+   screen with **Pair a new Device** instead. Builds before #60 had no such
+   entry point and M3 could not run.
+2. **A conflict with no local side cannot be constructed by hand.** It needs a
    registry/merge state where both sides were written by other Devices. The
    automated suite covers that branch; the manual script marks it `SKIP
    (automated)`, not `PASS`.
@@ -110,7 +103,7 @@ Use `PASS`, `FAIL`, `BLOCKED` or `SKIP`. Attach a screenshot for every `FAIL`.
    yarn build
    ```
 
-   The baseline at the time of writing is **283 backend tests passing** and a
+   The baseline at the time of writing is **289 backend tests passing** and a
    green `yarn build`. A different count is not automatically a failure, but
    every test must pass; record the count.
 2. Start Lockr on Device A. Register a User, then create five Vaults:
@@ -152,15 +145,16 @@ Result: `______`
 
 ## M2 — Pairing over the real transport (source side)
 
-**TWO MACHINES**, but see M3: the joining side is currently blocked. Run M2
-only if your build has a working join entry point; otherwise record the block
-in M3 and mark M2 `BLOCKED`.
+**TWO MACHINES**
 
 1. On Device A (the Device that already has the Vaults), open **Pair a new
    Device**.
-2. Choose **This Device already has my Vaults**, then **Start pairing**.
+2. Press **Start pairing**. This Device is the source because it is signed in
+   with your User; the new Device must have no User yet.
 3. Verify an offer appears with:
    - a short typed code in `ABCD-FGHJ` form;
+   - this Device's **Device id**, shown next to the code and copyable with
+     **Copy code and Device id**;
    - a countdown starting near 60 seconds;
    - a collapsible **QR payload** beginning `lockr-pair:v1:` and a **Copy
      payload** button.
@@ -168,9 +162,9 @@ in M3 and mark M2 `BLOCKED`.
    The UI must say the code expired and offer **Start over**. Start a fresh
    offer.
 5. With the fresh offer showing, repeat the join from M3 on Device B using the
-   **QR payload**. On Device A, while waiting, verify the text says it is
-   listening over the secure pairing channel; it must not claim the Device is
-   already approved.
+   typed code and Device id (or the **QR payload**). On Device A, while waiting,
+   verify the text says it is listening over the secure pairing channel; it must
+   not claim the Device is already approved.
 6. When Device B connects, verify the approval card appears on A with B's
    **name**, **platform** and **device id**. Confirm these match the machine
    running B. A Device that merely answers on the network must not appear here
@@ -197,38 +191,34 @@ Result: `______`
 
 **TWO MACHINES**
 
-### M3a — What the current build does (record even if blocked)
+The join entry point is on the **sign-in screen** of a Device with no local
+User. The Devices screen has no join action, because a signed-in Device already
+belongs to a User and the backend refuses to join in that state.
 
-1. On a **fresh** Device B with no local User, starting Lockr lands on the
-   sign-in screen. Try to reach Devices without registering. The app redirects
-   to `/auth`; there is no **Join a Device** button on that screen.
-2. Register a local User so the Devices screen is reachable. Open **Join a
-   Device**, paste the QR payload from A, and press **Continue**.
-3. Expected in the current build: an error containing
-   `this Device already belongs to a User`. Nothing is transferred, and A's
-   offer is not consumed by a successful approval.
-
-Record the exact error and mark this module **BLOCKED** if step 1 has no path
-to a successful join. This is a UI/wiring gap, not a transport failure.
-
-### M3b — The intended successful path (run when the entry point exists)
-
-1. On fresh Device B, choose **This Device is new** / **Join a Device**.
-2. Paste A's QR payload (preferred) or type the short code. If typing, the
-   source **Device id** must be available; see known gap 2.
-3. Press **Continue**. Verify B waits for the source Device and says a human on
-   the source must approve it. B must not hold a usable identity yet.
-4. After A approves in M2, verify B shows **Approved by the source Device**,
+1. Start Lockr on a **fresh** Device B with no local User. On the sign-in
+   screen choose **Join a Device instead of creating a User**.
+2. Verify the screen explains the prerequisites: A must be signed in and show
+   a pairing code and Device id; the master password is typed on B.
+3. Type the **Device id** and **pairing code** from A's offer card, then press
+   **Continue**. The **Paste the QR payload** option must also work; use one
+   path for this run and record which.
+4. Verify B waits for the source Device and says a human on the source must
+   approve it. B must not hold a usable identity yet.
+5. After A approves in M2, verify B shows **Approved by the source Device**,
    the User name, and a master-password field. The master password is typed on
    B only.
-5. Enter a **wrong** master password first. Expected: pairing does not
+6. Enter a **wrong** master password first. Expected: pairing does not
    complete; no Vaults appear; B can retry. Then enter the correct password and
    press **Finish pairing**.
-6. Verify B does **not** ask for the password to be sent anywhere and that the
+7. Verify B does **not** ask for the password to be sent anywhere and that the
    app proceeds directly to the post-pairing transfer (M4).
+8. After M4, sign out on B. Verify the sign-in screen now says this Device
+   already belongs to a User and does not offer **Join a Device**. That refusal
+   is stated before a join can start, not reported as an error afterwards.
 
 Expected: the joining Device becomes the same User; the transfer is verified
-against the Device B admitted; a wrong password cannot complete it.
+against the Device B admitted; a wrong password cannot complete it; a Device
+that already has a User cannot begin.
 
 Result: `______`
 
@@ -411,9 +401,9 @@ Result: `______`
    travels and that Device also refuses B.
 5. Verify a revoked Device still appears in the registry permanently; it is not
    deleted from the list.
-6. Re-pairing B as a **new** Device is the documented recovery path. It is
-   blocked in this build by M3; if your build has the entry point, verify B joins
-   with a new identity and the old revoked entry remains.
+6. Re-pairing B as a **new** Device is the documented recovery path: delete
+   B's app data so it has no User, start it, choose **Join a Device instead of
+   creating a User**, and pair from A. The old revoked entry remains.
 7. Finally, leave the Devices screen on both machines. Verify discovery stops
    (the other Device disappears from **On this network** after the next refresh
    or timeout) and no sync is possible without reopening the screen.

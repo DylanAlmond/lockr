@@ -16,6 +16,7 @@ const error = ref('');
 const isLoading = ref(false);
 
 const availableUsers = ref<User[]>([]);
+const usersLoaded = ref(false);
 const selectedUser = ref<User | null>(null);
 
 const hasUser = computed(() => {
@@ -27,6 +28,7 @@ const scrollContainer = ref<HTMLElement | null>(null);
 
 onMounted(async () => {
   availableUsers.value = (await getUsers()) || [];
+  usersLoaded.value = true;
 });
 
 // Translate vertical wheel scroll into horizontal scroll
@@ -150,6 +152,19 @@ watch(
     </ul>
   </div>
 
+  <div v-if="!hasUser && usersLoaded" class="join-entry">
+    <template v-if="availableUsers.length === 0">
+      <p>Already set up Lockr on another Device?</p>
+      <button class="join-link" @click="router.push('/auth/join')">
+        Join a Device instead of creating a User
+      </button>
+    </template>
+    <p v-else class="join-entry-blocked">
+      This Device already belongs to a User, so it cannot join another. To add a Device, sign in
+      here and choose <strong>Pair a new Device</strong>.
+    </p>
+  </div>
+
   <p v-if="error" class="error-text">{{ error }}</p>
 </template>
 
@@ -245,6 +260,45 @@ watch(
 .new-user-button:focus-visible {
   outline: none;
   box-shadow: inset 0 0 0 2px var(--color-bg);
+}
+
+.join-entry {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.5rem;
+  max-width: 32rem;
+  padding: 0 1.5rem;
+  color: var(--color-bg);
+  font-size: 0.8125rem;
+  line-height: 1.5;
+  text-align: center;
+}
+
+.join-link {
+  appearance: none;
+  padding: 0.5rem 0.875rem;
+  border: 1px solid rgb(255 255 255 / 0.7);
+  border-radius: 0.625rem;
+  background: transparent;
+  color: var(--color-bg);
+  font: inherit;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background-color 0.2s ease;
+
+  &:hover {
+    background: rgb(255 255 255 / 0.12);
+  }
+
+  &:focus-visible {
+    outline: none;
+    box-shadow: inset 0 0 0 2px var(--color-bg);
+  }
+}
+
+.join-entry-blocked {
+  opacity: 0.9;
 }
 
 @supports (corner-shape: squircle) {
