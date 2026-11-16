@@ -269,11 +269,25 @@ export interface SyncConflict {
   sides: [SyncConflictSide, SyncConflictSide];
 }
 
-/** Same Item identity found live in more than one Vault after a sync. This is
- * the concurrent-opposite-move case; review it as a Duplicate. */
+/** Why reconciliation could not settle one Item identity across the session's
+ * Vaults. `live_in_multiple_vaults` leaves a live copy in more than one;
+ * `destination_outside_session` names a Move Record destination this sync did
+ * not include; `cycle` means Move Records loop with no live copy at the end. */
+export type DuplicateNoteReason =
+  | 'live_in_multiple_vaults'
+  | 'destination_outside_session'
+  | 'cycle';
+
+/** Residue from cross-Vault move reconciliation. It names where copies remain
+ * and why, and never carries Item content or secrets. */
 export interface DuplicateIdentityNote {
   item_id: string;
+  /** Vaults of this sync's session still holding a live copy. */
   vault_ids: string[];
+  /** Vaults named by Move Records that could not be followed: either outside
+   * the session or where a cycle closed. */
+  destinations: string[];
+  reason: DuplicateNoteReason;
 }
 
 export interface SyncReport {
