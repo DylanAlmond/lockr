@@ -334,10 +334,9 @@ struct SessionState {
     devices: Option<Arc<dyn DeviceDirectory>>,
     pairing_claim: Option<PairingClaim>,
     /// Failed pairing authentications for the open offer, counted per source
-    /// address. The application-level pairing host has the authoritative
-    /// attempt budget; the transport needs its own because otherwise an
-    /// attacker could brute force the 40-bit typed fallback without ever
-    /// reaching that code.
+    /// address. This is the **only** attempt budget: the application-level
+    /// pairing host has none, so without it an attacker could brute force the
+    /// 40-bit typed fallback by simply retrying.
     ///
     /// The budget is per source, never per offer: junk from one address must
     /// not invalidate the offer for the Device that is actually joining. A new
@@ -670,10 +669,10 @@ fn pairing_tag_payload(domain: &[u8], nonce_c: &[u8; NONCE_LEN], nonce_s: &[u8; 
 ///
 /// A channel is only as strong as the material both sides can actually prove.
 /// The typed fallback carries 40 bits, so whenever either side presents it
-/// both sides truncate to that prefix. The pairing host's short TTL and
-/// attempt budget, plus the transport's own failure budget, are what make the
-/// short form acceptable; this function must never silently claim the full
-/// secret was proven.
+/// both sides truncate to that prefix. The pairing host's short TTL and the
+/// transport's per-source failure budget are what make the short form
+/// acceptable; this function must never silently claim the full secret was
+/// proven.
 fn pairing_key(material: &[u8], full_secret: bool, exporter: &[u8; 32]) -> hmac::Key {
     let key_bytes = if full_secret {
         material
