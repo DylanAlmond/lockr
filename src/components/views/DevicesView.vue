@@ -63,7 +63,7 @@ const {
   progress,
   syncFailure,
   conflicts,
-  duplicateNotes,
+  moveResidueNotes,
   conflictError,
   isResolvingConflict,
   clearSyncFailure,
@@ -166,7 +166,7 @@ onBeforeRouteLeave(() => syncControl.blockNavigation() === null);
         <DuplicateReview
           ref="duplicateReview"
           :vaults="syncSetVaults"
-          :notes="duplicateNotes"
+          :notes="moveResidueNotes"
         />
 
         <SyncSetEditor

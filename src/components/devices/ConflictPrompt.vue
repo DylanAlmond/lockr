@@ -59,10 +59,6 @@ watch(current, () => {
   revealing.value = null;
 });
 
-function fieldLabel(fieldKey: string): string {
-  return conflictFieldLabel(fieldKey);
-}
-
 function vaultLabel(vaultId: string): string {
   return vaultLabelById(vaultId, props.vaultNames);
 }
@@ -193,7 +189,7 @@ function next() {
             </div>
             <div>
               <dt>Field</dt>
-              <dd>{{ fieldLabel(current.field_key) }}</dd>
+              <dd>{{ conflictFieldLabel(current.field_key) }}</dd>
             </div>
           </dl>
 

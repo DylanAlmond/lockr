@@ -4,6 +4,7 @@ import Button from '../../components/ui/Button.vue';
 import Input from '../../components/ui/Input.vue';
 import { useRoute, useRouter } from 'vue-router';
 import { useUser } from '../../composables/useUser.ts';
+import { joinGate } from '../../util/pairing';
 import { LockOpen, Plus } from '@lucide/vue';
 import { User } from '../../types/index.ts';
 
@@ -23,6 +24,8 @@ const hasUser = computed(() => {
   error.value = '';
   return !!selectedUser.value;
 });
+
+const gate = computed(() => joinGate(availableUsers.value));
 
 const scrollContainer = ref<HTMLElement | null>(null);
 
@@ -153,16 +156,13 @@ watch(
   </div>
 
   <div v-if="!hasUser && usersLoaded" class="join-entry">
-    <template v-if="availableUsers.length === 0">
+    <template v-if="gate.canJoin">
       <p>Already set up Lockr on another Device?</p>
       <button class="join-link" @click="router.push('/auth/join')">
         Join a Device instead of creating a User
       </button>
     </template>
-    <p v-else class="join-entry-blocked">
-      This Device already belongs to a User, so it cannot join another. To add a Device, sign in
-      here and choose <strong>Pair a new Device</strong>.
-    </p>
+    <p v-else class="join-entry-blocked">{{ gate.blockedReason }}</p>
   </div>
 
   <p v-if="error" class="error-text">{{ error }}</p>

@@ -1348,14 +1348,17 @@ pub(crate) fn reconcile_moves<'a>(
 /// Whether `copy` has observed every field write `other` records.
 ///
 /// A move advances only the Item clock, not the per-field clocks, so equal
-/// content compares as covered. Any edit bumps both the Item clock and the
-/// edited field's clock; this check then sees a field version `copy` never
-/// observed, and retirement must keep the edited copy.
+/// content compares as covered. Each field's coverage is decided by that
+/// field's own clock: the per-item clock also advances for unrelated writes,
+/// so it cannot stand in. A field version written by another Device has no
+/// causal order against `copy`'s version, and retirement refuses rather than
+/// discards content (and secrets) only the other copy is known to hold.
 fn copy_covers_fields(copy: &VaultItem, other: &VaultItem) -> bool {
-    other
-        .field_clocks
-        .values()
-        .all(|version| copy.clock.get(&version.device) >= version.counter)
+    other.field_clocks.iter().all(|(field_key, version)| {
+        copy.field_clocks
+            .get(field_key)
+            .is_some_and(|own| own.device == version.device && own.counter >= version.counter)
+    })
 }
 
 /// Everything the session knows about one Item identity, by Vault.
@@ -2120,6 +2123,41 @@ mod tests {
             reconciliation.cycles,
             vec![(item_id, source), (item_id, destination)],
             "each Vault in the loop starts a walk that closes inside it"
+        );
+    }
+
+    #[test]
+    fn test_reconciliation_does_not_let_a_later_item_clock_cover_an_unobserved_field() {
+        let (base, item_id, owner) = base_fixture();
+        let source = base.id;
+        let winner = Uuid::from_u128(0xB000);
+        let loser = Uuid::from_u128(0xC000);
+
+        let mut source_vault = vault_copy(&base, source);
+        source_vault.items = vec![VaultItem::move_record(
+            item_id,
+            source,
+            VersionVector::from_version(owner, 2),
+            winner,
+        )];
+        source_vault.secrets.clear();
+
+        // The winner's Item clock is ahead of the loser's field write because
+        // of an unrelated later write, while its field clock for the password
+        // is still the original one. The per-item clock says nothing about
+        // whether this field write was observed.
+        let mut winner_vault = vault_copy(&base, winner);
+        winner_vault.items[0].clock = VersionVector::from_version(owner, 5);
+
+        let mut loser_vault = vault_copy(&base, loser);
+        loser_vault.items[0].clock = VersionVector::from_version(owner, 2);
+        loser_vault.items[0].record_field(SECRET_FIELD_PASSWORD, FieldVersion::new(owner, 4));
+
+        let reconciliation = reconcile_moves([&source_vault, &winner_vault, &loser_vault]);
+
+        assert!(
+            reconciliation.retirements.is_empty(),
+            "a later Item clock cannot prove the winner observed the loser's field write"
         );
     }
 

@@ -33,12 +33,9 @@ pub const PAIRING_TTL_SECS: i64 = 60;
 /// Characters in the typed fallback, excluding the display hyphen.
 pub const PAIRING_CODE_LEN: usize = 8;
 
-/// How many join attempts one offer tolerates before it is burned.
+/// How many join attempts one source address may spend against an offer.
+/// The transport owns this budget; the offer itself is never invalidated.
 pub const PAIRING_MAX_ATTEMPTS: u32 = 5;
-
-/// Minimum spacing between join attempts, as a crude rate limit on top of the
-/// attempt budget.
-pub const PAIRING_RETRY_INTERVAL_SECS: i64 = 1;
 
 const QR_PREFIX: &str = "lockr-pair";
 const QR_VERSION: &str = "v1";
@@ -479,8 +476,6 @@ pub(crate) struct PairingHost {
     expires_at: DateTime<Utc>,
     secret_key: Option<PairingSecretKey>,
     pending: Option<PairingRequest>,
-    attempts: u32,
-    last_attempt_at: Option<DateTime<Utc>>,
     consumed: bool,
 }
 
@@ -508,8 +503,6 @@ impl PairingHost {
             expires_at,
             secret_key: Some(PairingSecretKey::new(secret_key)),
             pending: None,
-            attempts: 0,
-            last_attempt_at: None,
             consumed: false,
         };
 
@@ -537,18 +530,19 @@ impl PairingHost {
         self.pending.as_ref()
     }
 
-    /// Accept a join announcement, rate-limited and never before the Schema
-    /// Version is known to agree. No key material is released here.
+    /// Accept a join announcement, never before the Schema Version is known
+    /// to agree. No key material is released here.
+    ///
+    /// The transport budgets attempts per source address and refuses an
+    /// exhausted source before this point. There is deliberately no
+    /// offer-wide attempt budget: another source's failures must not stop an
+    /// honest joiner from using the still-live offer.
     pub(crate) fn receive(
         &mut self,
         message: PairingMessage,
         now: DateTime<Utc>,
     ) -> Result<PairingRequest, VaultError> {
         self.check_live(now)?;
-        self.check_rate_limit(now)?;
-
-        self.attempts += 1;
-        self.last_attempt_at = Some(now);
 
         let request = match message {
             PairingMessage::Join(request) => request,
@@ -619,18 +613,6 @@ impl PairingHost {
         if now >= self.expires_at {
             self.consume();
             return Err(VaultError::PairingSecretStale);
-        }
-        Ok(())
-    }
-
-    fn check_rate_limit(&self, now: DateTime<Utc>) -> Result<(), VaultError> {
-        if self.attempts >= PAIRING_MAX_ATTEMPTS {
-            return Err(VaultError::PairingRateLimited);
-        }
-        if let Some(last) = self.last_attempt_at {
-            if now.signed_duration_since(last) < TimeDelta::seconds(PAIRING_RETRY_INTERVAL_SECS) {
-                return Err(VaultError::PairingRateLimited);
-            }
         }
         Ok(())
     }
@@ -788,38 +770,25 @@ mod tests {
     }
 
     #[test]
-    fn test_pairing_attempts_are_rate_limited() {
+    fn test_joins_do_not_exhaust_the_offer_at_the_app_level() {
         let now = Utc::now();
         let source = Uuid::new_v4();
-        let joiner = Uuid::new_v4();
         let (mut host, _) = PairingHost::start(Uuid::new_v4(), source, 3, [9u8; 32], now);
 
-        for attempt in 0..PAIRING_MAX_ATTEMPTS {
-            let at = now + TimeDelta::seconds(i64::from(attempt) * 2);
-            host.receive(join(joiner, 3), at).unwrap();
+        // The transport budgets attempts per source address. The host must
+        // not spend an offer-wide budget on top of that: an honest joiner is
+        // not locked out because another source tried first.
+        let mut last = now;
+        for attempt in 0..(PAIRING_MAX_ATTEMPTS + 2) {
+            last = now + TimeDelta::seconds(i64::from(attempt));
+            host.receive(join(Uuid::new_v4(), 3), last).unwrap();
         }
 
-        assert!(matches!(
-            host.receive(
-                join(joiner, 3),
-                now + TimeDelta::seconds(i64::from(PAIRING_MAX_ATTEMPTS) * 2)
-            ),
-            Err(VaultError::PairingRateLimited)
-        ));
-    }
+        let honest = Uuid::new_v4();
+        host.receive(join(honest, 3), last)
+            .expect("the offer budget belongs to the transport, per source");
 
-    #[test]
-    fn test_repeated_attempts_inside_the_retry_window_are_rate_limited() {
-        let now = Utc::now();
-        let source = Uuid::new_v4();
-        let (mut host, _) = PairingHost::start(Uuid::new_v4(), source, 3, [9u8; 32], now);
-
-        host.receive(join(Uuid::new_v4(), 3), now).unwrap();
-
-        assert!(matches!(
-            host.receive(join(Uuid::new_v4(), 3), now),
-            Err(VaultError::PairingRateLimited)
-        ));
+        assert_eq!(host.pending().unwrap().device_id, honest);
     }
 
     #[test]

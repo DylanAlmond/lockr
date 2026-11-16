@@ -434,10 +434,13 @@ pub struct SyncConflict {
     pub conflict: Conflict,
 }
 
-/// Why a same-identity Duplicate could not be settled by reconciliation.
+/// Why a move could not be settled by reconciliation.
+///
+/// This is a **Move Residue**: the copies share one identity, so it is not a
+/// Duplicate. The wire strings are unchanged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum DuplicateNoteReason {
+pub enum MoveResidueReason {
     /// The identity is still live in more than one Vault: a Move Record did
     /// not name exactly one of the copies, or did not causally cover it.
     LiveInMultipleVaults,
@@ -453,19 +456,19 @@ pub enum DuplicateNoteReason {
     Cycle,
 }
 
-/// A same item identity the session could not settle across Vaults.
+/// Move Residue: one Item identity the session could not settle across Vaults.
 ///
 /// The ordinary cross-Vault case - two Devices moving one Item to different
 /// destinations at the same time - is reconciled after the per-Vault merge:
 /// the losing live copy becomes a Move Record naming the winner. This note is
-/// the residue. It says why reconciliation stopped short, and it never
-/// carries Item content or secrets.
+/// what remains when that does not settle the move. It says why reconciliation
+/// stopped short, and it never carries Item content or secrets.
 ///
 /// It is scoped to the Vaults of the sync session, so both Devices derive the
 /// same note from the same merged state. `vault_ids` lists live copies only
 /// within that session; a copy outside it is named by `destinations` instead.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct DuplicateIdentityNote {
+pub struct MoveResidueNote {
     pub item_id: ItemId,
 
     /// Every Vault of this session still holding a live copy.
@@ -475,7 +478,7 @@ pub struct DuplicateIdentityNote {
     /// outside the session, or the point where a cycle closed.
     pub destinations: Vec<VaultId>,
 
-    pub reason: DuplicateNoteReason,
+    pub reason: MoveResidueReason,
 }
 
 /// What one completed sync produced.
@@ -489,8 +492,10 @@ pub struct SyncReport {
     /// Safe-view Conflicts. Secret values are never present.
     pub conflicts: Vec<SyncConflict>,
 
-    /// Same identity live in multiple Vaults; review as a Duplicate.
-    pub duplicate_notes: Vec<DuplicateIdentityNote>,
+    /// Move Residue: an identity or destination reconciliation could not
+    /// settle in this session. Serialized as `duplicate_notes` so the wire
+    /// format does not churn.
+    pub duplicate_notes: Vec<MoveResidueNote>,
 }
 
 /// Internal companion to [`SyncReport`]: the candidate values a resolution
@@ -1420,7 +1425,7 @@ impl<'a> SyncEngine<'a> {
 
         let (unfollowed, cycles) = self.reconcile_session_moves(session)?;
         outcome.report.duplicate_notes =
-            self.duplicate_identity_notes(session, &unfollowed, &cycles);
+            self.move_residue_notes(session, &unfollowed, &cycles)?;
 
         progress(SyncProgress::Complete {
             vaults: outcome.report.vault_ids.len(),
@@ -1428,6 +1433,22 @@ impl<'a> SyncEngine<'a> {
         });
 
         Ok(outcome)
+    }
+
+    /// Every Vault of this session that this Device holds.
+    ///
+    /// A Vault the two Sync Sets name but this Device does not hold is simply
+    /// absent; a Vault it does hold must be readable here. Both passes over
+    /// the session - move reconciliation and its residue - walk the session
+    /// once through this helper.
+    fn session_vaults(&self, session: &BTreeSet<VaultId>) -> Result<Vec<Vault>, VaultError> {
+        let mut vaults = Vec::new();
+        for vault_id in session {
+            if self.vault_manager.has_vault_file(*vault_id) {
+                vaults.push(self.vault_manager.get_vault(*vault_id)?.clone());
+            }
+        }
+        Ok(vaults)
     }
 
     /// Settle Move Records against the destination Vaults of this session.
@@ -1446,14 +1467,7 @@ impl<'a> SyncEngine<'a> {
         &mut self,
         session: &BTreeSet<VaultId>,
     ) -> Result<(Vec<(ItemId, VaultId)>, Vec<(ItemId, VaultId)>), VaultError> {
-        let mut vaults: Vec<Vault> = Vec::new();
-        for vault_id in session {
-            // A Vault the two Sync Sets name but this Device does not hold is
-            // simply absent; a Vault it does hold must be readable here.
-            if self.vault_manager.has_vault_file(*vault_id) {
-                vaults.push(self.vault_manager.get_vault(*vault_id)?.clone());
-            }
-        }
+        let vaults = self.session_vaults(session)?;
         let reconciliation = crate::merge::reconcile_moves(vaults.iter());
 
         let mut by_vault: BTreeMap<VaultId, Vec<crate::merge::MoveRetirement>> = BTreeMap::new();
@@ -1490,42 +1504,36 @@ impl<'a> SyncEngine<'a> {
         Ok((reconciliation.unfollowed, reconciliation.cycles))
     }
 
-    /// Same item identity still live in two session Vaults, a Move Record
-    /// naming a destination this session could not compare against, or a loop
-    /// of Move Records.
+    /// Move Residue: one identity still live in two session Vaults, a Move
+    /// Record naming a destination this session could not compare against, or
+    /// a loop of Move Records.
     ///
-    /// Reconciliation removes the ordinary opposite-move case, so this is the
-    /// residue: an identity a Move Record did not settle, a destination
+    /// Reconciliation removes the ordinary opposite-move case, so this is what
+    /// remains: an identity a Move Record did not settle, a destination
     /// outside the session, or a cycle. It never silently discards anything;
-    /// it names the reason so the caller can say why the Two Devices did not
+    /// it names the reason so the caller can say why the two Devices did not
     /// fully agree.
     ///
     /// Only the session's Vaults are considered. Scanning every unlocked
     /// Vault made the same sync report different notes on each Device, and
-    /// surfaced local-only Duplicates in Vaults the session never touched.
-    fn duplicate_identity_notes(
+    /// surfaced local-only Move Residue in Vaults the session never touched.
+    fn move_residue_notes(
         &self,
         session: &BTreeSet<VaultId>,
         unfollowed: &[(ItemId, VaultId)],
         cycles: &[(ItemId, VaultId)],
-    ) -> Vec<DuplicateIdentityNote> {
+    ) -> Result<Vec<MoveResidueNote>, VaultError> {
         let mut by_item: BTreeMap<ItemId, (Vec<VaultId>, Vec<VaultId>, Vec<VaultId>)> =
             BTreeMap::new();
 
-        for vault_id in session {
-            if !self.vault_manager.has_vault_file(*vault_id) {
-                continue;
-            }
-            let Ok(vault) = self.vault_manager.get_vault(*vault_id) else {
-                continue;
-            };
+        for vault in self.session_vaults(session)? {
             for item in &vault.items {
                 // Both a Tombstone and a Move Record are content-free; only a
-                // live copy can be a Duplicate identity.
+                // live copy can take part in Move Residue.
                 if item.is_content_free() {
                     continue;
                 }
-                by_item.entry(item.id).or_default().0.push(*vault_id);
+                by_item.entry(item.id).or_default().0.push(vault.id);
             }
         }
 
@@ -1537,7 +1545,7 @@ impl<'a> SyncEngine<'a> {
             by_item.entry(*item_id).or_default().2.push(*destination);
         }
 
-        by_item
+        Ok(by_item
             .into_iter()
             .filter_map(|(item_id, (mut vault_ids, mut destinations, mut cycles))| {
                 vault_ids.sort();
@@ -1549,23 +1557,23 @@ impl<'a> SyncEngine<'a> {
 
                 let reason = if !cycles.is_empty() {
                     destinations.extend(cycles);
-                    DuplicateNoteReason::Cycle
+                    MoveResidueReason::Cycle
                 } else if !destinations.is_empty() {
-                    DuplicateNoteReason::DestinationOutsideSession
+                    MoveResidueReason::DestinationOutsideSession
                 } else if vault_ids.len() < 2 {
                     return None;
                 } else {
-                    DuplicateNoteReason::LiveInMultipleVaults
+                    MoveResidueReason::LiveInMultipleVaults
                 };
 
-                Some(DuplicateIdentityNote {
+                Some(MoveResidueNote {
                     item_id,
                     vault_ids,
                     destinations,
                     reason,
                 })
             })
-            .collect()
+            .collect())
     }
 
     fn map_connect_error(err: NetworkError) -> VaultError {
@@ -5336,7 +5344,7 @@ mod tests {
                     .duplicate_notes
                     .iter()
                     .all(|note| note.item_id != fixture.item_id),
-                "an opposite move must converge, not be surfaced as a Duplicate"
+                "an opposite move must converge, not leave Move Residue"
             );
         }
 
@@ -5490,7 +5498,7 @@ mod tests {
                 .iter()
                 .find(|note| note.item_id == fixture.item_id)
                 .expect("the out-of-session destination must be reported");
-            assert_eq!(note.reason, DuplicateNoteReason::DestinationOutsideSession);
+            assert_eq!(note.reason, MoveResidueReason::DestinationOutsideSession);
             assert!(note.destinations.contains(&archive.id));
             assert!(
                 note.vault_ids.is_empty(),
@@ -5538,7 +5546,7 @@ mod tests {
                     .duplicate_notes
                     .iter()
                     .all(|note| note.item_id != fixture.item_id),
-                "a move followed by a delete is settled, not a Duplicate"
+                "a move followed by a delete is settled, not Move Residue"
             );
         }
 
@@ -5639,8 +5647,8 @@ mod tests {
                 .duplicate_notes
                 .iter()
                 .find(|note| note.item_id == fixture.item_id)
-                .expect("the edited loser stays live, so it is a Duplicate");
-            assert_eq!(note.reason, DuplicateNoteReason::LiveInMultipleVaults);
+                .expect("the edited loser stays live, so it is Move Residue");
+            assert_eq!(note.reason, MoveResidueReason::LiveInMultipleVaults);
             let mut expected = vec![a_destination, b_destination];
             expected.sort();
             assert_eq!(note.vault_ids, expected);
@@ -5726,7 +5734,7 @@ mod tests {
                 .iter()
                 .find(|note| note.item_id == fixture.item_id)
                 .expect("a cycle must be reported");
-            assert_eq!(note.reason, DuplicateNoteReason::Cycle);
+            assert_eq!(note.reason, MoveResidueReason::Cycle);
             assert!(note.vault_ids.is_empty(), "a loop ends at no live copy");
             assert!(note.destinations.contains(&fixture.vault_id));
         }
@@ -5782,7 +5790,7 @@ mod tests {
             assert_eq!(
                 live_vault_ids(device, fixture.item_id),
                 vec![fixture.vault_id],
-                "a move back is not a Duplicate"
+                "a move back is not Move Residue"
             );
             let record = item_in(device, archive.id, fixture.item_id);
             assert!(record.is_move_record());

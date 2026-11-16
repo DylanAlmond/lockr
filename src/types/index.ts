@@ -273,21 +273,22 @@ export interface SyncConflict {
  * Vaults. `live_in_multiple_vaults` leaves a live copy in more than one;
  * `destination_outside_session` names a Move Record destination this sync did
  * not include; `cycle` means Move Records loop with no live copy at the end. */
-export type DuplicateNoteReason =
+export type MoveResidueReason =
   | 'live_in_multiple_vaults'
   | 'destination_outside_session'
   | 'cycle';
 
-/** Residue from cross-Vault move reconciliation. It names where copies remain
- * and why, and never carries Item content or secrets. */
-export interface DuplicateIdentityNote {
+/** Move Residue from cross-Vault move reconciliation: one identity, not a
+ * Duplicate. It names where copies remain and why, and never carries Item
+ * content or secrets. */
+export interface MoveResidueNote {
   item_id: string;
   /** Vaults of this sync's session still holding a live copy. */
   vault_ids: string[];
   /** Vaults named by Move Records that could not be followed: either outside
    * the session or where a cycle closed. */
   destinations: string[];
-  reason: DuplicateNoteReason;
+  reason: MoveResidueReason;
 }
 
 export interface SyncReport {
@@ -295,7 +296,8 @@ export interface SyncReport {
   peer_device_id: string;
   vault_ids: string[];
   conflicts: SyncConflict[];
-  duplicate_notes: DuplicateIdentityNote[];
+  /** Move Residue, kept under its existing wire field name. */
+  duplicate_notes: MoveResidueNote[];
 }
 
 export type SyncProgress =
