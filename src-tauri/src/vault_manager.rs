@@ -663,6 +663,54 @@ impl VaultManager {
         Ok(())
     }
 
+    /// Forget Tombstones every admitted Device has acknowledged.
+    ///
+    /// `is_acknowledged` decides per Tombstone from its identity and deletion
+    /// clock. Only deletion Tombstones are candidates: a live Item or a Move
+    /// Record is never removed, however old. Vaults that change are saved
+    /// before this returns, so a purge is never only in memory.
+    ///
+    /// Returns what was removed, so the caller can prune the matching
+    /// acknowledgements.
+    pub(crate) fn compact_acknowledged_tombstones(
+        &mut self,
+        is_acknowledged: impl Fn(&ItemId, &VersionVector) -> bool,
+    ) -> Result<Vec<(VaultId, Vec<ItemId>)>, VaultError> {
+        let vault_ids: Vec<VaultId> = self.unlocked_vaults.keys().copied().collect();
+        let mut compacted = Vec::new();
+
+        for vault_id in vault_ids {
+            let unlocked = self
+                .unlocked_vaults
+                .get_mut(&vault_id)
+                .expect("the id came from this map");
+            let before = unlocked.vault.items.len();
+            let mut removed = Vec::new();
+            unlocked.vault.items.retain(|item| {
+                let forget = item.is_deleted() && is_acknowledged(&item.id, &item.clock);
+                if forget {
+                    removed.push(item.id);
+                }
+                !forget
+            });
+            if !removed.is_empty() {
+                debug_assert_eq!(
+                    unlocked.vault.items.len() + removed.len(),
+                    before,
+                    "retain removes exactly the acknowledged Tombstones"
+                );
+                unlocked.dirty = true;
+                compacted.push((vault_id, removed));
+            }
+        }
+
+        for (vault_id, _) in &compacted {
+            self.save_vault(*vault_id)?;
+        }
+
+        Ok(compacted)
+    }
+
     /// Create a new item of any kind, together with its secret fields, if
     /// the kind stores any (account items carry their initial password as
     /// the `password` field key). Secret keys are validated against the
@@ -2650,6 +2698,81 @@ mod tests {
             .get_all_items(ItemFilter::default())
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn test_compaction_removes_only_acknowledged_tombstones() {
+        let temp_dir = setup();
+        let mut manager = VaultManager::new(temp_dir.clone()).unwrap();
+        let vault_a = manager
+            .create_vault("A".to_string(), "#6240BF".to_string(), MASTER_PW, &KEY)
+            .unwrap();
+        let vault_b = manager
+            .create_vault("B".to_string(), "#6240BF".to_string(), MASTER_PW, &KEY)
+            .unwrap();
+
+        let deleted = add_test_note(&mut manager, vault_a.id, "Old", "Gone");
+        let deleted_id = safe_item_id(&deleted);
+        manager.delete_item(vault_a.id, deleted_id).unwrap();
+
+        let live = add_test_note(&mut manager, vault_a.id, "Live", "Kept");
+        let live_id = safe_item_id(&live);
+
+        let moved = add_test_note(&mut manager, vault_a.id, "Moved", "Elsewhere");
+        let moved_id = safe_item_id(&moved);
+        manager
+            .move_item(vault_a.id, moved_id, vault_b.id)
+            .unwrap();
+
+        let item_ids = |manager: &VaultManager| -> Vec<ItemId> {
+            manager
+                .get_vault(vault_a.id)
+                .unwrap()
+                .items
+                .iter()
+                .map(|item| item.id)
+                .collect()
+        };
+        assert!(item_ids(&manager).contains(&deleted_id));
+        assert!(item_ids(&manager).contains(&live_id));
+        assert!(
+            item_ids(&manager).contains(&moved_id),
+            "the source Vault keeps a Move Record"
+        );
+
+        // Nothing is acknowledged: nothing is forgotten.
+        assert!(manager
+            .compact_acknowledged_tombstones(|_, _| false)
+            .unwrap()
+            .is_empty());
+        assert_eq!(item_ids(&manager).len(), 3);
+
+        let compacted = manager
+            .compact_acknowledged_tombstones(|item_id, _| *item_id == deleted_id)
+            .unwrap();
+
+        assert_eq!(compacted.len(), 1);
+        assert_eq!(compacted[0].0, vault_a.id);
+        assert_eq!(
+            compacted[0].1,
+            vec![deleted_id],
+            "the caller is told exactly which acknowledgements to prune"
+        );
+        assert!(!item_ids(&manager).contains(&deleted_id));
+        assert!(
+            item_ids(&manager).contains(&live_id),
+            "compaction must never remove a live Item"
+        );
+        assert!(
+            item_ids(&manager).contains(&moved_id),
+            "compaction must never remove a Move Record"
+        );
+
+        // The purge is saved, not just applied in memory.
+        manager.lock_vault(Some(vault_a.id));
+        let reloaded = manager.unlock_vault(vault_a.id, MASTER_PW, &KEY).unwrap();
+        assert_eq!(reloaded.items.len(), 2);
+        assert!(reloaded.items.iter().all(|item| item.id != deleted_id));
     }
 
     #[test]

@@ -252,6 +252,18 @@ function abandonOpenConflicts() {
   });
 }
 
+/**
+ * A conflict with no local side is refreshed by an explicit, user-started sync
+ * with the same peer. There is no automatic retry: a peer that is offline
+ * would turn one clear message into a spinner and then a different error.
+ */
+async function resyncFromConflict(peerDeviceId: string) {
+  const device = devices.value.find((candidate) => candidate.device_id === peerDeviceId);
+  if (!device) return;
+  abandonConflicts();
+  await syncNow(device);
+}
+
 function openPairing(initialMode: 'source' | 'join') {
   openModal(markRaw(PairingModal), {
     initialMode,
@@ -602,10 +614,10 @@ onBeforeRouteLeave(() => {
       :session="conflicts"
       :vault-names="vaultNames"
       :device-names="deviceNames"
-      :this-device-id="thisDevice?.device_id ?? null"
       :busy="isResolvingConflict"
       :error="conflictError"
       @resolve="handleResolveConflict"
+      @resync="resyncFromConflict"
       @abandon="abandonOpenConflicts"
     />
   </AppShell>

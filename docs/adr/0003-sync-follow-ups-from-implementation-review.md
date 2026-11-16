@@ -44,9 +44,20 @@ pending defect. The guard exists at issuance; a modified client can bypass it.
 ### 2. Tombstone compaction is acknowledgement-based
 
 A Tombstone may be forgotten once every currently-admitted Device has
-acknowledged a clock covering it. Each Device publishes its applied clock in the
-shared registry; revoked Devices are excluded from the acknowledgement set, which
-is safe because they can never sync again.
+acknowledged the clock that created it. Each Device publishes, in the shared
+registry, the Tombstone clocks it has applied — **keyed by the deleted Item, not
+one clock for the Device**, because a single device-wide vector would let an
+unrelated Item's counter cover a deletion that Device has never seen, purging a
+deletion it still needs.
+
+That publication is signed with the publishing Device's own key and carries a
+monotone sequence, so no Device can acknowledge on another's behalf, an older copy
+can never override a newer one, and a forged publication fails verification rather
+than being silently kept. Acknowledgements for a Tombstone are pruned once it has
+been compacted; a stale copy cannot revive them.
+
+Revoked Devices are excluded from the acknowledgement set, which is safe because
+they can never sync again.
 
 A Device that never returns therefore holds up compaction indefinitely. That is
 accepted: tombstones are tiny, and the alternative deletes a deletion a live
@@ -121,8 +132,14 @@ not scheduled.
 
 - Revocation has a known, documented window until rotation lands. That window must
   be stated in user-facing copy, not only in this file.
-- Compaction depends on an acknowledgement that does not exist yet; until it does,
-  tombstones accumulate and nothing is lost.
+- Compaction now deletes acknowledged tombstones. A Device that is offline while
+  peers prune can temporarily lose acknowledgements it still needs; it keeps the
+  Tombstone, re-acknowledges on its next sync, and compaction completes then.
+  Pruning can delay compaction; it cannot cause resurrection.
+- A forged acknowledgement fails the whole registry merge, so an admitted
+  malicious peer can block a sync. That is the fail-closed trade-off: refusing the
+  merge is preferable to accepting a publication that could resurrect deleted
+  Items.
 - The reconciliation pass gives sync a whole-session step it did not have before.
   It must not become a place where cross-vault invariants are quietly enforced.
 - Adding a frontend harness creates an expectation of frontend tests. It is scoped

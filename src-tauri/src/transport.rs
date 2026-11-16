@@ -40,8 +40,9 @@
 //! hold a worker indefinitely. [`PeerChannel::receive_timeout`] tightens the
 //! read deadline for one call.
 
+use std::collections::HashMap;
 use std::io::{self, Read, Write};
-use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
+use std::net::{IpAddr, Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
 use std::sync::{Arc, Mutex, RwLock};
@@ -312,6 +313,12 @@ impl DeviceDirectory for crate::registry::DeviceRegistry {
             .filter(|record| !record.is_revoked())
             .map(|record| record.public_key.clone())
     }
+
+    fn snapshot(&self) -> Arc<dyn DeviceDirectory> {
+        // This value was itself a snapshot when it was created; a copy is the
+        // best current view it can offer.
+        Arc::new(self.clone())
+    }
 }
 
 /// Everything a connection worker needs at the moment it accepts a socket.
@@ -326,11 +333,16 @@ struct SessionState {
     keypair: Option<Arc<DeviceKeypair>>,
     devices: Option<Arc<dyn DeviceDirectory>>,
     pairing_claim: Option<PairingClaim>,
-    /// Failed pairing authentications against the registered claim. The
-    /// application-level pairing host has the authoritative attempt budget;
-    /// the transport needs its own because otherwise an attacker could brute
-    /// force the 40-bit typed fallback without ever reaching that code.
-    pairing_failures: u32,
+    /// Failed pairing authentications for the open offer, counted per source
+    /// address. The application-level pairing host has the authoritative
+    /// attempt budget; the transport needs its own because otherwise an
+    /// attacker could brute force the 40-bit typed fallback without ever
+    /// reaching that code.
+    ///
+    /// The budget is per source, never per offer: junk from one address must
+    /// not invalidate the offer for the Device that is actually joining. A new
+    /// offer starts with an empty map.
+    pairing_failures: HashMap<IpAddr, u32>,
 }
 
 impl Default for SessionState {
@@ -339,7 +351,7 @@ impl Default for SessionState {
             keypair: None,
             devices: None,
             pairing_claim: None,
-            pairing_failures: 0,
+            pairing_failures: HashMap::new(),
         }
     }
 }
@@ -348,18 +360,31 @@ impl SessionState {
     fn snapshot(&self) -> SessionSnapshot {
         SessionSnapshot {
             keypair: self.keypair.clone(),
-            devices: self.devices.clone(),
+            // A long-lived session must not authenticate against the
+            // registry as it looked when the session started.
+            devices: self
+                .devices
+                .as_ref()
+                .map(|devices| devices.snapshot()),
             pairing_claim: self.pairing_claim.clone(),
         }
     }
 
-    fn record_pairing_failure(&mut self) {
-        self.pairing_failures = self.pairing_failures.saturating_add(1);
-        if self.pairing_failures >= crate::pairing::PAIRING_MAX_ATTEMPTS {
-            // Burn the transport's copy of the secret. The application host
-            // will separately refuse further joins on its own budget.
-            self.pairing_claim = None;
-        }
+    /// Whether this source has spent its pairing attempts for the open offer.
+    fn pairing_exhausted(&self, source: IpAddr) -> bool {
+        self.pairing_failures.get(&source).copied().unwrap_or(0)
+            >= crate::pairing::PAIRING_MAX_ATTEMPTS
+    }
+
+    /// Count one failure against the source address. The offer itself is
+    /// deliberately left untouched.
+    fn record_pairing_failure(&mut self, source: IpAddr) {
+        let failures = self.pairing_failures.entry(source).or_insert(0);
+        *failures = failures.saturating_add(1);
+    }
+
+    fn clear_pairing_failures(&mut self) {
+        self.pairing_failures.clear();
     }
 }
 
@@ -457,6 +482,9 @@ struct TlsChannel {
     stream: Option<TlsStream>,
     peer: Option<DeviceId>,
     frame_timeout: Duration,
+    /// Partial bytes of a frame that is still arriving. A short read deadline
+    /// must not discard them: the next slice resumes this same frame.
+    frames: FrameReader,
     /// Holds the "one inbound sync at a time" claim for the lifetime of this
     /// channel, so the next connection is admitted only once this one is gone.
     _inbound_claim: Option<InboundClaim>,
@@ -477,6 +505,7 @@ impl TlsChannel {
             stream: Some(stream),
             peer,
             frame_timeout,
+            frames: FrameReader::default(),
             _inbound_claim: inbound_claim,
         }
     }
@@ -497,17 +526,20 @@ impl PeerChannel for TlsChannel {
     }
 
     fn receive(&mut self) -> Result<SyncMessage, NetworkError> {
-        read_frame(self.stream()?)
+        let stream = self.stream.as_mut().ok_or(NetworkError::ConnectionClosed)?;
+        self.frames.read_frame(stream)
     }
 
     fn receive_timeout(&mut self, timeout: Duration) -> Result<SyncMessage, NetworkError> {
         let frame_timeout = self.frame_timeout;
-        let stream = self.stream()?;
+        let stream = self.stream.as_mut().ok_or(NetworkError::ConnectionClosed)?;
         stream
             .socket()
             .set_read_timeout(Some(timeout))
             .map_err(map_io_error)?;
-        let result = read_frame(stream);
+        // A timeout keeps whatever bytes arrived, so the engine can slice a
+        // blocked read without losing the frame in flight.
+        let result = self.frames.read_frame(stream);
         // Restore the connection's normal deadline even when the call failed.
         let _ = stream.socket().set_read_timeout(Some(frame_timeout));
         result
@@ -535,17 +567,54 @@ fn read_exact<R: Read>(reader: &mut R, buffer: &mut [u8]) -> Result<(), NetworkE
     reader.read_exact(buffer).map_err(map_io_error)
 }
 
-fn read_frame<R: Read>(reader: &mut R) -> Result<SyncMessage, NetworkError> {
-    let mut header = [0u8; HEADER_LEN];
-    read_exact(reader, &mut header)?;
-    // The length is validated against magic, protocol version, and ceiling
-    // before a payload buffer is allocated.
-    let payload_len = frame_payload_len(&header)?;
-    let mut frame = Vec::with_capacity(HEADER_LEN + payload_len);
-    frame.extend_from_slice(&header);
-    frame.resize(HEADER_LEN + payload_len, 0);
-    read_exact(reader, &mut frame[HEADER_LEN..])?;
-    decode_frame(&frame)
+/// A frame reader that survives a read deadline.
+///
+/// `read_exact` loses its place when a socket read times out, which would make
+/// reading in short slices corrupt the stream. This keeps the bytes already
+/// received, so the next call resumes the same frame. A timeout is the only
+/// error that leaves the buffer intact; anything else poisons the connection
+/// and the caller closes it.
+#[derive(Default)]
+struct FrameReader {
+    received: Vec<u8>,
+}
+
+impl FrameReader {
+    fn read_frame<R: Read>(&mut self, reader: &mut R) -> Result<SyncMessage, NetworkError> {
+        self.fill_to(reader, HEADER_LEN)?;
+
+        // The length is validated against magic, protocol version, and ceiling
+        // before a payload buffer is allocated.
+        let header: &[u8; HEADER_LEN] = self.received[..HEADER_LEN]
+            .try_into()
+            .expect("fill_to guarantees a complete header");
+        let payload_len = match frame_payload_len(header) {
+            Ok(payload_len) => payload_len,
+            Err(error) => {
+                // A malformed header is not recoverable on this connection.
+                self.received.clear();
+                return Err(error);
+            }
+        };
+
+        self.fill_to(reader, HEADER_LEN + payload_len)?;
+        // A blocking read may deliver more than one frame; keep the remainder
+        // for the next call instead of handing it to the decoder.
+        let frame: Vec<u8> = self.received.drain(..HEADER_LEN + payload_len).collect();
+        decode_frame(&frame)
+    }
+
+    fn fill_to<R: Read>(&mut self, reader: &mut R, target: usize) -> Result<(), NetworkError> {
+        while self.received.len() < target {
+            let mut chunk = [0u8; 4096];
+            match reader.read(&mut chunk) {
+                Ok(0) => return Err(NetworkError::ConnectionClosed),
+                Ok(read) => self.received.extend_from_slice(&chunk[..read]),
+                Err(error) => return Err(map_io_error(error)),
+            }
+        }
+        Ok(())
+    }
 }
 
 fn map_io_error(error: io::Error) -> NetworkError {
@@ -1330,6 +1399,19 @@ impl TlsNetwork {
         self.connect_sync(peer, Some(captured_client_auth))
     }
 
+    /// Test-only: spend one source address's pairing attempt budget without
+    /// opening a socket, so a test can prove another address still joins.
+    #[cfg(test)]
+    fn record_pairing_failures_from(&self, source: IpAddr, attempts: u32) {
+        let mut session = self
+            .session
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for _ in 0..attempts {
+            session.record_pairing_failure(source);
+        }
+    }
+
     /// Test-only: the pairing equivalent of [`Self::connect_replaying`].
     #[cfg(test)]
     fn connect_for_pairing_replaying(
@@ -1391,6 +1473,9 @@ fn run_inbound_connection(
         return;
     }
     let _ = socket.set_nodelay(true);
+    // The pairing attempt budget is per source address, so this must be read
+    // before the socket is moved into the TLS stream.
+    let source = socket.peer_addr().map(|address| address.ip()).ok();
 
     let connection = match ServerConnection::new(Arc::clone(&configs.server)) {
         Ok(connection) => connection,
@@ -1430,13 +1515,29 @@ fn run_inbound_connection(
             authenticate_server_sync(&mut stream, &snapshot, device_id)
                 .map(|peer| (Some(peer), &sync_sender, claim))
         }
-        Some(ALPN_PAIR) => match snapshot.pairing_claim.as_ref() {
-            // A pairing channel's peer id is unknown until the join frame
-            // names the joining Device, so it is deliberately `None`.
-            Some(claim) => authenticate_server_pairing(&mut stream, claim)
-                .map(|()| (None, &pairing_sender, None)),
-            None => Err(NetworkError::AuthenticationFailed),
-        },
+        Some(ALPN_PAIR) => {
+            // An address that has spent its attempts is cut off before the
+            // expensive proof is computed. Other addresses, and the offer
+            // itself, are untouched.
+            let exhausted = source.is_some_and(|source| {
+                session
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .pairing_exhausted(source)
+            });
+            if exhausted {
+                Err(NetworkError::AuthenticationFailed)
+            } else {
+                match snapshot.pairing_claim.as_ref() {
+                    // A pairing channel's peer id is unknown until the join
+                    // frame names the joining Device, so it is deliberately
+                    // `None`.
+                    Some(claim) => authenticate_server_pairing(&mut stream, claim)
+                        .map(|()| (None, &pairing_sender, None)),
+                    None => Err(NetworkError::AuthenticationFailed),
+                }
+            }
+        }
         // A client that negotiated no protocol, or one we did not offer, gets
         // nothing. `alpn_protocols` is advertised on the server config, so this
         // is only reachable by a hand-crafted peer.
@@ -1458,15 +1559,17 @@ fn run_inbound_connection(
             let _ = sender.try_send(channel);
         }
         Err(_) => {
-            // Every failed pairing attempt counts against the transport's
-            // budget, including a malformed or timed-out one: otherwise an
-            // attacker could brute force the typed fallback without ever
-            // producing a valid-looking confirmation.
+            // Every failed pairing attempt counts against its source address,
+            // including a malformed or timed-out one: otherwise an attacker
+            // could brute force the typed fallback without ever producing a
+            // valid-looking confirmation. The offer is never burned.
             if alpn.as_deref() == Some(ALPN_PAIR) {
-                session
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .record_pairing_failure();
+                if let Some(source) = source {
+                    session
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .record_pairing_failure(source);
+                }
             }
             refuse_connection(&mut stream);
         }
@@ -1568,7 +1671,7 @@ impl PeerNetwork for TlsNetwork {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         session.pairing_claim = Some(claim.clone());
-        session.pairing_failures = 0;
+        session.clear_pairing_failures();
         Ok(())
     }
 
@@ -1578,7 +1681,7 @@ impl PeerNetwork for TlsNetwork {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         session.pairing_claim = None;
-        session.pairing_failures = 0;
+        session.clear_pairing_failures();
         drop(session);
 
         // Drop anything already queued: a pairing secret is single use, and a
@@ -1685,7 +1788,7 @@ impl PeerNetwork for TlsNetwork {
         state.keypair = None;
         state.devices = None;
         state.pairing_claim = None;
-        state.pairing_failures = 0;
+        state.clear_pairing_failures();
     }
 }
 
@@ -1829,6 +1932,28 @@ mod tests {
         registry
     }
 
+    /// A directory whose session-start view is deliberately stale, but whose
+    /// `snapshot` reads the live registry. It proves the transport refreshes
+    /// per connection rather than reusing the view it was handed at session
+    /// start.
+    struct RefreshingDirectory {
+        current: Arc<StdMutex<DeviceRegistry>>,
+        stale: DeviceRegistry,
+    }
+
+    impl DeviceDirectory for RefreshingDirectory {
+        fn admitted_public_key(&self, device_id: &DeviceId) -> Option<String> {
+            self.stale
+                .get(device_id)
+                .filter(|record| !record.is_revoked())
+                .map(|record| record.public_key.clone())
+        }
+
+        fn snapshot(&self) -> Arc<dyn DeviceDirectory> {
+            Arc::new(self.current.lock().unwrap().clone())
+        }
+    }
+
     fn setup_dir(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("lockr_transport_{tag}_{}", Uuid::new_v4()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1838,6 +1963,40 @@ mod tests {
 
     fn contains(haystack: &[u8], needle: &[u8]) -> bool {
         haystack.windows(needle.len()).any(|window| window == needle)
+    }
+
+    /// A reader that delivers `data` in order and returns `WouldBlock` exactly
+    /// once, when it reaches `block_at`. A real socket does the same when a
+    /// read deadline expires mid-frame.
+    struct TimedSliceReader {
+        data: Vec<u8>,
+        position: usize,
+        block_at: Option<usize>,
+    }
+
+    impl Read for TimedSliceReader {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            if let Some(block_at) = self.block_at {
+                if self.position >= block_at {
+                    self.block_at = None;
+                    return Err(io::Error::new(io::ErrorKind::WouldBlock, "slice expired"));
+                }
+                let available = (block_at - self.position).min(buffer.len());
+                let read = available.min(self.data.len() - self.position);
+                buffer[..read]
+                    .copy_from_slice(&self.data[self.position..self.position + read]);
+                self.position += read;
+                return Ok(read);
+            }
+
+            if self.position >= self.data.len() {
+                return Ok(0);
+            }
+            let read = buffer.len().min(self.data.len() - self.position);
+            buffer[..read].copy_from_slice(&self.data[self.position..self.position + read]);
+            self.position += read;
+            Ok(read)
+        }
     }
 
     /// A TCP forwarder that records every byte it carries. Pointing both the
@@ -2186,6 +2345,53 @@ mod tests {
     }
 
     #[test]
+    fn test_a_device_revoked_mid_session_cannot_authenticate_a_new_connection() {
+        let a_id = Uuid::new_v4();
+        let b_id = Uuid::new_v4();
+        let a_key = Arc::new(DeviceKeypair::generate());
+        let b_key = Arc::new(DeviceKeypair::generate());
+        let registry = registry_for(a_id, &a_key, b_id, &b_key);
+        let current = Arc::new(StdMutex::new(registry.clone()));
+
+        let a = test_network(a_id);
+        let b = test_network(b_id);
+        a.set_session(&key_session(a_id, &a_key, &registry)).unwrap();
+        // B's session starts with this registry view, but its directory can
+        // reload. Only a per-connection snapshot sees the later revocation.
+        b.set_session(&TransportSession {
+            device_id: b_id,
+            keypair: Arc::clone(&b_key),
+            devices: Arc::new(RefreshingDirectory {
+                current: Arc::clone(&current),
+                stale: registry.clone(),
+            }),
+        })
+        .unwrap();
+        b.start_advertising().unwrap();
+
+        let mut first = a.connect(&peer_for(&b, b_id)).unwrap();
+        let mut accepted = b.accept().unwrap().expect("the first connection is accepted");
+        first.close();
+        accepted.close();
+        drop(accepted);
+
+        current
+            .lock()
+            .unwrap()
+            .revoke(&a_id, Utc::now(), &b_id, &b_key)
+            .unwrap();
+
+        let Err(error) = a.connect(&peer_for(&b, b_id)) else {
+            panic!("a Device revoked mid-session must not authenticate a new connection");
+        };
+        assert_eq!(error, NetworkError::AuthenticationFailed);
+        assert!(
+            b.accept().unwrap().is_none(),
+            "the refused connection must not reach the queue"
+        );
+    }
+
+    #[test]
     fn test_a_wrong_pairing_secret_is_refused_and_does_not_burn_the_offer() {
         let a_id = Uuid::new_v4();
         let b_id = Uuid::new_v4();
@@ -2228,7 +2434,81 @@ mod tests {
     }
 
     #[test]
-    fn test_repeated_wrong_pairing_secrets_burn_the_transport_offer() {
+    fn test_pairing_attempt_budget_is_per_source_address_not_per_offer() {
+        let now = Utc::now();
+        let (_, offer) = crate::pairing::PairingHost::start(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            CURRENT_SCHEMA_VERSION,
+            [7u8; 32],
+            now,
+        );
+        let claim = PairingCode::qr(offer.qr_payload.clone()).claim().unwrap();
+
+        let mut state = SessionState::default();
+        state.pairing_claim = Some(claim);
+        let attacker: IpAddr = "203.0.113.9".parse().unwrap();
+        let insider: IpAddr = "203.0.113.10".parse().unwrap();
+
+        for _ in 0..crate::pairing::PAIRING_MAX_ATTEMPTS {
+            state.record_pairing_failure(attacker);
+        }
+
+        assert!(
+            state.pairing_exhausted(attacker),
+            "the source that spent the budget is refused"
+        );
+        assert!(
+            !state.pairing_exhausted(insider),
+            "another source keeps its own budget"
+        );
+        assert!(
+            state.pairing_claim.is_some(),
+            "a failed attempt never invalidates the open offer"
+        );
+    }
+
+    #[test]
+    fn test_junk_pairing_attempts_from_one_address_cannot_burn_the_offer() {
+        let a_id = Uuid::new_v4();
+        let b_id = Uuid::new_v4();
+        let a = test_network(a_id);
+        let b = test_network(b_id);
+        a.start_advertising().unwrap();
+
+        let now = Utc::now();
+        let (_, offer) = crate::pairing::PairingHost::start(
+            Uuid::new_v4(),
+            a_id,
+            CURRENT_SCHEMA_VERSION,
+            [7u8; 32],
+            now,
+        );
+        let claim = PairingCode::qr(offer.qr_payload.clone()).claim().unwrap();
+        a.begin_pairing(&claim).unwrap();
+
+        // Five junk connections from one address, the budget the ticket cites.
+        let attacker: IpAddr = "203.0.113.9".parse().unwrap();
+        a.record_pairing_failures_from(attacker, crate::pairing::PAIRING_MAX_ATTEMPTS);
+
+        // The legitimate joining Device is on a different address, and its
+        // join is unaffected by the attacker's spent budget.
+        let peer = peer_for(&a, a_id);
+        let mut initiator = b
+            .connect_for_pairing(&peer, &claim)
+            .expect("junk from another address must not burn the offer");
+        let mut responder = a
+            .accept_for_pairing(&claim)
+            .unwrap()
+            .expect("the legitimate pairing is queued");
+        initiator.send(SyncMessage::Complete).unwrap();
+        assert_eq!(responder.receive().unwrap(), SyncMessage::Complete);
+        initiator.close();
+        responder.close();
+    }
+
+    #[test]
+    fn test_repeated_junk_from_one_address_is_cut_off_without_burning_the_offer() {
         let a_id = Uuid::new_v4();
         let b_id = Uuid::new_v4();
         let a = test_network(a_id);
@@ -2247,25 +2527,25 @@ mod tests {
         a.begin_pairing(&claim).unwrap();
         let peer = peer_for(&a, a_id);
 
-        for attempt in 0..crate::pairing::PAIRING_MAX_ATTEMPTS {
+        // Every junk connection comes from the same loopback address, so each
+        // one spends that address's budget.
+        for _ in 0..crate::pairing::PAIRING_MAX_ATTEMPTS {
             let wrong = PairingCode::typed(a_id, PairingSecret::generate().typed_code())
                 .claim()
                 .unwrap();
-            assert!(
-                b.connect_for_pairing(&peer, &wrong).is_err(),
-                "wrong attempt {attempt} must be refused"
-            );
+            assert!(b.connect_for_pairing(&peer, &wrong).is_err());
         }
 
-        // The budget is now spent. Even the genuine secret cannot open the
-        // transport's copy of the offer any more.
+        // That address is cut off even with the genuine secret...
         let Err(error) = b.connect_for_pairing(&peer, &claim) else {
-            panic!("the pairing offer must be burned after its attempt budget");
+            panic!("a source that spent its budget must be refused");
         };
         assert_eq!(error, NetworkError::AuthenticationFailed);
-        assert_eq!(
-            a.accept_for_pairing(&claim).err(),
-            Some(NetworkError::AuthenticationFailed)
+        // ...but the offer itself is still live: `accept_for_pairing` waits
+        // for a connection instead of reporting that the claim is gone.
+        assert!(
+            a.accept_for_pairing(&claim).unwrap().is_none(),
+            "the offer must survive an exhausted source"
         );
     }
 
@@ -2401,6 +2681,46 @@ mod tests {
         assert!(
             accepted.load(Ordering::SeqCst),
             "the peer really accepted the connection"
+        );
+    }
+
+    #[test]
+    fn test_a_frame_interrupted_by_a_slice_timeout_is_resumed_not_lost() {
+        // A whole frame, delivered in two pieces across two receive calls. The
+        // split is inside the header, so the first call cannot even know the
+        // payload length; the bytes read must survive the timeout.
+        let frame = crate::network::encode_frame(&SyncMessage::Complete).unwrap();
+        let mut reader = TimedSliceReader {
+            data: frame,
+            position: 0,
+            block_at: Some(HEADER_LEN - 1),
+        };
+        let mut frames = FrameReader::default();
+
+        assert_eq!(
+            frames.read_frame(&mut reader),
+            Err(NetworkError::Timeout),
+            "the first slice ends before the header is complete"
+        );
+        assert_eq!(
+            frames.read_frame(&mut reader),
+            Ok(SyncMessage::Complete),
+            "the rest of the frame must complete the same message, not a new one"
+        );
+    }
+
+    #[test]
+    fn test_two_frames_arriving_in_one_read_are_not_merged() {
+        let mut wire = crate::network::encode_frame(&SyncMessage::Complete).unwrap();
+        wire.extend_from_slice(&crate::network::encode_frame(&SyncMessage::Complete).unwrap());
+        let mut reader = std::io::Cursor::new(wire);
+        let mut frames = FrameReader::default();
+
+        assert_eq!(frames.read_frame(&mut reader), Ok(SyncMessage::Complete));
+        assert_eq!(
+            frames.read_frame(&mut reader),
+            Ok(SyncMessage::Complete),
+            "a read that carried two frames must not confuse the decoder"
         );
     }
 

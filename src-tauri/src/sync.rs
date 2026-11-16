@@ -68,8 +68,8 @@ use crate::registry::{SharedRegistries, VaultRegistry};
 use crate::user_manager::UserManager;
 use crate::vault_manager::VaultManager;
 use crate::{
-    Conflict, ConflictScope, DeviceId, FieldVersion, ItemId, MergeError, MergeOutcome, UserId, Vault,
-    VaultError, VaultId, CURRENT_SCHEMA_VERSION,
+    Conflict, ConflictScope, DeviceId, FieldVersion, ItemId, MergeError, MergeOutcome, UserId,
+    Vault, VaultError, VaultId, VersionVector, CURRENT_SCHEMA_VERSION,
 };
 
 /// Device-local file holding Sync Sets and last-sync timestamps. It is never
@@ -83,6 +83,12 @@ const SYNC_STATE_FILE: &str = "sync_state.json";
 /// other command waiting on the same state — blocked indefinitely.
 pub const SYNC_FRAME_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// How long one read slice may block before the cancel flag is checked again.
+///
+/// A blocked read cannot observe cancellation itself, so the engine reads in
+/// slices and re-checks between them. Cancelling therefore costs at most one
+/// slice, not the whole frame deadline.
+const SYNC_CANCEL_SLICE: Duration = Duration::from_millis(100);
 
 /// The Sync Set rule for one Device.
 ///
@@ -646,6 +652,7 @@ impl<'a> SyncEngine<'a> {
         progress: &mut dyn FnMut(SyncProgress),
     ) -> Result<SyncStart, VaultError> {
         let user_id = self.signed_in_user()?;
+        self.publish_acknowledgements()?;
         let shared = self.user_manager.get_shared_profile(&user_id)?;
 
         // Pairing is the only grant of access. Discovery, or a channel that
@@ -816,6 +823,11 @@ impl<'a> SyncEngine<'a> {
             return Err(error);
         }
 
+        // Publish our applied Tombstone clocks before merging the peer's
+        // registry, so this Device's Acknowledgement is part of the state the
+        // merge evaluates.
+        self.publish_acknowledgements()?;
+
         let remote_scope = self.receive_scope(&mut *channel)?;
         let merged_registry = self.merge_registries(&remote_scope.registries)?;
         if let Err(error) = self.require_admitted_peer(peer_device_id, &merged_registry.devices) {
@@ -969,6 +981,72 @@ impl<'a> SyncEngine<'a> {
         Ok(self.user_manager.get_shared_profile(&user_id)?.devices)
     }
 
+    /// The unwrapped signing key for the current session, or the same error a
+    /// revocation reports when the session cannot sign.
+    fn signing_keypair(&self) -> Result<Arc<crate::device::DeviceKeypair>, VaultError> {
+        self.user_manager.session_keypair().ok_or_else(|| {
+            VaultError::DeviceRegistry(
+                "this Device has no signing key for the session; sign in again".into(),
+            )
+        })
+    }
+
+    /// Publish the Tombstone clocks this Device has applied, so every peer can
+    /// tell when a Tombstone may be forgotten.
+    ///
+    /// Called before a Scope is sent: this advertises what is already applied,
+    /// not what the session is about to apply. A Tombstone first applied now
+    /// is therefore acknowledged on the *next* sync, which is exactly the
+    /// round trip compaction depends on.
+    ///
+    /// The publication is the persisted map: the registry record keeps what
+    /// this Device already saw, so a sync with no Vault unlocked republishes
+    /// that history instead of silently dropping it. That is what stops a user
+    /// who always syncs with Vaults locked from blocking compaction forever.
+    fn publish_acknowledgements(&self) -> Result<(), VaultError> {
+        let user_id = self.signed_in_user()?;
+        let mut shared = self.user_manager.get_shared_profile(&user_id)?;
+        let device_id = self.vault_manager.device_id();
+        let keypair = self.signing_keypair()?;
+
+        let applied: Vec<(ItemId, VersionVector)> = self
+            .vault_manager
+            .get_unlocked_vaults()
+            .into_iter()
+            .filter_map(|safe| self.vault_manager.get_vault(safe.id).ok())
+            .flat_map(|vault| vault.items.iter())
+            .filter(|item| item.is_deleted())
+            .map(|item| (item.id, item.clock.clone()))
+            .collect();
+
+        if shared
+            .devices
+            .acknowledge(&device_id, applied, keypair.as_ref())?
+        {
+            self.user_manager.save_shared_profile(&shared)?;
+        }
+        Ok(())
+    }
+
+    /// Forget every Tombstone that every currently admitted Device has
+    /// acknowledged, returning the identities whose acknowledgements are no
+    /// longer needed. Revoked Devices are excluded: they can never sync again,
+    /// so their silence must not retain a deletion forever.
+    fn compact_tombstones(
+        &mut self,
+        devices: &crate::DeviceRegistry,
+    ) -> Result<Vec<ItemId>, VaultError> {
+        let compacted = self
+            .vault_manager
+            .compact_acknowledged_tombstones(|item_id, clock| {
+                devices.is_acknowledged(item_id, clock)
+            })?;
+        Ok(compacted
+            .into_iter()
+            .flat_map(|(_, item_ids)| item_ids)
+            .collect())
+    }
+
     /// Refuse a peer that this User has not admitted, or has revoked.
     ///
     /// An unknown Device is not "merely unrevoked": `is_revoked` is false for
@@ -997,17 +1075,36 @@ impl<'a> SyncEngine<'a> {
 
     /// Receive one frame, refusing to wait forever and honouring cancellation.
     ///
-    /// A transport may only observe the cancel token at the next frame
-    /// boundary, so a cancel that arrives while a frame is in flight is
-    /// reported as a cancellation rather than as a timeout. Cancellation
-    /// latency is therefore bounded by [`SYNC_FRAME_TIMEOUT`].
+    /// A blocking transport cannot see the cancel token, so the engine reads in
+    /// short slices and re-checks between them. A frame that arrives in pieces
+    /// is resumed by the transport across calls; a cancel that arrives while a
+    /// frame is in flight is reported after at most [`SYNC_CANCEL_SLICE`].
     fn receive_frame(&self, channel: &mut dyn PeerChannel) -> Result<SyncMessage, VaultError> {
         self.check_cancelled()?;
-        match channel.receive_timeout(SYNC_FRAME_TIMEOUT) {
-            Ok(message) => Ok(message),
-            Err(error) => {
+        let deadline = std::time::Instant::now() + SYNC_FRAME_TIMEOUT;
+        loop {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
                 self.check_cancelled()?;
-                Err(Self::map_channel_error(error))
+                return Err(Self::map_channel_error(NetworkError::Timeout));
+            }
+
+            match channel.receive_timeout(remaining.min(SYNC_CANCEL_SLICE)) {
+                Ok(message) => {
+                    // A cancel that raced the arrival still wins: the caller
+                    // asked to stop and the frame can be read again next time.
+                    self.check_cancelled()?;
+                    return Ok(message);
+                }
+                Err(NetworkError::Timeout) => {
+                    // The slice expired, not the frame deadline. Check the
+                    // flag and keep waiting for the rest of the frame.
+                    self.check_cancelled()?;
+                }
+                Err(error) => {
+                    self.check_cancelled()?;
+                    return Err(Self::map_channel_error(error));
+                }
             }
         }
     }
@@ -1051,7 +1148,25 @@ impl<'a> SyncEngine<'a> {
             .map(|tombstone| tombstone.vault_id)
             .collect();
 
+        // The registries this session will send, taken before this Device
+        // prunes its own acknowledgements. A peer still needs the claim that
+        // justifies the purge, and the pruned publication only supersedes it
+        // on the next sync.
+        let outgoing = shared.registries();
+
         self.user_manager.save_shared_profile(&shared)?;
+
+        let compacted = self.compact_tombstones(&shared.devices)?;
+        if !compacted.is_empty() {
+            let device_id = self.vault_manager.device_id();
+            let keypair = self.signing_keypair()?;
+            if shared
+                .devices
+                .prune_acknowledgements(&device_id, compacted, keypair.as_ref())?
+            {
+                self.user_manager.save_shared_profile(&shared)?;
+            }
+        }
 
         for vault_id in tombstoned {
             if self.vault_manager.has_vault_file(vault_id) {
@@ -1059,7 +1174,7 @@ impl<'a> SyncEngine<'a> {
             }
         }
 
-        Ok(shared.registries())
+        Ok(outgoing)
     }
 
     /// Registry ∩ both Sync Sets. Nothing outside this set is offered or
@@ -1234,27 +1349,39 @@ impl<'a> SyncEngine<'a> {
         remote: &Vault,
         conflicts: &[Conflict],
     ) -> Vec<PendingConflict> {
+        let local_device = self.vault_manager.device_id();
         conflicts
             .iter()
-            .map(|conflict| PendingConflict {
-                vault_id,
-                scope: conflict.scope.clone(),
-                field_key: conflict.field_key.clone(),
-                is_secret: conflict.is_secret,
-                local: capture_value(
-                    local,
-                    &conflict.scope,
-                    &conflict.field_key,
-                    conflict.is_secret,
-                ),
-                remote: capture_value(
-                    remote,
-                    &conflict.scope,
-                    &conflict.field_key,
-                    conflict.is_secret,
-                ),
-                local_version: capture_field_version(local, &conflict.scope, &conflict.field_key),
-                sides: conflict.sides.clone(),
+            .map(|conflict| {
+                // Merge is device-agnostic; the Device surfacing this Conflict
+                // is the one that knows which side, if either, it wrote.
+                let mut conflict = conflict.clone();
+                conflict.identify_local_side(local_device);
+
+                PendingConflict {
+                    vault_id,
+                    scope: conflict.scope.clone(),
+                    field_key: conflict.field_key.clone(),
+                    is_secret: conflict.is_secret,
+                    local: capture_value(
+                        local,
+                        &conflict.scope,
+                        &conflict.field_key,
+                        conflict.is_secret,
+                    ),
+                    remote: capture_value(
+                        remote,
+                        &conflict.scope,
+                        &conflict.field_key,
+                        conflict.is_secret,
+                    ),
+                    local_version: capture_field_version(
+                        local,
+                        &conflict.scope,
+                        &conflict.field_key,
+                    ),
+                    sides: conflict.sides,
+                }
             })
             .collect()
     }
@@ -1519,6 +1646,7 @@ mod tests {
     use crate::network::{
         InMemoryDeviceConfig, InMemoryHub, InMemoryNetwork, PeerChannel, SyncMessage,
     };
+    use crate::registry::Acknowledgement;
     use crate::{AccountData, NewItemData, PairingCode, SecretInput, CURRENT_SCHEMA_VERSION};
 
     const MASTER_PW: &str = "Correct-Horse-Battery-Staple-9";
@@ -1575,6 +1703,18 @@ mod tests {
             .iter()
             .find(|item| item.id == item_id)
             .expect("the item is retained")
+    }
+
+    /// Whether any copy of the identity remains — live, a Tombstone, or a
+    /// Move Record.
+    fn has_item(device: &Device, vault_id: VaultId, item_id: ItemId) -> bool {
+        device
+            .vaults
+            .get_vault(vault_id)
+            .unwrap()
+            .items
+            .iter()
+            .any(|item| item.id == item_id)
     }
 
     fn account_data(item: &crate::VaultItem) -> &AccountData {
@@ -1954,6 +2094,20 @@ mod tests {
         );
 
         // A completed transfer is idempotent: retrying does not double-apply.
+        // The next sync does compact the now-acknowledged Tombstone, so take
+        // the snapshot once compaction has happened.
+        fixture.sync();
+        assert!(
+            fixture
+                .a
+                .vaults
+                .get_vault(fixture.vault_id)
+                .unwrap()
+                .items
+                .iter()
+                .all(|item| item.id != fixture.item_id),
+            "both Devices have acknowledged the Tombstone, so it is forgotten"
+        );
         let before = fixture
             .a
             .vaults
@@ -1966,6 +2120,279 @@ mod tests {
             &before,
             "retrying a completed sync must not change the vault"
         );
+    }
+
+    #[test]
+    fn test_an_acknowledged_tombstone_is_purged_on_the_next_sync() {
+        let mut fixture = Fixture::new();
+
+        // A live Item must survive compaction.
+        let note = fixture
+            .b
+            .vaults
+            .add_item(
+                fixture.vault_id,
+                Some("Recovery".to_string()),
+                None,
+                NewItemData::Note(crate::NoteData {
+                    title: Some("Codes".to_string()),
+                    body: "one two three".to_string(),
+                }),
+                None,
+            )
+            .unwrap();
+        let note_id = match note {
+            crate::SafeItem::Note(note) => note.id,
+            _ => panic!("expected a note"),
+        };
+        fixture.sync();
+
+        fixture
+            .b
+            .vaults
+            .delete_item(fixture.vault_id, fixture.item_id)
+            .unwrap();
+
+        // B applies the Tombstone during this session, but neither Device has
+        // published an Acknowledgement covering it yet.
+        fixture.sync();
+        assert!(has_item(&fixture.a, fixture.vault_id, fixture.item_id));
+        assert!(has_item(&fixture.b, fixture.vault_id, fixture.item_id));
+
+        // Both now publish the applied clock, so the Tombstone is forgotten.
+        fixture.sync();
+
+        for device in [&fixture.a, &fixture.b] {
+            assert!(
+                !has_item(device, fixture.vault_id, fixture.item_id),
+                "an acknowledged Tombstone is purged on the next sync"
+            );
+            assert!(
+                has_item(device, fixture.vault_id, note_id),
+                "compaction must never remove a live Item"
+            );
+        }
+        assert_eq!(
+            fixture.a.vaults.get_vault(fixture.vault_id).unwrap(),
+            fixture.b.vaults.get_vault(fixture.vault_id).unwrap(),
+            "both Devices compute the same purge"
+        );
+    }
+
+    #[test]
+    fn test_an_admitted_device_that_never_syncs_blocks_compaction_until_it_is_revoked() {
+        let mut fixture = Fixture::new();
+        fixture.sync();
+        let (third_dir, third_device) = pair_third_device_that_never_syncs(&mut fixture);
+
+        fixture
+            .a
+            .vaults
+            .delete_item(fixture.vault_id, fixture.item_id)
+            .unwrap();
+        fixture.sync();
+        fixture.sync();
+
+        assert!(has_item(&fixture.a, fixture.vault_id, fixture.item_id));
+        assert!(
+            has_item(&fixture.b, fixture.vault_id, fixture.item_id),
+            "an admitted Device that never returns holds compaction open"
+        );
+
+        // Revocation removes it from the acknowledgement set, which is safe
+        // because it can never sync again.
+        fixture
+            .a
+            .user
+            .revoke_device(third_device, Utc::now())
+            .unwrap();
+        fixture.sync();
+
+        assert!(!has_item(&fixture.a, fixture.vault_id, fixture.item_id));
+        assert!(
+            !has_item(&fixture.b, fixture.vault_id, fixture.item_id),
+            "a revoked Device must not block compaction any longer"
+        );
+        std::fs::remove_dir_all(third_dir).ok();
+    }
+
+    #[test]
+    fn test_a_forged_acknowledgement_for_another_device_cannot_purge_a_tombstone() {
+        let mut fixture = Fixture::new();
+        fixture.sync();
+
+        fixture
+            .a
+            .vaults
+            .delete_item(fixture.vault_id, fixture.item_id)
+            .unwrap();
+        fixture.sync();
+
+        let tombstone_clock = fixture
+            .a
+            .vaults
+            .get_vault(fixture.vault_id)
+            .unwrap()
+            .items
+            .iter()
+            .find(|item| item.id == fixture.item_id)
+            .expect("the Tombstone is retained")
+            .clock
+            .clone();
+
+        // A signs a claim attributed to B. The publication is validly signed,
+        // but by the wrong Device, so the record must be refused.
+        let b_id = fixture.b.user.device_id();
+        let a_keypair = fixture.a.user.session_keypair().unwrap();
+        let forged = Acknowledgement::sign(
+            &b_id,
+            9,
+            BTreeMap::from([(fixture.item_id, tombstone_clock)]),
+            &a_keypair,
+        );
+
+        // Exactly the registry a malicious initiator would send: B's honest
+        // admission record carrying a forged acknowledgement.
+        let mut remote = fixture
+            .a
+            .user
+            .get_shared_profile(&fixture.a.user_id)
+            .unwrap()
+            .registries();
+        let mut value = serde_json::to_value(&remote.devices).unwrap();
+        let b_key = b_id.to_string();
+        value["devices"][b_key.as_str()]["acknowledgement"] =
+            serde_json::to_value(&forged).unwrap();
+        remote.devices = serde_json::from_value(value).unwrap();
+
+        let mut engine = SyncEngine::new(
+            &fixture.a.net,
+            &mut fixture.a.vaults,
+            &fixture.a.user,
+            fixture.a.sync.scope(&fixture.a.user_id),
+            SyncCredentials {
+                master_password: MASTER_PW,
+                secret_key: &fixture.a.secret_key,
+            },
+        );
+        let result = engine.merge_registries(&remote);
+        drop(engine);
+
+        assert!(matches!(result, Err(VaultError::DeviceRegistry(_))));
+        let retained = fixture
+            .a
+            .vaults
+            .get_vault(fixture.vault_id)
+            .unwrap()
+            .items
+            .iter()
+            .find(|item| item.id == fixture.item_id)
+            .expect("a forged acknowledgement must not purge the Tombstone");
+        assert!(
+            retained.is_deleted(),
+            "the identity stays a Tombstone: a forgery must not resurrect it"
+        );
+    }
+
+    #[test]
+    fn test_a_locked_vault_still_republishes_an_acknowledgement_the_device_already_made() {
+        let mut fixture = Fixture::new();
+        fixture.sync();
+        let (third_dir, _) = pair_third_device_that_never_syncs(&mut fixture);
+
+        fixture
+            .a
+            .vaults
+            .delete_item(fixture.vault_id, fixture.item_id)
+            .unwrap();
+        // The third Device never acknowledges, so the Tombstone stays and the
+        // acknowledgement stays published.
+        fixture.sync();
+        fixture.sync();
+
+        let a_id = fixture.a.user.device_id();
+        let before = fixture
+            .a
+            .user
+            .get_shared_profile(&fixture.a.user_id)
+            .unwrap()
+            .devices
+            .get(&a_id)
+            .unwrap()
+            .acknowledgement
+            .clone()
+            .expect("this Device published what it applied");
+        assert!(before.applied.contains_key(&fixture.item_id));
+
+        fixture.a.vaults.lock_vault(Some(fixture.vault_id));
+
+        let engine = SyncEngine::new(
+            &fixture.a.net,
+            &mut fixture.a.vaults,
+            &fixture.a.user,
+            fixture.a.sync.scope(&fixture.a.user_id),
+            SyncCredentials {
+                master_password: MASTER_PW,
+                secret_key: &fixture.a.secret_key,
+            },
+        );
+        engine.publish_acknowledgements().unwrap();
+        drop(engine);
+
+        let after = fixture
+            .a
+            .user
+            .get_shared_profile(&fixture.a.user_id)
+            .unwrap()
+            .devices
+            .get(&a_id)
+            .unwrap()
+            .acknowledgement
+            .clone()
+            .expect("the persisted publication survives a locked Vault");
+        assert!(
+            after.applied.contains_key(&fixture.item_id),
+            "a locked Vault must not silently drop what this Device already saw"
+        );
+        assert_eq!(
+            after.sequence, before.sequence,
+            "republishing the same claim does not need a new sequence"
+        );
+
+        std::fs::remove_dir_all(third_dir).ok();
+    }
+
+    #[test]
+    fn test_compaction_prunes_the_acknowledgements_it_no_longer_needs() {
+        let mut fixture = Fixture::new();
+        fixture.sync();
+        let a_id = fixture.a.user.device_id();
+        let b_id = fixture.b.user.device_id();
+
+        fixture
+            .a
+            .vaults
+            .delete_item(fixture.vault_id, fixture.item_id)
+            .unwrap();
+        fixture.sync();
+        fixture.sync();
+
+        for (device, device_id) in [(&fixture.a, a_id), (&fixture.b, b_id)] {
+            let acknowledgement = device
+                .user
+                .get_shared_profile(&device.user_id)
+                .unwrap()
+                .devices
+                .get(&device_id)
+                .unwrap()
+                .acknowledgement
+                .clone()
+                .expect("the Device published an acknowledgement");
+            assert!(
+                !acknowledgement.applied.contains_key(&fixture.item_id),
+                "an acknowledgement for a compacted Tombstone is pruned"
+            );
+        }
     }
 
     #[test]
@@ -2919,6 +3346,67 @@ mod tests {
             .expect("b is advertising")
     }
 
+    /// Pair a third Device with A, using the real pairing protocol so its
+    /// admission is honestly signed. The returned Device is deliberately
+    /// never driven through a sync: it stands in for one that has gone away.
+    fn pair_third_device_that_never_syncs(fixture: &mut Fixture) -> (PathBuf, DeviceId) {
+        let dir = setup_dir("c");
+        let mut user = UserManager::new(dir.clone()).unwrap();
+        let net = fixture
+            ._hub
+            .join(InMemoryDeviceConfig::new(user.device_id(), SCHEMA_VERSION));
+
+        let now = Utc::now();
+        let offer = fixture
+            .a
+            .user
+            .start_pairing(&fixture.a.secret_key, SCHEMA_VERSION, now)
+            .unwrap();
+        let code = PairingCode::qr(offer.qr_payload.clone());
+        let claim = code.claim().unwrap();
+        fixture.a.net.begin_pairing(&claim).unwrap();
+
+        let join = user.join_pairing(&code, SCHEMA_VERSION, now).unwrap();
+        let peer = net
+            .discover()
+            .unwrap()
+            .into_iter()
+            .find(|peer| peer.device_id() == fixture.a.user.device_id())
+            .expect("the source is advertising");
+        let mut initiator = net.connect_for_pairing(&peer, &claim).unwrap();
+        let mut responder = fixture
+            .a
+            .net
+            .accept_for_pairing(&claim)
+            .unwrap()
+            .expect("the join is waiting");
+
+        initiator.send(SyncMessage::Pairing(join)).unwrap();
+        let request = match responder.receive().unwrap() {
+            SyncMessage::Pairing(message) => message,
+            other => panic!("expected a pairing request, got {other:?}"),
+        };
+        let prompt = fixture
+            .a
+            .user
+            .receive_pairing_request(request, now)
+            .unwrap();
+        let transfer = fixture
+            .a
+            .user
+            .approve_pairing(prompt.device_id, now)
+            .unwrap();
+        responder.send(SyncMessage::Pairing(transfer)).unwrap();
+        let transfer = match initiator.receive().unwrap() {
+            SyncMessage::Pairing(message) => message,
+            other => panic!("expected a pairing transfer, got {other:?}"),
+        };
+        user.complete_pairing(transfer, MASTER_PW, now).unwrap();
+        fixture.a.net.end_pairing().unwrap();
+
+        (dir, user.device_id())
+    }
+
     #[test]
     fn test_an_unpaired_advertiser_is_refused_before_any_offer() {
         let mut fixture = Fixture::new();
@@ -3075,6 +3563,63 @@ mod tests {
             "cancel must interrupt a sync waiting on the transport"
         );
         assert!(!control.is_active(), "the cancelled sync releases the slot");
+    }
+
+    #[test]
+    fn test_cancel_ends_a_blocked_read_within_a_slice() {
+        let mut fixture = Fixture::new();
+        let peer = discovered_b(&fixture);
+        let gate = Gate::new();
+        let gated = GatedNetwork {
+            inner: &fixture.a.net,
+            gate: Arc::clone(&gate),
+        };
+        let control = Arc::new(SyncControl::default());
+
+        let vaults = &mut fixture.a.vaults;
+        let user = &fixture.a.user;
+        let secret_key = &fixture.a.secret_key;
+        let user_id = fixture.a.user_id;
+        let sync = &fixture.a.sync;
+
+        let (outcome, elapsed) = std::thread::scope(|scope| {
+            let runner = Arc::clone(&control);
+            let handle = scope.spawn(move || {
+                let lease = runner.begin().expect("the first sync claims the slot");
+                let mut noop = |_: SyncProgress| {};
+                let mut engine = SyncEngine::new(
+                    &gated,
+                    vaults,
+                    user,
+                    sync.scope(&user_id),
+                    SyncCredentials {
+                        master_password: MASTER_PW,
+                        secret_key,
+                    },
+                )
+                .with_cancel(lease.token());
+
+                let start = engine.start_with_peer(&peer, &mut noop).unwrap();
+                engine.send_offers(start, &mut noop)
+            });
+
+            // The transport stays silent: unlike the earlier gate test, it is
+            // never released, so only slicing can end the read.
+            gate.wait_until_waiting();
+            let started = std::time::Instant::now();
+            control.cancel();
+            let outcome = handle.join().unwrap();
+            (outcome, started.elapsed())
+        });
+
+        assert!(
+            matches!(outcome, Err(VaultError::SyncCancelled)),
+            "cancel must interrupt a read blocked on a silent peer"
+        );
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "cancel must be observed between read slices, not at the frame deadline: {elapsed:?}"
+        );
     }
 
     #[test]
@@ -3920,6 +4465,35 @@ mod tests {
             writers,
             BTreeSet::from([a_id, b_id]),
             "a conflict names the Device that wrote each side"
+        );
+        let local: Vec<DeviceId> = display
+            .conflict
+            .sides
+            .iter()
+            .filter(|side| side.is_local)
+            .map(|side| side.device)
+            .collect();
+        assert_eq!(
+            local,
+            vec![a_id],
+            "exactly this Device's side is marked local"
+        );
+        let local_on_b: Vec<DeviceId> = b_outcome
+            .report
+            .conflicts
+            .iter()
+            .find(|conflict| conflict.conflict.field_key == "display_name")
+            .expect("B surfaces the same conflict")
+            .conflict
+            .sides
+            .iter()
+            .filter(|side| side.is_local)
+            .map(|side| side.device)
+            .collect();
+        assert_eq!(
+            local_on_b,
+            vec![b_id],
+            "each Device marks its own side, not the other Device's"
         );
         assert!(
             display.conflict.sides.iter().all(|side| side.value.is_some()),
