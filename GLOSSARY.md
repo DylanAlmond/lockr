@@ -71,6 +71,10 @@ A Device's published claim that it has seen a given point in the shared history.
 
 What remains of an Item in the Vault it left when the Item moved to another Vault. Unlike a Tombstone it names the destination Vault, so a move can beat a stale copy without meaning deletion; a later move back supersedes it. In code: the `moved_to` field on `VaultItem`.
 
+## Move Residue
+
+What remains when a move cannot be settled within one sync: one identity still live in more than one Vault, or a destination the sync could not follow. A Move Residue is neither a Duplicate (the identities are the same) nor a Combine (nothing is being declared one thing).
+
 ## Duplicate
 
 Two Items the User considers the same thing despite having been created separately, and so having different identities. The app may only *suggest* a Duplicate; it never acts on the suggestion. **Avoid:** "same item", "copy".

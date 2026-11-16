@@ -105,10 +105,11 @@ secret values never reach rendered or reactive state outside an explicit reveal.
 Everything else in the UI remains human-verified.
 
 The harness tests **pure logic only**: redaction decisions, error classification,
-and reveal/hide transitions, extracted so they take plain data and return plain
-data. It does not mock Tauri's `invoke` and does not mount components. Mocking the
-IPC boundary would test the mock more than the code, and component tests would
-drift from the one invariant worth guarding.
+reveal/hide transitions, and plain decision functions such as the join gate and the
+pairing handoff text — anything that takes plain data and returns plain data. It
+does not mock Tauri's `invoke` and does not mount components. Mocking the IPC
+boundary would test the mock more than the code, and component tests would drift
+from the invariants worth guarding.
 
 ### 8. The deferred refactors are scheduled, not forgotten
 
