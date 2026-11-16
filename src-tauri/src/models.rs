@@ -155,32 +155,159 @@ pub const COMMON_ITEM_FIELD_KEYS: &[&str] = &[
     "color",
 ];
 
-/// The kind-specific field names as they appear on the wire.
-pub fn kind_field_keys(kind: &ItemKind) -> &'static [&'static str] {
-    match kind {
-        ItemKind::Account(_) => &["username", "email"],
-        ItemKind::Card(_) => &["cardholder_name", "expiry_month", "expiry_year", "brand"],
-        ItemKind::Note(_) => &["title", "body"],
-        ItemKind::Identity(_) => &[
-            "full_name",
-            "email",
-            "phone",
-            "address_line1",
-            "address_line2",
-            "city",
-            "postal_code",
-            "country",
-        ],
+/// A field value as it exists in one vault copy. Shared by merge, Combine and
+/// the per-field clock stampers so all three read and write through one table
+/// instead of repeating the `ItemKind` cascade.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum FieldValue {
+    /// An optional text field; `None` means "not set".
+    Text(Option<String>),
+
+    /// A required text field.
+    Plain(String),
+
+    Bool(bool),
+
+    Tags(Vec<String>),
+
+    Number(u64),
+
+    /// A secret value. It never leaves the backend through a `Conflict`.
+    Secret(String),
+}
+
+/// One kind-specific Item field: its wire key, plus how to read it from and
+/// write it to the kind payload.
+///
+/// Adding a kind-specific field (for example `AccountData::phone`) means adding
+/// one entry to that kind's table below. `kind_field_keys`, merge's
+/// `read_item_field`/`write_item_field`, and `changed_kind_fields` all derive
+/// from this table, so they cannot disagree about which fields exist.
+pub(crate) struct ItemFieldSpec {
+    pub(crate) key: &'static str,
+    read_fn: fn(&ItemKind) -> Option<FieldValue>,
+    write_fn: fn(&mut ItemKind, &FieldValue) -> bool,
+}
+
+impl ItemFieldSpec {
+    pub(crate) fn read(&self, kind: &ItemKind) -> Option<FieldValue> {
+        (self.read_fn)(kind)
     }
+
+    pub(crate) fn write(&self, kind: &mut ItemKind, value: &FieldValue) -> bool {
+        (self.write_fn)(kind, value)
+    }
+}
+
+macro_rules! kind_field_plain {
+    ($key:literal, $variant:ident, $field:ident) => {
+        ItemFieldSpec {
+            key: $key,
+            read_fn: |kind| match kind {
+                ItemKind::$variant(data) => Some(FieldValue::Plain(data.$field.clone())),
+                _ => None,
+            },
+            write_fn: |kind, value| match (kind, value) {
+                (ItemKind::$variant(data), FieldValue::Plain(value)) => {
+                    data.$field = value.clone();
+                    true
+                }
+                _ => false,
+            },
+        }
+    };
+}
+
+macro_rules! kind_field_text {
+    ($key:literal, $variant:ident, $field:ident) => {
+        ItemFieldSpec {
+            key: $key,
+            read_fn: |kind| match kind {
+                ItemKind::$variant(data) => Some(FieldValue::Text(data.$field.clone())),
+                _ => None,
+            },
+            write_fn: |kind, value| match (kind, value) {
+                (ItemKind::$variant(data), FieldValue::Text(value)) => {
+                    data.$field = value.clone();
+                    true
+                }
+                _ => false,
+            },
+        }
+    };
+}
+
+macro_rules! kind_field_number {
+    ($key:literal, $variant:ident, $field:ident, $ty:ty) => {
+        ItemFieldSpec {
+            key: $key,
+            read_fn: |kind| match kind {
+                ItemKind::$variant(data) => Some(FieldValue::Number(u64::from(data.$field))),
+                _ => None,
+            },
+            write_fn: |kind, value| match (kind, value) {
+                (ItemKind::$variant(data), FieldValue::Number(value)) => {
+                    data.$field = *value as $ty;
+                    true
+                }
+                _ => false,
+            },
+        }
+    };
+}
+
+static ACCOUNT_FIELD_SPECS: &[ItemFieldSpec] = &[
+    kind_field_plain!("username", Account, username),
+    kind_field_text!("email", Account, email),
+];
+
+static CARD_FIELD_SPECS: &[ItemFieldSpec] = &[
+    kind_field_plain!("cardholder_name", Card, cardholder_name),
+    kind_field_number!("expiry_month", Card, expiry_month, u8),
+    kind_field_number!("expiry_year", Card, expiry_year, u16),
+    kind_field_text!("brand", Card, brand),
+];
+
+static NOTE_FIELD_SPECS: &[ItemFieldSpec] = &[
+    kind_field_text!("title", Note, title),
+    kind_field_plain!("body", Note, body),
+];
+
+static IDENTITY_FIELD_SPECS: &[ItemFieldSpec] = &[
+    kind_field_plain!("full_name", Identity, full_name),
+    kind_field_text!("email", Identity, email),
+    kind_field_text!("phone", Identity, phone),
+    kind_field_text!("address_line1", Identity, address_line1),
+    kind_field_text!("address_line2", Identity, address_line2),
+    kind_field_text!("city", Identity, city),
+    kind_field_text!("postal_code", Identity, postal_code),
+    kind_field_text!("country", Identity, country),
+];
+
+/// The kind-specific field table for `kind`, in wire order.
+pub(crate) fn kind_fields(kind: &ItemKind) -> &'static [ItemFieldSpec] {
+    match kind {
+        ItemKind::Account(_) => ACCOUNT_FIELD_SPECS,
+        ItemKind::Card(_) => CARD_FIELD_SPECS,
+        ItemKind::Note(_) => NOTE_FIELD_SPECS,
+        ItemKind::Identity(_) => IDENTITY_FIELD_SPECS,
+    }
+}
+
+/// The kind-specific field names as they appear on the wire.
+pub fn kind_field_keys(kind: &ItemKind) -> Vec<&'static str> {
+    kind_fields(kind).iter().map(|field| field.key).collect()
 }
 
 /// Every field name of an item that participates in per-field merge: common
 /// fields plus the fields of its kind. Secret field keys are added by the
 /// caller from the item's [`ItemSecrets`].
 pub fn item_field_keys(kind: &ItemKind) -> Vec<&'static str> {
-    let mut keys = COMMON_ITEM_FIELD_KEYS.to_vec();
-    keys.extend_from_slice(kind_field_keys(kind));
-    keys
+    COMMON_ITEM_FIELD_KEYS
+        .iter()
+        .copied()
+        .chain(kind_fields(kind).iter().map(|field| field.key))
+        .collect()
 }
 
 /// Key of the account password secret field.

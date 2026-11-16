@@ -1,0 +1,124 @@
+/* Shared presentation for the Paired Devices and On-this-network lists. */
+.section-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+
+  h2 {
+    font-family: var(--font-geo);
+    font-size: 1.125rem;
+    font-weight: 500;
+  }
+}
+
+.section-hint {
+  margin-top: 0.25rem;
+  color: var(--color-text-muted);
+  font-size: 0.8125rem;
+  line-height: 1.4;
+}
+
+.device-list,
+.peer-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  list-style: none;
+}
+
+.device-card,
+.peer-card {
+  display: flex;
+  align-items: center;
+  gap: 0.875rem;
+  padding: 0.875rem 1rem;
+  border: 1px solid var(--color-border);
+  border-radius: 0.625rem;
+}
+
+.device-card--revoked {
+  opacity: 0.72;
+  background: var(--color-bg-nav);
+}
+
+.device-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.5rem;
+  height: 2.5rem;
+  flex-shrink: 0;
+  border-radius: 0.5rem;
+  background: var(--color-accent-hover);
+  color: var(--color-accent);
+}
+
+.device-icon--peer {
+  background: var(--color-hover);
+  color: var(--color-text-muted);
+}
+
+.device-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.device-name-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.device-platform,
+.device-last-sync {
+  margin-top: 0.125rem;
+  color: var(--color-text-muted);
+  font-size: 0.75rem;
+  overflow-wrap: anywhere;
+}
+
+.device-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.tag {
+  padding: 0.125rem 0.5rem;
+  border-radius: 999px;
+  font-size: 0.6875rem;
+  white-space: nowrap;
+}
+
+.tag--paired {
+  background: var(--color-accent-hover);
+  color: var(--color-accent);
+}
+
+.tag--danger {
+  background: hsl(0 70% 96%);
+  color: var(--color-red);
+}
+
+.tag--unknown {
+  background: var(--color-hover);
+  color: var(--color-text-muted);
+}
+
+.empty-state {
+  padding: 1rem;
+  border: 1px dashed var(--color-border);
+  border-radius: 0.5rem;
+  color: var(--color-text-muted);
+  font-size: 0.875rem;
+  line-height: 1.5;
+}
+
+.muted {
+  color: var(--color-text-muted);
+  font-size: 0.8125rem;
+}

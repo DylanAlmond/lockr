@@ -2,8 +2,19 @@
 import { computed, ref, watch } from 'vue';
 import { TriangleAlert, ChevronLeft, ChevronRight, ShieldQuestionMark } from '@lucide/vue';
 import Button from '../ui/Button.vue';
+import ConflictSideCard from './ConflictSideCard.vue';
 import type { ConflictChoice, SyncConflict, SyncConflictSide } from '../../types';
 import { shortId, vaultLabelById } from '../../util/labels';
+import { conflictFieldLabel } from '../../util/conflictLabels';
+import {
+  clearReveals,
+  conflictSideKey,
+  hideSide,
+  isSideRevealed,
+  revealSide,
+  type ConflictSideEntry,
+  type RevealedConflictValues
+} from '../../util/conflictRedaction';
 import type { ConflictSession } from '../../composables/useSync';
 import { useSync } from '../../composables/useSync';
 
@@ -23,7 +34,7 @@ const emit = defineEmits<{
 
 const index = ref(0);
 const { revealConflictCandidate } = useSync();
-const revealed = ref<Record<string, string | null>>({});
+const revealed = ref<RevealedConflictValues>({});
 const revealing = ref<string | null>(null);
 
 watch(
@@ -44,41 +55,12 @@ const position = computed(() => `${index.value + 1} of ${conflicts.value.length}
 // A revealed value belongs to the field the User was looking at. Moving to
 // another Conflict re-masks it rather than carrying a secret along.
 watch(current, () => {
-  revealed.value = {};
+  revealed.value = clearReveals();
   revealing.value = null;
 });
 
-const FIELD_LABELS: Record<string, string> = {
-  display_name: 'Display name',
-  username: 'Username',
-  email: 'Email address',
-  phone: 'Phone number',
-  full_name: 'Full name',
-  address_line1: 'Address line 1',
-  address_line2: 'Address line 2',
-  city: 'City',
-  postal_code: 'Postal code',
-  country: 'Country',
-  cardholder_name: 'Cardholder name',
-  brand: 'Card brand',
-  expiry_month: 'Expiry month',
-  expiry_year: 'Expiry year',
-  title: 'Title',
-  body: 'Note body',
-  favourite: 'Favourite',
-  tags: 'Tags',
-  icon: 'Icon',
-  color: 'Colour',
-  name: 'Name'
-};
-
 function fieldLabel(fieldKey: string): string {
-  return (
-    FIELD_LABELS[fieldKey] ??
-    fieldKey
-      .replace(/_/g, ' ')
-      .replace(/^./, (letter) => letter.toUpperCase())
-  );
+  return conflictFieldLabel(fieldKey);
 }
 
 function vaultLabel(vaultId: string): string {
@@ -97,12 +79,6 @@ const itemLabel = computed(() => {
   return conflict.display_name?.trim() || `Item ${shortId(conflict.item_id ?? '')}`;
 });
 
-interface SideEntry {
-  choice: ConflictChoice | null;
-  side: SyncConflictSide;
-  label: string;
-}
-
 /**
  * The backend marks the side this Device wrote, if any. At most one side is
  * local. When neither is, the conflict arrived wholly from other Devices and
@@ -112,7 +88,7 @@ const hasLocalSide = computed(
   () => current.value?.sides.some((side) => side.is_local) ?? false
 );
 
-const sideEntries = computed<SideEntry[]>(() => {
+const sideEntries = computed<ConflictSideEntry[]>(() => {
   const conflict = current.value;
   if (!conflict) return [];
 
@@ -134,45 +110,21 @@ const sideEntries = computed<SideEntry[]>(() => {
   ];
 });
 
-function formatValue(value: unknown): string {
-  if (value === null || value === undefined) return 'Not set';
-
-  if (typeof value === 'string') {
-    return value.length > 0 ? value : 'Empty';
-  }
-
-  if (typeof value === 'boolean') return value ? 'Yes' : 'No';
-  if (typeof value === 'number') return String(value);
-
-  if (Array.isArray(value)) {
-    return value.length > 0 ? value.join(', ') : 'None';
-  }
-
-  return JSON.stringify(value);
+function sideKey(entry: ConflictSideEntry): string {
+  return conflictSideKey(entry.side);
 }
 
-function sideKey(entry: SideEntry): string {
-  return `${entry.side.device}:${entry.side.counter}`;
+function isRevealed(entry: ConflictSideEntry): boolean {
+  return isSideRevealed(revealed.value, entry.side);
 }
 
-function isRevealed(entry: SideEntry): boolean {
-  return Object.prototype.hasOwnProperty.call(revealed.value, sideKey(entry));
-}
-
-function revealedValue(entry: SideEntry): string {
-  const value = revealed.value[sideKey(entry)];
-  return value === null || value === undefined ? 'Not set' : value;
-}
-
-async function toggleReveal(entry: SideEntry) {
+async function toggleReveal(entry: ConflictSideEntry) {
   if (!current.value || !entry.choice || props.busy) return;
 
   const key = sideKey(entry);
 
   if (isRevealed(entry)) {
-    const next = { ...revealed.value };
-    delete next[key];
-    revealed.value = next;
+    revealed.value = hideSide(revealed.value, entry.side);
     return;
   }
 
@@ -187,15 +139,8 @@ async function toggleReveal(entry: SideEntry) {
   revealing.value = null;
 
   if (result) {
-    revealed.value = { ...revealed.value, [key]: result.value };
+    revealed.value = revealSide(revealed.value, entry.side, result.value);
   }
-}
-
-function sideValue(entry: SideEntry): string {
-  if (current.value?.is_secret) {
-    return isRevealed(entry) ? revealedValue(entry) : 'Value hidden';
-  }
-  return formatValue(entry.side.value);
 }
 
 function choose(choice: ConflictChoice | null) {
@@ -260,53 +205,18 @@ function next() {
           </p>
 
           <div class="side-grid">
-            <section
+            <ConflictSideCard
               v-for="entry in sideEntries"
               :key="`${entry.side.device}:${entry.side.counter}`"
-              class="conflict-side"
-              :class="{ 'conflict-side--local': entry.side.is_local }"
-            >
-              <header>
-                <span class="side-device">{{ entry.label }}</span>
-                <span v-if="entry.side.is_local" class="side-tag">This copy</span>
-              </header>
-
-              <p
-                class="side-value"
-                :class="{
-                  'side-value--secret': current.is_secret && !isRevealed(entry),
-                  'side-value--revealed': current.is_secret && isRevealed(entry)
-                }"
-              >
-                {{ sideValue(entry) }}
-              </p>
-
-              <Button
-                v-if="current.is_secret && entry.choice"
-                variant="label"
-                size="small"
-                :disabled="busy || revealing === sideKey(entry)"
-                @click="toggleReveal(entry)"
-              >
-                {{
-                  revealing === sideKey(entry)
-                    ? 'Revealing…'
-                    : isRevealed(entry)
-                      ? 'Hide value'
-                      : 'Reveal value'
-                }}
-              </Button>
-
-              <Button
-                v-if="entry.choice"
-                :variant="entry.choice === 'local' ? 'accent' : 'outline'"
-                size="small"
-                :disabled="busy"
-                @click="choose(entry.choice)"
-              >
-                {{ current.is_secret ? 'Keep this secret value' : 'Keep this value' }}
-              </Button>
-            </section>
+              :entry="entry"
+              :is-secret="current.is_secret"
+              :revealed="isRevealed(entry)"
+              :revealed-value="revealed[sideKey(entry)]"
+              :busy="busy"
+              :revealing="revealing === sideKey(entry)"
+              @reveal="toggleReveal(entry)"
+              @choose="choose"
+            />
           </div>
 
           <div v-if="!hasLocalSide" class="ambiguity-note">
@@ -363,216 +273,4 @@ function next() {
   </Teleport>
 </template>
 
-<style scoped>
-.conflict-backdrop {
-  position: fixed;
-  inset: 0;
-  z-index: 1100;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 1rem;
-  background: rgb(0 0 0 / 0.35);
-}
-
-.conflict-card {
-  display: flex;
-  flex-direction: column;
-  gap: 1rem;
-  box-sizing: border-box;
-  width: min(42rem, 100%);
-  max-height: calc(100% - 2rem);
-  overflow-y: auto;
-  padding: 1.5rem;
-  background: var(--color-bg);
-  border: 1px solid var(--color-border);
-  border-radius: 0.75rem;
-  box-shadow: 0 16px 48px rgb(0 0 0 / 0.18);
-}
-
-.conflict-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 1rem;
-}
-
-.conflict-heading {
-  display: flex;
-  align-items: center;
-  gap: 0.625rem;
-  color: var(--color-accent);
-
-  h2 {
-    font-family: var(--font-geo);
-    font-size: 1.375rem;
-    font-weight: 500;
-    color: var(--color-text);
-  }
-}
-
-.conflict-position {
-  padding: 0.25rem 0.625rem;
-  border-radius: 999px;
-  background: var(--color-hover);
-  color: var(--color-text-muted);
-  font-size: 0.75rem;
-  white-space: nowrap;
-}
-
-.conflict-explainer {
-  color: var(--color-text-secondary);
-  font-size: 0.875rem;
-  line-height: 1.5;
-}
-
-.conflict-body {
-  display: flex;
-  flex-direction: column;
-  gap: 1rem;
-}
-
-.conflict-meta {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr));
-  gap: 0.75rem;
-  padding: 0.75rem;
-  border-radius: 0.5rem;
-  background: var(--color-bg-nav);
-
-  dt {
-    color: var(--color-text-muted);
-    font-size: 0.6875rem;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-  }
-
-  dd {
-    font-size: 0.875rem;
-    overflow-wrap: anywhere;
-  }
-}
-
-.secret-note {
-  display: flex;
-  align-items: flex-start;
-  gap: 0.5rem;
-  padding: 0.75rem;
-  border-radius: 0.5rem;
-  background: hsl(38 90% 96%);
-  border: 1px solid hsl(38 80% 85%);
-  color: hsl(30 60% 28%);
-  font-size: 0.8125rem;
-  line-height: 1.5;
-}
-
-.ambiguity-note {
-  display: flex;
-  align-items: flex-start;
-  gap: 0.5rem;
-  padding: 0.75rem;
-  border-radius: 0.5rem;
-  background: hsl(0 70% 97%);
-  border: 1px solid hsl(0 70% 85%);
-  color: hsl(0 60% 30%);
-  font-size: 0.8125rem;
-  line-height: 1.5;
-
-  > div {
-    display: flex;
-    flex-direction: column;
-    align-items: flex-start;
-    gap: 0.5rem;
-  }
-}
-
-.side-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
-  gap: 0.75rem;
-}
-
-.conflict-side {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 0.75rem;
-  padding: 0.875rem;
-  border: 1px solid var(--color-border);
-  border-radius: 0.5rem;
-
-  header {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    flex-wrap: wrap;
-  }
-}
-
-.conflict-side--local {
-  border-color: var(--color-accent);
-  box-shadow: inset 0 0 0 1px var(--color-accent);
-}
-
-.side-device {
-  font-size: 0.8125rem;
-  font-weight: 500;
-}
-
-.side-tag {
-  padding: 0.125rem 0.5rem;
-  border-radius: 999px;
-  background: var(--color-accent-hover);
-  color: var(--color-accent);
-  font-size: 0.6875rem;
-}
-
-.side-value {
-  flex: 1;
-  width: 100%;
-  min-height: 3rem;
-  padding: 0.625rem;
-  overflow-wrap: anywhere;
-  white-space: pre-wrap;
-  background: var(--color-bg-nav);
-  border-radius: 0.375rem;
-  font-size: 0.875rem;
-  line-height: 1.45;
-}
-
-.side-value--secret {
-  display: flex;
-  align-items: center;
-  color: var(--color-text-muted);
-  font-style: italic;
-}
-
-.side-value--revealed {
-  font-family: ui-monospace, monospace;
-  font-size: 0.8125rem;
-}
-
-.conflict-error {
-  color: var(--color-red);
-  font-size: 0.8125rem;
-}
-
-.conflict-footer {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 1rem;
-  flex-wrap: wrap;
-}
-
-.pager {
-  display: flex;
-  gap: 0.25rem;
-}
-
-.abandon-hint {
-  color: var(--color-text-muted);
-  font-size: 0.75rem;
-  line-height: 1.4;
-}
-</style>
+<style scoped src="./ConflictPrompt.css"></style>

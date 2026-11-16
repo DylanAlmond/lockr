@@ -160,6 +160,15 @@ pub struct ManagerState {
     serving: Option<ServingHandle>,
 }
 
+/// The pieces of one signed-in session a command needs together: both
+/// managers plus the in-memory credentials commands read and rotate.
+pub struct SessionCredentials<'a> {
+    pub vault_manager: &'a mut VaultManager,
+    pub user_manager: &'a mut UserManager,
+    pub master_password: &'a mut Option<String>,
+    pub secret_key: &'a mut Option<Vec<u8>>,
+}
+
 impl ManagerState {
     /// Build the shared state. A damaged Device identity leaves the managers
     /// unset and records a recoverable error rather than aborting the app.
@@ -319,25 +328,15 @@ impl ManagerState {
         }
     }
 
-    fn parts_mut(
-        &mut self,
-    ) -> Result<
-        (
-            &mut VaultManager,
-            &mut UserManager,
-            &mut Option<String>,
-            &mut Option<Vec<u8>>,
-        ),
-        String,
-    > {
+    fn parts_mut(&mut self) -> Result<SessionCredentials<'_>, String> {
         let message = self.startup_message();
         match (&mut self.vault_manager, &mut self.user_manager) {
-            (Some(vault_manager), Some(user_manager)) => Ok((
+            (Some(vault_manager), Some(user_manager)) => Ok(SessionCredentials {
                 vault_manager,
                 user_manager,
-                &mut self.master_password,
-                &mut self.secret_key,
-            )),
+                master_password: &mut self.master_password,
+                secret_key: &mut self.secret_key,
+            }),
             _ => Err(message),
         }
     }
@@ -475,7 +474,12 @@ pub fn register_user(
 ) -> Result<Vec<SafeVault>, String> {
     let mut state = state.lock().map_err(|e| e.to_string())?;
 
-    let (vault_manager, user_manager, mp_state, sk_state) = state.parts_mut()?;
+    let SessionCredentials {
+        vault_manager,
+        user_manager,
+        master_password: mp_state,
+        secret_key: sk_state,
+    } = state.parts_mut()?;
 
     let user = user_manager
         .register(name, &master_password)
@@ -557,7 +561,12 @@ pub fn login_user(
 
     state.end_sync_session();
 
-    let (vault_manager, user_manager, mp_state, sk_state) = state.parts_mut()?;
+    let SessionCredentials {
+        vault_manager,
+        user_manager,
+        master_password: mp_state,
+        secret_key: sk_state,
+    } = state.parts_mut()?;
 
     let user_id: UserId = Uuid::parse_str(&id).map_err(|e| e.to_string())?;
 
@@ -602,7 +611,12 @@ pub fn logout(
     state.end_sync_session();
     state.teardown_pairing();
 
-    let (vault_manager, user_manager, mp_state, sk_state) = state.parts_mut()?;
+    let SessionCredentials {
+        vault_manager,
+        user_manager,
+        master_password: mp_state,
+        secret_key: sk_state,
+    } = state.parts_mut()?;
 
     user_manager.logout().map_err(|e| e.to_string())?;
 
@@ -635,7 +649,12 @@ pub fn delete_user(
     state.end_sync_session();
     state.teardown_pairing();
 
-    let (vault_manager, user_manager, mp_state, sk_state) = state.parts_mut()?;
+    let SessionCredentials {
+        vault_manager,
+        user_manager,
+        master_password: mp_state,
+        secret_key: sk_state,
+    } = state.parts_mut()?;
 
     vault_manager.lock_vault(None);
 
@@ -728,7 +747,11 @@ fn run_start_pairing(
     state.teardown_pairing();
 
     let offer = {
-        let (_, user_manager, _, secret_key) = state.parts_mut()?;
+        let SessionCredentials {
+            user_manager,
+            secret_key,
+            ..
+        } = state.parts_mut()?;
         let secret_key = secret_key.as_ref().ok_or("Not logged in")?;
         user_manager
             .start_pairing(secret_key, CURRENT_SCHEMA_VERSION, now)
@@ -1132,7 +1155,12 @@ fn run_complete_pairing(
         .as_transfer()
         .and_then(|transfer| transfer.sync_set.clone());
 
-    let (_, user_manager, master_password_state, secret_key_state) = match state.parts_mut() {
+    let SessionCredentials {
+        user_manager,
+        master_password: master_password_state,
+        secret_key: secret_key_state,
+        ..
+    } = match state.parts_mut() {
         Ok(parts) => parts,
         Err(error) => {
             state.teardown_pairing();
@@ -1541,7 +1569,12 @@ pub fn get_unlocked_vaults(state: AppState) -> Result<Vec<SafeVault>, String> {
 pub fn create_vault(state: AppState, name: String, color: String) -> Result<SafeVault, String> {
     let mut state = state.lock().map_err(|e| e.to_string())?;
 
-    let (vault_manager, user_manager, mp_state, sk_state) = state.parts_mut()?;
+    let SessionCredentials {
+        vault_manager,
+        user_manager,
+        master_password: mp_state,
+        secret_key: sk_state,
+    } = state.parts_mut()?;
 
     let mp = mp_state.as_ref().ok_or("Not logged in")?;
     let sk = sk_state.as_ref().ok_or("Not logged in")?;
@@ -1575,7 +1608,12 @@ pub fn unlock_vault(state: AppState, vault_id: String) -> Result<SafeVault, Stri
     // Vue sends a string but Rust needs a Uuid
     let id = Uuid::parse_str(&vault_id).map_err(|e| e.to_string())?;
 
-    let (vault_manager, _, mp_state, sk_state) = state.parts_mut()?;
+    let SessionCredentials {
+        vault_manager,
+        master_password: mp_state,
+        secret_key: sk_state,
+        ..
+    } = state.parts_mut()?;
 
     let mp = mp_state.as_ref().ok_or("Not logged in")?;
     let sk = sk_state.as_ref().ok_or("Not logged in")?;
