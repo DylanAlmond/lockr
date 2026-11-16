@@ -669,10 +669,13 @@ impl VaultManager {
     /// clock. Only deletion Tombstones are candidates: a live Item or a Move
     /// Record is never removed, however old. Vaults that change are saved
     /// before this returns, so a purge is never only in memory.
+    ///
+    /// Returns what was removed, so the caller can prune the matching
+    /// acknowledgements.
     pub(crate) fn compact_acknowledged_tombstones(
         &mut self,
         is_acknowledged: impl Fn(&ItemId, &VersionVector) -> bool,
-    ) -> Result<Vec<VaultId>, VaultError> {
+    ) -> Result<Vec<(VaultId, Vec<ItemId>)>, VaultError> {
         let vault_ids: Vec<VaultId> = self.unlocked_vaults.keys().copied().collect();
         let mut compacted = Vec::new();
 
@@ -682,17 +685,26 @@ impl VaultManager {
                 .get_mut(&vault_id)
                 .expect("the id came from this map");
             let before = unlocked.vault.items.len();
-            unlocked
-                .vault
-                .items
-                .retain(|item| !(item.is_deleted() && is_acknowledged(&item.id, &item.clock)));
-            if unlocked.vault.items.len() != before {
+            let mut removed = Vec::new();
+            unlocked.vault.items.retain(|item| {
+                let forget = item.is_deleted() && is_acknowledged(&item.id, &item.clock);
+                if forget {
+                    removed.push(item.id);
+                }
+                !forget
+            });
+            if !removed.is_empty() {
+                debug_assert_eq!(
+                    unlocked.vault.items.len() + removed.len(),
+                    before,
+                    "retain removes exactly the acknowledged Tombstones"
+                );
                 unlocked.dirty = true;
-                compacted.push(vault_id);
+                compacted.push((vault_id, removed));
             }
         }
 
-        for vault_id in &compacted {
+        for (vault_id, _) in &compacted {
             self.save_vault(*vault_id)?;
         }
 
@@ -2716,7 +2728,13 @@ mod tests {
             .compact_acknowledged_tombstones(|item_id, _| *item_id == deleted_id)
             .unwrap();
 
-        assert_eq!(compacted, vec![vault_a.id]);
+        assert_eq!(compacted.len(), 1);
+        assert_eq!(compacted[0].0, vault_a.id);
+        assert_eq!(
+            compacted[0].1,
+            vec![deleted_id],
+            "the caller is told exactly which acknowledgements to prune"
+        );
         assert!(!item_ids(&manager).contains(&deleted_id));
         assert!(
             item_ids(&manager).contains(&live_id),

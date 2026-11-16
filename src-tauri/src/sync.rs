@@ -948,6 +948,16 @@ impl<'a> SyncEngine<'a> {
         Ok(self.user_manager.get_shared_profile(&user_id)?.devices)
     }
 
+    /// The unwrapped signing key for the current session, or the same error a
+    /// revocation reports when the session cannot sign.
+    fn signing_keypair(&self) -> Result<Arc<crate::device::DeviceKeypair>, VaultError> {
+        self.user_manager.session_keypair().ok_or_else(|| {
+            VaultError::DeviceRegistry(
+                "this Device has no signing key for the session; sign in again".into(),
+            )
+        })
+    }
+
     /// Publish the Tombstone clocks this Device has applied, so every peer can
     /// tell when a Tombstone may be forgotten.
     ///
@@ -955,9 +965,16 @@ impl<'a> SyncEngine<'a> {
     /// not what the session is about to apply. A Tombstone first applied now
     /// is therefore acknowledged on the *next* sync, which is exactly the
     /// round trip compaction depends on.
+    ///
+    /// The publication is the persisted map: the registry record keeps what
+    /// this Device already saw, so a sync with no Vault unlocked republishes
+    /// that history instead of silently dropping it. That is what stops a user
+    /// who always syncs with Vaults locked from blocking compaction forever.
     fn publish_acknowledgements(&self) -> Result<(), VaultError> {
         let user_id = self.signed_in_user()?;
         let mut shared = self.user_manager.get_shared_profile(&user_id)?;
+        let device_id = self.vault_manager.device_id();
+        let keypair = self.signing_keypair()?;
 
         let applied: Vec<(ItemId, VersionVector)> = self
             .vault_manager
@@ -971,7 +988,7 @@ impl<'a> SyncEngine<'a> {
 
         if shared
             .devices
-            .acknowledge(&self.vault_manager.device_id(), applied)
+            .acknowledge(&device_id, applied, keypair.as_ref())?
         {
             self.user_manager.save_shared_profile(&shared)?;
         }
@@ -979,14 +996,22 @@ impl<'a> SyncEngine<'a> {
     }
 
     /// Forget every Tombstone that every currently admitted Device has
-    /// acknowledged. Revoked Devices are excluded: they can never sync again,
+    /// acknowledged, returning the identities whose acknowledgements are no
+    /// longer needed. Revoked Devices are excluded: they can never sync again,
     /// so their silence must not retain a deletion forever.
-    fn compact_tombstones(&mut self, devices: &crate::DeviceRegistry) -> Result<(), VaultError> {
-        self.vault_manager
+    fn compact_tombstones(
+        &mut self,
+        devices: &crate::DeviceRegistry,
+    ) -> Result<Vec<ItemId>, VaultError> {
+        let compacted = self
+            .vault_manager
             .compact_acknowledged_tombstones(|item_id, clock| {
                 devices.is_acknowledged(item_id, clock)
             })?;
-        Ok(())
+        Ok(compacted
+            .into_iter()
+            .flat_map(|(_, item_ids)| item_ids)
+            .collect())
     }
 
     /// Refuse a peer that this User has not admitted, or has revoked.
@@ -1071,9 +1096,25 @@ impl<'a> SyncEngine<'a> {
             .map(|tombstone| tombstone.vault_id)
             .collect();
 
+        // The registries this session will send, taken before this Device
+        // prunes its own acknowledgements. A peer still needs the claim that
+        // justifies the purge, and the pruned publication only supersedes it
+        // on the next sync.
+        let outgoing = shared.registries();
+
         self.user_manager.save_shared_profile(&shared)?;
 
-        self.compact_tombstones(&shared.devices)?;
+        let compacted = self.compact_tombstones(&shared.devices)?;
+        if !compacted.is_empty() {
+            let device_id = self.vault_manager.device_id();
+            let keypair = self.signing_keypair()?;
+            if shared
+                .devices
+                .prune_acknowledgements(&device_id, compacted, keypair.as_ref())?
+            {
+                self.user_manager.save_shared_profile(&shared)?;
+            }
+        }
 
         for vault_id in tombstoned {
             if self.vault_manager.has_vault_file(vault_id) {
@@ -1081,7 +1122,7 @@ impl<'a> SyncEngine<'a> {
             }
         }
 
-        Ok(shared.registries())
+        Ok(outgoing)
     }
 
     /// Registry ∩ both Sync Sets. Nothing outside this set is offered or
@@ -1459,6 +1500,7 @@ mod tests {
     use crate::network::{
         InMemoryDeviceConfig, InMemoryHub, InMemoryNetwork, PeerChannel, SyncMessage,
     };
+    use crate::registry::Acknowledgement;
     use crate::{AccountData, NewItemData, PairingCode, SecretInput, CURRENT_SCHEMA_VERSION};
 
     const MASTER_PW: &str = "Correct-Horse-Battery-Staple-9";
@@ -1993,6 +2035,185 @@ mod tests {
             "a revoked Device must not block compaction any longer"
         );
         std::fs::remove_dir_all(third_dir).ok();
+    }
+
+    #[test]
+    fn test_a_forged_acknowledgement_for_another_device_cannot_purge_a_tombstone() {
+        let mut fixture = Fixture::new();
+        fixture.sync();
+
+        fixture
+            .a
+            .vaults
+            .delete_item(fixture.vault_id, fixture.item_id)
+            .unwrap();
+        fixture.sync();
+
+        let tombstone_clock = fixture
+            .a
+            .vaults
+            .get_vault(fixture.vault_id)
+            .unwrap()
+            .items
+            .iter()
+            .find(|item| item.id == fixture.item_id)
+            .expect("the Tombstone is retained")
+            .clock
+            .clone();
+
+        // A signs a claim attributed to B. The publication is validly signed,
+        // but by the wrong Device, so the record must be refused.
+        let b_id = fixture.b.user.device_id();
+        let a_keypair = fixture.a.user.session_keypair().unwrap();
+        let forged = Acknowledgement::sign(
+            &b_id,
+            9,
+            BTreeMap::from([(fixture.item_id, tombstone_clock)]),
+            &a_keypair,
+        );
+
+        // Exactly the registry a malicious initiator would send: B's honest
+        // admission record carrying a forged acknowledgement.
+        let mut remote = fixture
+            .a
+            .user
+            .get_shared_profile(&fixture.a.user_id)
+            .unwrap()
+            .registries();
+        let mut value = serde_json::to_value(&remote.devices).unwrap();
+        let b_key = b_id.to_string();
+        value["devices"][b_key.as_str()]["acknowledgement"] =
+            serde_json::to_value(&forged).unwrap();
+        remote.devices = serde_json::from_value(value).unwrap();
+
+        let mut engine = SyncEngine::new(
+            &fixture.a.net,
+            &mut fixture.a.vaults,
+            &fixture.a.user,
+            fixture.a.sync.scope(&fixture.a.user_id),
+            SyncCredentials {
+                master_password: MASTER_PW,
+                secret_key: &fixture.a.secret_key,
+            },
+        );
+        let result = engine.merge_registries(&remote);
+        drop(engine);
+
+        assert!(matches!(result, Err(VaultError::DeviceRegistry(_))));
+        let retained = fixture
+            .a
+            .vaults
+            .get_vault(fixture.vault_id)
+            .unwrap()
+            .items
+            .iter()
+            .find(|item| item.id == fixture.item_id)
+            .expect("a forged acknowledgement must not purge the Tombstone");
+        assert!(
+            retained.is_deleted(),
+            "the identity stays a Tombstone: a forgery must not resurrect it"
+        );
+    }
+
+    #[test]
+    fn test_a_locked_vault_still_republishes_an_acknowledgement_the_device_already_made() {
+        let mut fixture = Fixture::new();
+        fixture.sync();
+        let (third_dir, _) = pair_third_device_that_never_syncs(&mut fixture);
+
+        fixture
+            .a
+            .vaults
+            .delete_item(fixture.vault_id, fixture.item_id)
+            .unwrap();
+        // The third Device never acknowledges, so the Tombstone stays and the
+        // acknowledgement stays published.
+        fixture.sync();
+        fixture.sync();
+
+        let a_id = fixture.a.user.device_id();
+        let before = fixture
+            .a
+            .user
+            .get_shared_profile(&fixture.a.user_id)
+            .unwrap()
+            .devices
+            .get(&a_id)
+            .unwrap()
+            .acknowledgement
+            .clone()
+            .expect("this Device published what it applied");
+        assert!(before.applied.contains_key(&fixture.item_id));
+
+        fixture.a.vaults.lock_vault(Some(fixture.vault_id));
+
+        let engine = SyncEngine::new(
+            &fixture.a.net,
+            &mut fixture.a.vaults,
+            &fixture.a.user,
+            fixture.a.sync.scope(&fixture.a.user_id),
+            SyncCredentials {
+                master_password: MASTER_PW,
+                secret_key: &fixture.a.secret_key,
+            },
+        );
+        engine.publish_acknowledgements().unwrap();
+        drop(engine);
+
+        let after = fixture
+            .a
+            .user
+            .get_shared_profile(&fixture.a.user_id)
+            .unwrap()
+            .devices
+            .get(&a_id)
+            .unwrap()
+            .acknowledgement
+            .clone()
+            .expect("the persisted publication survives a locked Vault");
+        assert!(
+            after.applied.contains_key(&fixture.item_id),
+            "a locked Vault must not silently drop what this Device already saw"
+        );
+        assert_eq!(
+            after.sequence, before.sequence,
+            "republishing the same claim does not need a new sequence"
+        );
+
+        std::fs::remove_dir_all(third_dir).ok();
+    }
+
+    #[test]
+    fn test_compaction_prunes_the_acknowledgements_it_no_longer_needs() {
+        let mut fixture = Fixture::new();
+        fixture.sync();
+        let a_id = fixture.a.user.device_id();
+        let b_id = fixture.b.user.device_id();
+
+        fixture
+            .a
+            .vaults
+            .delete_item(fixture.vault_id, fixture.item_id)
+            .unwrap();
+        fixture.sync();
+        fixture.sync();
+
+        for (device, device_id) in [(&fixture.a, a_id), (&fixture.b, b_id)] {
+            let acknowledgement = device
+                .user
+                .get_shared_profile(&device.user_id)
+                .unwrap()
+                .devices
+                .get(&device_id)
+                .unwrap()
+                .acknowledgement
+                .clone()
+                .expect("the Device published an acknowledgement");
+            assert!(
+                !acknowledgement.applied.contains_key(&fixture.item_id),
+                "an acknowledgement for a compacted Tombstone is pruned"
+            );
+        }
     }
 
     #[test]
