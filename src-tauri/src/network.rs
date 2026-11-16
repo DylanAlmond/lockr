@@ -555,6 +555,15 @@ pub trait PeerNetwork: Send + Sync {
 pub trait DeviceDirectory: Send + Sync {
     /// The Base64 Ed25519 public key of an admitted, unrevoked Device.
     fn admitted_public_key(&self, device_id: &DeviceId) -> Option<String>;
+
+    /// The view to use for one new connection.
+    ///
+    /// The transport keeps a directory for the whole signed-in session, so a
+    /// directory that can go stale must return a freshly-read snapshot here.
+    /// A directory built from an immutable registry returns an equivalent
+    /// copy. A snapshot that cannot be read must admit nobody rather than
+    /// fall back to the previous view.
+    fn snapshot(&self) -> Arc<dyn DeviceDirectory>;
 }
 
 /// The identity and registry a transport uses for one session.

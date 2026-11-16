@@ -251,6 +251,8 @@ export interface DiscoveredPeer {
 export interface SyncConflictSide {
   device: string;
   counter: number;
+  /** True when this Device wrote this side. At most one side is local. */
+  is_local: boolean;
   /** Always null for a secret field. */
   value: unknown;
 }

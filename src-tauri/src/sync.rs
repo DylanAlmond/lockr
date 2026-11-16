@@ -83,6 +83,12 @@ const SYNC_STATE_FILE: &str = "sync_state.json";
 /// other command waiting on the same state — blocked indefinitely.
 pub const SYNC_FRAME_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// How long one read slice may block before the cancel flag is checked again.
+///
+/// A blocked read cannot observe cancellation itself, so the engine reads in
+/// slices and re-checks between them. Cancelling therefore costs at most one
+/// slice, not the whole frame deadline.
+const SYNC_CANCEL_SLICE: Duration = Duration::from_millis(100);
 
 /// The Sync Set rule for one Device.
 ///
@@ -1042,17 +1048,36 @@ impl<'a> SyncEngine<'a> {
 
     /// Receive one frame, refusing to wait forever and honouring cancellation.
     ///
-    /// A transport may only observe the cancel token at the next frame
-    /// boundary, so a cancel that arrives while a frame is in flight is
-    /// reported as a cancellation rather than as a timeout. Cancellation
-    /// latency is therefore bounded by [`SYNC_FRAME_TIMEOUT`].
+    /// A blocking transport cannot see the cancel token, so the engine reads in
+    /// short slices and re-checks between them. A frame that arrives in pieces
+    /// is resumed by the transport across calls; a cancel that arrives while a
+    /// frame is in flight is reported after at most [`SYNC_CANCEL_SLICE`].
     fn receive_frame(&self, channel: &mut dyn PeerChannel) -> Result<SyncMessage, VaultError> {
         self.check_cancelled()?;
-        match channel.receive_timeout(SYNC_FRAME_TIMEOUT) {
-            Ok(message) => Ok(message),
-            Err(error) => {
+        let deadline = std::time::Instant::now() + SYNC_FRAME_TIMEOUT;
+        loop {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
                 self.check_cancelled()?;
-                Err(Self::map_channel_error(error))
+                return Err(Self::map_channel_error(NetworkError::Timeout));
+            }
+
+            match channel.receive_timeout(remaining.min(SYNC_CANCEL_SLICE)) {
+                Ok(message) => {
+                    // A cancel that raced the arrival still wins: the caller
+                    // asked to stop and the frame can be read again next time.
+                    self.check_cancelled()?;
+                    return Ok(message);
+                }
+                Err(NetworkError::Timeout) => {
+                    // The slice expired, not the frame deadline. Check the
+                    // flag and keep waiting for the rest of the frame.
+                    self.check_cancelled()?;
+                }
+                Err(error) => {
+                    self.check_cancelled()?;
+                    return Err(Self::map_channel_error(error));
+                }
             }
         }
     }
@@ -1297,27 +1322,39 @@ impl<'a> SyncEngine<'a> {
         remote: &Vault,
         conflicts: &[Conflict],
     ) -> Vec<PendingConflict> {
+        let local_device = self.vault_manager.device_id();
         conflicts
             .iter()
-            .map(|conflict| PendingConflict {
-                vault_id,
-                scope: conflict.scope.clone(),
-                field_key: conflict.field_key.clone(),
-                is_secret: conflict.is_secret,
-                local: capture_value(
-                    local,
-                    &conflict.scope,
-                    &conflict.field_key,
-                    conflict.is_secret,
-                ),
-                remote: capture_value(
-                    remote,
-                    &conflict.scope,
-                    &conflict.field_key,
-                    conflict.is_secret,
-                ),
-                local_version: capture_field_version(local, &conflict.scope, &conflict.field_key),
-                sides: conflict.sides.clone(),
+            .map(|conflict| {
+                // Merge is device-agnostic; the Device surfacing this Conflict
+                // is the one that knows which side, if either, it wrote.
+                let mut conflict = conflict.clone();
+                conflict.identify_local_side(local_device);
+
+                PendingConflict {
+                    vault_id,
+                    scope: conflict.scope.clone(),
+                    field_key: conflict.field_key.clone(),
+                    is_secret: conflict.is_secret,
+                    local: capture_value(
+                        local,
+                        &conflict.scope,
+                        &conflict.field_key,
+                        conflict.is_secret,
+                    ),
+                    remote: capture_value(
+                        remote,
+                        &conflict.scope,
+                        &conflict.field_key,
+                        conflict.is_secret,
+                    ),
+                    local_version: capture_field_version(
+                        local,
+                        &conflict.scope,
+                        &conflict.field_key,
+                    ),
+                    sides: conflict.sides,
+                }
             })
             .collect()
     }
@@ -3387,6 +3424,63 @@ mod tests {
     }
 
     #[test]
+    fn test_cancel_ends_a_blocked_read_within_a_slice() {
+        let mut fixture = Fixture::new();
+        let peer = discovered_b(&fixture);
+        let gate = Gate::new();
+        let gated = GatedNetwork {
+            inner: &fixture.a.net,
+            gate: Arc::clone(&gate),
+        };
+        let control = Arc::new(SyncControl::default());
+
+        let vaults = &mut fixture.a.vaults;
+        let user = &fixture.a.user;
+        let secret_key = &fixture.a.secret_key;
+        let user_id = fixture.a.user_id;
+        let sync = &fixture.a.sync;
+
+        let (outcome, elapsed) = std::thread::scope(|scope| {
+            let runner = Arc::clone(&control);
+            let handle = scope.spawn(move || {
+                let lease = runner.begin().expect("the first sync claims the slot");
+                let mut noop = |_: SyncProgress| {};
+                let mut engine = SyncEngine::new(
+                    &gated,
+                    vaults,
+                    user,
+                    sync.scope(&user_id),
+                    SyncCredentials {
+                        master_password: MASTER_PW,
+                        secret_key,
+                    },
+                )
+                .with_cancel(lease.token());
+
+                let start = engine.start_with_peer(&peer, &mut noop).unwrap();
+                engine.send_offers(start, &mut noop)
+            });
+
+            // The transport stays silent: unlike the earlier gate test, it is
+            // never released, so only slicing can end the read.
+            gate.wait_until_waiting();
+            let started = std::time::Instant::now();
+            control.cancel();
+            let outcome = handle.join().unwrap();
+            (outcome, started.elapsed())
+        });
+
+        assert!(
+            matches!(outcome, Err(VaultError::SyncCancelled)),
+            "cancel must interrupt a read blocked on a silent peer"
+        );
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "cancel must be observed between read slices, not at the frame deadline: {elapsed:?}"
+        );
+    }
+
+    #[test]
     fn test_two_simultaneous_syncs_do_not_interleave() {
         let control = SyncControl::default();
 
@@ -4229,6 +4323,35 @@ mod tests {
             writers,
             BTreeSet::from([a_id, b_id]),
             "a conflict names the Device that wrote each side"
+        );
+        let local: Vec<DeviceId> = display
+            .conflict
+            .sides
+            .iter()
+            .filter(|side| side.is_local)
+            .map(|side| side.device)
+            .collect();
+        assert_eq!(
+            local,
+            vec![a_id],
+            "exactly this Device's side is marked local"
+        );
+        let local_on_b: Vec<DeviceId> = b_outcome
+            .report
+            .conflicts
+            .iter()
+            .find(|conflict| conflict.conflict.field_key == "display_name")
+            .expect("B surfaces the same conflict")
+            .conflict
+            .sides
+            .iter()
+            .filter(|side| side.is_local)
+            .map(|side| side.device)
+            .collect();
+        assert_eq!(
+            local_on_b,
+            vec![b_id],
+            "each Device marks its own side, not the other Device's"
         );
         assert!(
             display.conflict.sides.iter().all(|side| side.value.is_some()),

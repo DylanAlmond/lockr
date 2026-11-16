@@ -11,13 +11,13 @@ const props = defineProps<{
   session: ConflictSession;
   vaultNames: Record<string, string>;
   deviceNames: Record<string, string>;
-  thisDeviceId: string | null;
   busy: boolean;
   error: string | null;
 }>();
 
 const emit = defineEmits<{
   (e: 'resolve', conflict: SyncConflict, choice: ConflictChoice): void;
+  (e: 'resync', peerDeviceId: string): void;
   (e: 'abandon'): void;
 }>();
 
@@ -85,9 +85,9 @@ function vaultLabel(vaultId: string): string {
   return vaultLabelById(vaultId, props.vaultNames);
 }
 
-function deviceLabel(deviceId: string): string {
-  if (deviceId === props.thisDeviceId) return 'This Device';
-  return props.deviceNames[deviceId] ?? `Device ${shortId(deviceId)}`;
+function deviceLabel(side: SyncConflictSide): string {
+  if (side.is_local) return 'This Device';
+  return props.deviceNames[side.device] ?? `Device ${shortId(side.device)}`;
 }
 
 const itemLabel = computed(() => {
@@ -104,16 +104,13 @@ interface SideEntry {
 }
 
 /**
- * The backend orders Conflict sides canonically, not local-first, and does not
- * mark which side is this Device's copy. When one side names this Device we can
- * map it safely; when neither does, we must not guess which hidden value is
- * local, so the prompt withholds both choices.
+ * The backend marks the side this Device wrote, if any. At most one side is
+ * local. When neither is, the conflict arrived wholly from other Devices and
+ * the prompt must not offer a blind choice between values it cannot identify.
  */
-const localSideKnown = computed(() => {
-  const conflict = current.value;
-  if (!conflict || !props.thisDeviceId) return false;
-  return conflict.sides.some((side) => side.device === props.thisDeviceId);
-});
+const hasLocalSide = computed(
+  () => current.value?.sides.some((side) => side.is_local) ?? false
+);
 
 const sideEntries = computed<SideEntry[]>(() => {
   const conflict = current.value;
@@ -121,24 +118,19 @@ const sideEntries = computed<SideEntry[]>(() => {
 
   const [first, second] = conflict.sides;
 
-  if (!localSideKnown.value) {
+  if (!hasLocalSide.value) {
     return [
-      { choice: null, side: first, label: deviceLabel(first.device) },
-      { choice: null, side: second, label: deviceLabel(second.device) }
+      { choice: null, side: first, label: deviceLabel(first) },
+      { choice: null, side: second, label: deviceLabel(second) }
     ];
   }
 
-  let local = first;
-  let remote = second;
-
-  if (second.device === props.thisDeviceId) {
-    local = second;
-    remote = first;
-  }
+  const local = first.is_local ? first : second;
+  const remote = first.is_local ? second : first;
 
   return [
-    { choice: 'local', side: local, label: deviceLabel(local.device) },
-    { choice: 'remote', side: remote, label: deviceLabel(remote.device) }
+    { choice: 'local', side: local, label: deviceLabel(local) },
+    { choice: 'remote', side: remote, label: deviceLabel(remote) }
   ];
 });
 
@@ -272,11 +264,11 @@ function next() {
               v-for="entry in sideEntries"
               :key="`${entry.side.device}:${entry.side.counter}`"
               class="conflict-side"
-              :class="{ 'conflict-side--local': entry.choice === 'local' }"
+              :class="{ 'conflict-side--local': entry.side.is_local }"
             >
               <header>
                 <span class="side-device">{{ entry.label }}</span>
-                <span v-if="entry.choice === 'local'" class="side-tag">This copy</span>
+                <span v-if="entry.side.is_local" class="side-tag">This copy</span>
               </header>
 
               <p
@@ -317,13 +309,20 @@ function next() {
             </section>
           </div>
 
-          <p v-if="!localSideKnown" class="ambiguity-note">
+          <div v-if="!hasLocalSide" class="ambiguity-note">
             <TriangleAlert :size="16" aria-hidden="true" />
-            Neither value was written by this Device, so Lockr cannot tell which side is this
-            Device’s copy. Choosing here could keep the wrong hidden value. This conflict cannot be
-            resolved from this screen; leave it unresolved and resolve it from one of the Devices
-            named above.
-          </p>
+            <div>
+              <p>This conflict arrived from other Devices; sync again to refresh.</p>
+              <Button
+                variant="outline"
+                size="small"
+                :disabled="busy"
+                @click="emit('resync', session.peerDeviceId)"
+              >
+                Sync again
+              </Button>
+            </div>
+          </div>
 
           <p v-if="error" class="conflict-error">{{ error }}</p>
         </div>
@@ -478,6 +477,13 @@ function next() {
   color: hsl(0 60% 30%);
   font-size: 0.8125rem;
   line-height: 1.5;
+
+  > div {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.5rem;
+  }
 }
 
 .side-grid {

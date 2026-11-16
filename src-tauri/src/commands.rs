@@ -14,8 +14,11 @@ use zeroize::Zeroize;
 use zxcvbn::{zxcvbn, Entropy};
 
 use crate::mdns::DiscoverySession;
-use crate::network::{NetworkError, PeerChannel, PeerNetwork, SyncMessage, TransportSession};
+use crate::network::{
+    DeviceDirectory, NetworkError, PeerChannel, PeerNetwork, SyncMessage, TransportSession,
+};
 use crate::pairing::{PairingClaim, PAIRING_TTL_SECS};
+use crate::registry::DeviceRegistry;
 use crate::sync::{
     PendingConflict, PendingSync, SyncCancel, SyncControl, SyncCredentials, SyncEngine, SyncOutcome,
     SyncProgress, SyncReport, SyncStateStore,
@@ -66,6 +69,42 @@ impl Drop for ServingHandle {
         // lock is held (identity recovery replaces the whole state), and the
         // server thread needs that lock to finish. Ask it to stop instead.
         self.stop.store(true, Ordering::SeqCst);
+    }
+}
+
+/// A Device Directory that re-reads the shared profile for each connection.
+///
+/// A signed-in transport session can outlive a revocation. Holding the
+/// registry as it looked at session start would let a revoked Device open a
+/// new connection, so this reads the current file instead. A profile that
+/// cannot be read or verified admits nobody rather than falling back to a
+/// stale view.
+struct LiveDeviceDirectory {
+    path: PathBuf,
+}
+
+impl LiveDeviceDirectory {
+    fn load(&self) -> DeviceRegistry {
+        std::fs::read_to_string(&self.path)
+            .ok()
+            .and_then(|json| serde_json::from_str::<crate::SharedProfile>(&json).ok())
+            .and_then(|shared| shared.devices.verify().ok().map(|()| shared.devices))
+            .unwrap_or_default()
+    }
+}
+
+impl DeviceDirectory for LiveDeviceDirectory {
+    fn admitted_public_key(&self, device_id: &crate::DeviceId) -> Option<String> {
+        self.load()
+            .get(device_id)
+            .filter(|record| !record.is_revoked())
+            .map(|record| record.public_key.clone())
+    }
+
+    fn snapshot(&self) -> Arc<dyn DeviceDirectory> {
+        // Read and verify once per connection so both halves of one handshake
+        // see the same view.
+        Arc::new(self.load())
     }
 }
 
@@ -219,12 +258,17 @@ impl ManagerState {
         let keypair = user_manager
             .session_keypair()
             .ok_or_else(|| VaultError::SyncNotLoggedIn.to_string())?;
-        let devices = Arc::new(
-            user_manager
-                .get_shared_profile(&user_id)
-                .map_err(|error| error.to_string())?
-                .devices,
-        );
+
+        // Validate the profile now so a corrupt registry still fails session
+        // configuration. The directory itself re-reads the file per
+        // connection, so a revocation saved during a long-lived session is
+        // observed without waiting for the next command.
+        user_manager
+            .get_shared_profile(&user_id)
+            .map_err(|error| error.to_string())?;
+        let devices: Arc<dyn DeviceDirectory> = Arc::new(LiveDeviceDirectory {
+            path: user_manager.shared_profile_path(&user_id),
+        });
 
         network
             .set_session(&TransportSession {
@@ -2978,6 +3022,7 @@ mod tests {
         crate::ConflictSide {
             device,
             counter: 1,
+            is_local: false,
             value: None,
         }
     }
