@@ -5,18 +5,19 @@ import Button from '../ui/Button.vue';
 import Select from '../ui/Select.vue';
 import DuplicateCombinePanel from './DuplicateCombinePanel.vue';
 import { useDuplicates } from '../../composables/useDuplicates';
-import { vaultLabelById } from '../../util/labels';
+import { conflictFieldLabel } from '../../util/conflictLabels';
+import { candidateLabel, vaultLabelById } from '../../util/labels';
 import type {
-  DuplicateCandidate,
-  DuplicateIdentityNote,
   DuplicateResolution,
   DuplicateSuggestion,
+  MoveResidueNote,
+  MoveResidueReason,
   SyncSetVault
 } from '../../types';
 
 const props = defineProps<{
   vaults: SyncSetVault[];
-  notes: DuplicateIdentityNote[];
+  notes: MoveResidueNote[];
 }>();
 
 const { suggestions, isLoading, error, listSuggestions, resolve } = useDuplicates();
@@ -49,16 +50,6 @@ const selectedVault = computed(
 
 function vaultName(vaultId: string): string {
   return vaultLabelById(vaultId, vaultNames.value);
-}
-
-function candidateLabel(candidate: DuplicateCandidate): string {
-  return candidate.display_name?.trim() || `Item ${candidate.item_id.slice(0, 8)}`;
-}
-
-function fieldLabel(fieldKey: string): string {
-  return fieldKey
-    .replace(/_/g, ' ')
-    .replace(/^./, (letter) => letter.toUpperCase());
 }
 
 async function selectVault(value: string | number) {
@@ -161,33 +152,35 @@ async function applyCombine(survivor: string, fieldChoices: Record<string, strin
   );
 }
 
-function reviewNote(note: DuplicateIdentityNote) {
+function showNoteVault(note: MoveResidueNote) {
   const firstVault = note.vault_ids[0];
   if (firstVault && props.vaults.some((vault) => vault.vault_id === firstVault)) {
     selectedVaultId.value = firstVault;
   }
 }
 
-function noteTitle(note: DuplicateIdentityNote): string {
-  switch (note.reason) {
-    case 'cycle':
-      return 'Move history forms a loop';
-    case 'destination_outside_session':
-      return 'Moved to a Vault outside this sync';
-    default:
-      return `Same Item found in ${note.vault_ids.length} Vaults`;
-  }
+interface MoveResidueCopy {
+  title: string;
+  detail: string;
 }
 
-function noteDetail(note: DuplicateIdentityNote): string {
-  switch (note.reason) {
-    case 'cycle':
-      return `This Item's move records point back to ${note.destinations.map(vaultName).join(' and ')}, so no single copy could be found.`;
-    case 'destination_outside_session':
-      return `A move points at ${note.destinations.map(vaultName).join(' and ')}, which this sync did not include. Sync with a Device that shares that Vault to review the Item.`;
-    default:
-      return `${note.vault_ids.map(vaultName).join(' and ')} hold live copies. Review it as a Duplicate so one identity can be retired.`;
-  }
+const NOTE_COPY: Record<MoveResidueReason, (note: MoveResidueNote) => MoveResidueCopy> = {
+  live_in_multiple_vaults: (note) => ({
+    title: `Item live in ${note.vault_ids.length} Vaults`,
+    detail: `${note.vault_ids.map(vaultName).join(' and ')} hold live copies. The move could not be settled in this sync; nothing was retired.`
+  }),
+  destination_outside_session: (note) => ({
+    title: 'Moved to a Vault outside this sync',
+    detail: `A move points at ${note.destinations.map(vaultName).join(' and ')}, which this sync did not include. Sync with a Device that shares that Vault to settle the move.`
+  }),
+  cycle: (note) => ({
+    title: 'Move history forms a loop',
+    detail: `This Item's move records point back to ${note.destinations.map(vaultName).join(' and ')}, so no single copy could be found.`
+  })
+};
+
+function noteCopy(note: MoveResidueNote): MoveResidueCopy {
+  return NOTE_COPY[note.reason](note);
 }
 </script>
 
@@ -214,16 +207,16 @@ function noteDetail(note: DuplicateIdentityNote): string {
     <div v-if="notes.length > 0" class="notes">
       <article v-for="note in notes" :key="note.item_id" class="note-card">
         <div>
-          <strong>{{ noteTitle(note) }}</strong>
-          <p>{{ noteDetail(note) }}</p>
+          <strong>{{ noteCopy(note).title }}</strong>
+          <p>{{ noteCopy(note).detail }}</p>
         </div>
         <Button
           v-if="note.vault_ids.length > 0"
           variant="outline"
           size="xs"
-          @click="reviewNote(note)"
+          @click="showNoteVault(note)"
         >
-          Review
+          Show Vault
         </Button>
       </article>
     </div>
@@ -272,7 +265,7 @@ function noteDetail(note: DuplicateIdentityNote): string {
         <div v-if="suggestion.colliding_fields.length > 0" class="collision-summary">
           <span class="collision-label">Fields that differ:</span>
           <span v-for="field in suggestion.colliding_fields" :key="field.field_key" class="chip">
-            {{ fieldLabel(field.field_key) }}{{ field.is_secret ? ' (secret)' : '' }}
+            {{ conflictFieldLabel(field.field_key) }}{{ field.is_secret ? ' (secret)' : '' }}
           </span>
         </div>
         <p v-else class="muted">

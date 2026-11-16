@@ -1,7 +1,10 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue';
 import Button from '../ui/Button.vue';
-import type { DuplicateCandidate, DuplicateField, DuplicateSuggestion } from '../../types';
+import { formatConflictValue } from '../../util/conflictRedaction';
+import { conflictFieldLabel } from '../../util/conflictLabels';
+import { candidateLabel } from '../../util/labels';
+import type { DuplicateField, DuplicateSuggestion } from '../../types';
 
 const props = defineProps<{
   suggestion: DuplicateSuggestion;
@@ -16,30 +19,11 @@ const emit = defineEmits<{
 const survivor = ref<string | null>(null);
 const fieldChoices = ref<Record<string, string>>({});
 
-function candidateLabel(candidate: DuplicateCandidate): string {
-  return candidate.display_name?.trim() || `Item ${candidate.item_id.slice(0, 8)}`;
-}
-
-function fieldLabel(fieldKey: string): string {
-  return fieldKey
-    .replace(/_/g, ' ')
-    .replace(/^./, (letter) => letter.toUpperCase());
-}
-
-function formatValue(value: unknown): string {
-  if (value === null || value === undefined) return 'Not set';
-  if (typeof value === 'string') return value.length > 0 ? value : 'Empty';
-  if (typeof value === 'boolean') return value ? 'Yes' : 'No';
-  if (typeof value === 'number') return String(value);
-  if (Array.isArray(value)) return value.length > 0 ? value.join(', ') : 'None';
-  return JSON.stringify(value);
-}
-
 function fieldValue(field: DuplicateField, itemId: string): string {
   if (field.is_secret) return 'Hidden';
   return itemId === props.suggestion.first.item_id
-    ? formatValue(field.first_value)
-    : formatValue(field.second_value);
+    ? formatConflictValue(field.first_value)
+    : formatConflictValue(field.second_value);
 }
 
 function chooseField(fieldKey: string, itemId: string) {
@@ -90,7 +74,7 @@ function apply() {
       class="combine-step"
     >
       <legend>
-        {{ fieldLabel(field.field_key) }}
+        {{ conflictFieldLabel(field.field_key) }}
         <span v-if="field.is_secret" class="secret-chip">secret</span>
       </legend>
 
