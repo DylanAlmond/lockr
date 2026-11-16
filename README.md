@@ -108,6 +108,30 @@ _The compiled installer/binary will be located in `src-tauri/target/release/bund
     └── Cargo.toml
 ```
 
+## Verification
+
+The two-Device sync paths that cannot be exercised automatically are covered by
+[`docs/testing/manual-sync.md`](docs/testing/manual-sync.md). It is the script to
+run on two machines for pairing over the real transport, the post-pairing Vault
+transfer, cancellation, conflict reveal and the three Vault removal actions.
+Steps that need two machines are marked **TWO MACHINES**.
+
+Third-party components and their licences are listed in
+[`THIRD-PARTY-NOTICES`](THIRD-PARTY-NOTICES). That file is generated from the
+committed dependency graph. Regenerate it whenever `src-tauri/Cargo.lock` or
+`yarn.lock` changes — adding, removing or upgrading a dependency, changing a
+feature that pulls in a new optional crate, or updating a build tool:
+
+```sh
+yarn install
+cargo fetch --manifest-path src-tauri/Cargo.toml --locked
+node scripts/generate-third-party-notices.mjs
+```
+
+Do not edit the notices by hand. `THIRD-PARTY-NOTICES` records the lockfile
+hashes it was generated from, and a release must not ship notices that do not
+match its lockfiles.
+
 ## Contributing
 
 Pull requests are welcome. For major changes, please open an issue first to discuss what you would like to change.
