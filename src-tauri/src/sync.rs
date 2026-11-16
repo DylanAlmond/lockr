@@ -428,16 +428,38 @@ pub struct SyncConflict {
     pub conflict: Conflict,
 }
 
-/// A same item identity found live in more than one local Vault after a sync.
+/// Why a same-identity Duplicate could not be settled by reconciliation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DuplicateNoteReason {
+    /// The identity is still live in more than one Vault: a Move Record did
+    /// not name exactly one of the copies, or did not causally cover it.
+    LiveInMultipleVaults,
+
+    /// A Move Record names a Vault this sync could not compare against, so
+    /// the Item may also live there. This is the case reconciliation cannot
+    /// resolve: syncing with a Device whose Sync Set includes that Vault will.
+    DestinationOutsideSession,
+}
+
+/// A same item identity the session could not settle across Vaults.
 ///
-/// This is the survivable #47 limitation: two Devices moving one Item to two
-/// different destinations at the same time can leave a live copy in each.
-/// Sync does not attempt to pick a winner; it surfaces the identity for
-/// Duplicate review so nothing is silently discarded.
+/// The ordinary cross-Vault case - two Devices moving one Item to different
+/// destinations at the same time - is reconciled after the per-Vault merge:
+/// the losing live copy becomes a Move Record naming the winner. This note is
+/// the residue. It says why reconciliation stopped short, and it never
+/// carries Item content or secrets.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DuplicateIdentityNote {
     pub item_id: ItemId,
+
+    /// Every Vault still holding a live copy.
     pub vault_ids: Vec<VaultId>,
+
+    /// Destinations named by Move Records that this session could not follow.
+    pub destinations: Vec<VaultId>,
+
+    pub reason: DuplicateNoteReason,
 }
 
 /// What one completed sync produced.
@@ -557,6 +579,10 @@ pub struct SyncSent {
     /// Vaults this Device is willing to accept: its Sync Set over the merged
     /// registry. A responder cannot push anything outside it.
     accepting: BTreeSet<VaultId>,
+
+    /// The Vaults both Sync Sets agreed on for this exchange. Reconciliation
+    /// after the merge walks exactly this set, so both Devices walk the same.
+    agreed: BTreeSet<VaultId>,
 }
 
 /// A responder that has received the initiator's Scope and sent its own.
@@ -726,6 +752,7 @@ impl<'a> SyncEngine<'a> {
             // about. The responder still sends only Vaults it holds and has
             // in its own Sync Set.
             accepting: local_scope,
+            agreed: intersection,
         })
     }
 
@@ -754,7 +781,7 @@ impl<'a> SyncEngine<'a> {
             }
         }
 
-        self.finish_outcome(outcome, progress)
+        self.finish_outcome(outcome, &sent.agreed, progress)
     }
 
     // ============ Responder ============
@@ -915,7 +942,7 @@ impl<'a> SyncEngine<'a> {
             .send(SyncMessage::Complete)
             .map_err(Self::map_channel_error)?;
 
-        self.finish_outcome(outcome, progress)
+        self.finish_outcome(outcome, &intersection, progress)
     }
 
     // ============ Shared steps ============
@@ -1235,6 +1262,7 @@ impl<'a> SyncEngine<'a> {
     fn finish_outcome(
         &mut self,
         mut outcome: SyncOutcome,
+        session: &BTreeSet<VaultId>,
         progress: &mut dyn FnMut(SyncProgress),
     ) -> Result<SyncOutcome, VaultError> {
         outcome.report.vault_ids.sort();
@@ -1252,7 +1280,9 @@ impl<'a> SyncEngine<'a> {
                 },
             })
             .collect();
-        outcome.report.duplicate_notes = self.duplicate_identity_notes();
+
+        let unfollowed = self.reconcile_session_moves(session)?;
+        outcome.report.duplicate_notes = self.duplicate_identity_notes(&unfollowed);
 
         progress(SyncProgress::Complete {
             vaults: outcome.report.vault_ids.len(),
@@ -1262,42 +1292,121 @@ impl<'a> SyncEngine<'a> {
         Ok(outcome)
     }
 
-    /// Same item identity live in two local Vaults. This is the move
-    /// collision that whole-file, per-Vault merge cannot resolve by itself.
+    /// Settle Move Records against the destination Vaults of this session.
     ///
-    /// This is a surviving limitation, not a promise of convergence: a merge
-    /// sees one Vault at a time, so two Devices moving the same identity to
-    /// two different destinations concurrently can leave a live copy in each.
-    /// #47 picks the destination deterministically inside the source Vault;
-    /// reconciling the two destination Vaults needs cross-Vault knowledge that
-    /// this engine does not have. The note exists so nothing is silently
-    /// discarded, not so the caller may claim the two Vaults agree.
-    fn duplicate_identity_notes(&self) -> Vec<DuplicateIdentityNote> {
-        let mut by_item: BTreeMap<ItemId, Vec<VaultId>> = BTreeMap::new();
+    /// A per-Vault merge sees one Vault at a time, so two Devices moving one
+    /// Item to two destinations concurrently leave it live in both. This pass
+    /// runs once, after every Vault of the session has merged, and lets the
+    /// source Vault's (merged) Move Record decide: every other live copy the
+    /// record causally covers becomes a Move Record naming the winner.
+    ///
+    /// Both Devices walk the same session Vaults in the same merged state, so
+    /// both retire the same copies. Nothing new is synced and no Vault outside
+    /// the session is touched; a destination the session cannot see is
+    /// returned so the report can say why it was left alone.
+    fn reconcile_session_moves(
+        &mut self,
+        session: &BTreeSet<VaultId>,
+    ) -> Result<Vec<(ItemId, VaultId)>, VaultError> {
+        let mut vaults: Vec<Vault> = Vec::new();
+        for vault_id in session {
+            // A Vault the two Sync Sets name but this Device does not hold is
+            // simply absent; a Vault it does hold must be readable here.
+            if self.vault_manager.has_vault_file(*vault_id) {
+                vaults.push(self.vault_manager.get_vault(*vault_id)?.clone());
+            }
+        }
+        let reconciliation = crate::merge::reconcile_moves(vaults.iter());
+
+        let mut by_vault: BTreeMap<VaultId, Vec<crate::merge::MoveRetirement>> = BTreeMap::new();
+        for retirement in reconciliation.retirements {
+            by_vault
+                .entry(retirement.vault_id)
+                .or_default()
+                .push(retirement);
+        }
+
+        for (vault_id, retirements) in by_vault {
+            let mut vault = self.vault_manager.get_vault(vault_id)?.clone();
+            for retirement in &retirements {
+                if let Some(slot) = vault
+                    .items
+                    .iter_mut()
+                    .find(|item| item.id == retirement.item_id && !item.is_content_free())
+                {
+                    *slot = crate::VaultItem::move_record(
+                        retirement.item_id,
+                        vault_id,
+                        retirement.clock.clone(),
+                        retirement.destination,
+                    );
+                }
+                // A Move Record carries no content, so it carries no secrets.
+                vault
+                    .secrets
+                    .retain(|entry| entry.item_id != retirement.item_id);
+            }
+            self.vault_manager.replace_vault(vault)?;
+        }
+
+        Ok(reconciliation.unfollowed)
+    }
+
+    /// Same item identity still live in two local Vaults, or a Move Record
+    /// naming a destination this session could not compare against.
+    ///
+    /// Reconciliation removes the ordinary opposite-move case, so this is the
+    /// residue: an identity a Move Record did not settle, or a destination
+    /// outside the session. It never silently discards anything; it names the
+    /// reason so the caller can say why the Two Devices did not fully agree.
+    fn duplicate_identity_notes(
+        &self,
+        unfollowed: &[(ItemId, VaultId)],
+    ) -> Vec<DuplicateIdentityNote> {
+        let mut by_item: BTreeMap<ItemId, (Vec<VaultId>, Vec<VaultId>)> = BTreeMap::new();
 
         for safe in self.vault_manager.get_unlocked_vaults() {
             let Ok(vault) = self.vault_manager.get_vault(safe.id) else {
                 continue;
             };
             for item in &vault.items {
-                // Both a Tombstone and a move record are content-free; only a
+                // Both a Tombstone and a Move Record are content-free; only a
                 // live copy can be a Duplicate identity.
                 if item.is_content_free() {
                     continue;
                 }
-                by_item.entry(item.id).or_default().push(safe.id);
+                by_item.entry(item.id).or_default().0.push(safe.id);
             }
+        }
+
+        for (item_id, destination) in unfollowed {
+            by_item.entry(*item_id).or_default().1.push(*destination);
         }
 
         by_item
             .into_iter()
-            .filter(|(_, vault_ids)| vault_ids.len() > 1)
-            .map(|(item_id, mut vault_ids)| {
+            .filter_map(|(item_id, (mut vault_ids, mut destinations))| {
                 vault_ids.sort();
                 vault_ids.dedup();
-                DuplicateIdentityNote { item_id, vault_ids }
+                destinations.sort();
+                destinations.dedup();
+
+                let reason = if destinations.is_empty() {
+                    if vault_ids.len() < 2 {
+                        return None;
+                    }
+                    DuplicateNoteReason::LiveInMultipleVaults
+                } else {
+                    DuplicateNoteReason::DestinationOutsideSession
+                };
+
+                Some(DuplicateIdentityNote {
+                    item_id,
+                    vault_ids,
+                    destinations,
+                    reason,
+                })
             })
-            .filter(|note| note.vault_ids.len() > 1)
             .collect()
     }
 
@@ -1473,6 +1582,39 @@ mod tests {
             crate::ItemKind::Account(data) => data,
             other => panic!("expected an account, got {other:?}"),
         }
+    }
+
+    /// Every Vault on this Device holding a live copy of one identity.
+    fn live_vault_ids(device: &Device, item_id: ItemId) -> Vec<VaultId> {
+        let mut ids: Vec<VaultId> = device
+            .vaults
+            .get_unlocked_vaults()
+            .into_iter()
+            .filter(|safe| {
+                device
+                    .vaults
+                    .get_vault(safe.id)
+                    .expect("listed vaults are unlocked")
+                    .items
+                    .iter()
+                    .any(|item| item.id == item_id && !item.is_content_free())
+            })
+            .map(|safe| safe.id)
+            .collect();
+        ids.sort();
+        ids
+    }
+
+    /// The item's single entry in one Vault, whatever its lifecycle state.
+    fn item_in(device: &Device, vault_id: VaultId, item_id: ItemId) -> &crate::VaultItem {
+        device
+            .vaults
+            .get_vault(vault_id)
+            .expect("the vault is unlocked")
+            .items
+            .iter()
+            .find(|item| item.id == item_id)
+            .expect("the identity is retained")
     }
 
     impl Fixture {
@@ -4525,7 +4667,7 @@ mod tests {
     }
 
     #[test]
-    fn test_an_opposite_move_across_two_devices_is_surfaced_as_a_duplicate_note() {
+    fn test_an_opposite_move_across_two_devices_converges_on_one_destination() {
         let mut fixture = Fixture::new();
         fixture.sync();
 
@@ -4555,49 +4697,327 @@ mod tests {
         assert!(fixture.b.vaults.has_vault_file(archive.id));
         assert!(fixture.b.vaults.has_vault_file(holding.id));
 
-        // One identity, moved to two different destinations concurrently.
+        // Make B's destination the smaller id. B's copy is then the
+        // deterministic winner, and moving it back hits the exact-equality
+        // case: a plain clock join would leave the source Move Record
+        // dominating and swallow the move.
+        let (a_destination, b_destination) = if archive.id < holding.id {
+            (holding.id, archive.id)
+        } else {
+            (archive.id, holding.id)
+        };
+        fixture
+            .a
+            .vaults
+            .move_item(fixture.vault_id, fixture.item_id, a_destination)
+            .unwrap();
+        fixture
+            .b
+            .vaults
+            .move_item(fixture.vault_id, fixture.item_id, b_destination)
+            .unwrap();
+
+        let (a_outcome, b_outcome) = fixture.sync();
+
+        // The source Vault's merged Move Record names the smaller destination,
+        // so both Devices must agree on that winner.
+        let winner = b_destination;
+        let loser = a_destination;
+
+        for outcome in [&a_outcome, &b_outcome] {
+            assert!(
+                outcome
+                    .report
+                    .duplicate_notes
+                    .iter()
+                    .all(|note| note.item_id != fixture.item_id),
+                "an opposite move must converge, not be surfaced as a Duplicate"
+            );
+        }
+
+        for device in [&fixture.a, &fixture.b] {
+            assert_eq!(
+                live_vault_ids(device, fixture.item_id),
+                vec![winner],
+                "exactly one live copy survives, on the same destination"
+            );
+
+            // The losing destination keeps a Move Record naming the winner,
+            // so the identity cannot reappear there as a second live copy.
+            let retired = item_in(device, loser, fixture.item_id);
+            assert!(retired.is_move_record());
+            assert_eq!(retired.moved_to, Some(winner));
+
+            let source = item_in(device, fixture.vault_id, fixture.item_id);
+            assert!(source.is_move_record());
+            assert_eq!(source.moved_to, Some(winner));
+
+            assert_eq!(
+                device
+                    .vaults
+                    .get_item_secret(winner, fixture.item_id, "password")
+                    .unwrap()
+                    .as_deref(),
+                Some("hunter2"),
+                "the surviving copy keeps the Item's secrets"
+            );
+        }
+
+        assert_eq!(
+            fixture.a.vaults.get_vault(winner).unwrap(),
+            fixture.b.vaults.get_vault(winner).unwrap(),
+            "both Devices hold the same winning Vault"
+        );
+        assert_eq!(
+            fixture.a.vaults.get_vault(loser).unwrap(),
+            fixture.b.vaults.get_vault(loser).unwrap(),
+            "both Devices agree on the retirement record"
+        );
+
+        // A second round changes nothing: the walk is idempotent.
+        let (a_again, b_again) = fixture.sync();
+        for outcome in [&a_again, &b_again] {
+            assert!(outcome
+                .report
+                .duplicate_notes
+                .iter()
+                .all(|note| note.item_id != fixture.item_id));
+        }
+        for device in [&fixture.a, &fixture.b] {
+            assert_eq!(live_vault_ids(device, fixture.item_id), vec![winner]);
+        }
+
+        // Moving the survivor back into the Vault it came from is a move back:
+        // it must win over both the source Move Record and the retirement
+        // record, rather than being swallowed by them.
+        fixture
+            .a
+            .vaults
+            .move_item(winner, fixture.item_id, fixture.vault_id)
+            .unwrap();
+        fixture.sync();
+
+        for device in [&fixture.a, &fixture.b] {
+            assert_eq!(
+                live_vault_ids(device, fixture.item_id),
+                vec![fixture.vault_id],
+                "the move back must converge on the source Vault"
+            );
+            assert!(item_in(device, winner, fixture.item_id).is_move_record());
+        }
+    }
+
+    #[test]
+    fn test_a_move_to_a_vault_outside_the_peers_sync_set_is_reported() {
+        let mut fixture = Fixture::new();
+        fixture.sync();
+
+        let archive = fixture
+            .a
+            .vaults
+            .create_vault(
+                "Archive".to_string(),
+                "#111111".to_string(),
+                MASTER_PW,
+                &fixture.a.secret_key,
+            )
+            .unwrap();
+        fixture.a.user.add_vault_to_user(archive.id).unwrap();
+        fixture.sync();
+
+        // The destination stops being part of B's Sync Set, so this exchange
+        // can never compare against it.
+        fixture
+            .b
+            .sync
+            .set_vault_syncing(
+                &fixture.b.user_id,
+                archive.id,
+                false,
+                &shared_vaults(&fixture.b),
+            )
+            .unwrap();
+
         fixture
             .a
             .vaults
             .move_item(fixture.vault_id, fixture.item_id, archive.id)
             .unwrap();
-        fixture
-            .b
-            .vaults
-            .move_item(fixture.vault_id, fixture.item_id, holding.id)
-            .unwrap();
 
         let (a_outcome, b_outcome) = fixture.sync();
 
-        let notes: Vec<_> = a_outcome
-            .report
-            .duplicate_notes
-            .iter()
-            .chain(b_outcome.report.duplicate_notes.iter())
-            .filter(|note| note.item_id == fixture.item_id)
-            .collect();
-        assert!(
-            !notes.is_empty(),
-            "whole-file, per-Vault merge cannot reconcile opposite moves; the \
-             surviving identity must be surfaced, not claimed converged"
+        // The Item is still where A put it; nothing was invented or deleted.
+        assert_eq!(
+            live_vault_ids(&fixture.a, fixture.item_id),
+            vec![archive.id]
         );
-        assert!(notes
-            .iter()
-            .any(|note| note.vault_ids.contains(&archive.id) && note.vault_ids.contains(&holding.id)));
+        assert_eq!(
+            fixture
+                .a
+                .vaults
+                .get_item_secret(archive.id, fixture.item_id, "password")
+                .unwrap()
+                .as_deref(),
+            Some("hunter2")
+        );
+
+        // B cannot see the destination. Its source Vault keeps a Move Record
+        // naming it, so the move reached B as an event, not as a deletion.
+        assert!(
+            live_vault_ids(&fixture.b, fixture.item_id).is_empty(),
+            "the stale source copy must not survive as a second live copy"
+        );
+        let record = item_in(&fixture.b, fixture.vault_id, fixture.item_id);
+        assert!(record.is_move_record());
+        assert_eq!(record.moved_to, Some(archive.id));
+
+        // Both Devices say why reconciliation stopped short.
+        for outcome in [&a_outcome, &b_outcome] {
+            let note = outcome
+                .report
+                .duplicate_notes
+                .iter()
+                .find(|note| note.item_id == fixture.item_id)
+                .expect("the out-of-session destination must be reported");
+            assert_eq!(note.reason, DuplicateNoteReason::DestinationOutsideSession);
+            assert!(note.destinations.contains(&archive.id));
+            assert!(
+                !note.vault_ids.contains(&fixture.vault_id),
+                "the source holds a Move Record, not a live copy"
+            );
+        }
+    }
+
+    #[test]
+    fn test_a_move_followed_by_a_delete_does_not_resurrect_in_the_source() {
+        let mut fixture = Fixture::new();
+        fixture.sync();
+
+        let archive = fixture
+            .a
+            .vaults
+            .create_vault(
+                "Archive".to_string(),
+                "#111111".to_string(),
+                MASTER_PW,
+                &fixture.a.secret_key,
+            )
+            .unwrap();
+        fixture.a.user.add_vault_to_user(archive.id).unwrap();
+        fixture.sync();
+
+        fixture
+            .a
+            .vaults
+            .move_item(fixture.vault_id, fixture.item_id, archive.id)
+            .unwrap();
+        fixture.sync();
+
+        fixture
+            .a
+            .vaults
+            .delete_item(archive.id, fixture.item_id)
+            .unwrap();
+        let (a_outcome, b_outcome) = fixture.sync();
+
+        for outcome in [&a_outcome, &b_outcome] {
+            assert!(
+                outcome
+                    .report
+                    .duplicate_notes
+                    .iter()
+                    .all(|note| note.item_id != fixture.item_id),
+                "a move followed by a delete is settled, not a Duplicate"
+            );
+        }
 
         for device in [&fixture.a, &fixture.b] {
-            for destination in [archive.id, holding.id] {
-                assert!(
-                    device
-                        .vaults
-                        .get_vault(destination)
-                        .unwrap()
-                        .items
-                        .iter()
-                        .any(|item| item.id == fixture.item_id && !item.is_content_free()),
-                    "the limitation leaves a live copy in each destination"
-                );
-            }
+            assert!(
+                live_vault_ids(device, fixture.item_id).is_empty(),
+                "the deleted Item must not come back"
+            );
+            assert!(
+                item_in(device, archive.id, fixture.item_id).is_deleted(),
+                "the destination keeps the Tombstone"
+            );
+            let source = item_in(device, fixture.vault_id, fixture.item_id);
+            assert!(
+                source.is_move_record(),
+                "the source keeps the move event, not a live copy"
+            );
+            assert_eq!(source.moved_to, Some(archive.id));
+        }
+
+        // A later exchange against a stale peer must still not resurrect it.
+        fixture.sync();
+        for device in [&fixture.a, &fixture.b] {
+            assert!(live_vault_ids(device, fixture.item_id).is_empty());
+        }
+    }
+
+    #[test]
+    fn test_a_move_and_a_move_back_converge() {
+        let mut fixture = Fixture::new();
+        fixture.sync();
+
+        let archive = fixture
+            .a
+            .vaults
+            .create_vault(
+                "Archive".to_string(),
+                "#111111".to_string(),
+                MASTER_PW,
+                &fixture.a.secret_key,
+            )
+            .unwrap();
+        fixture.a.user.add_vault_to_user(archive.id).unwrap();
+        fixture.sync();
+
+        fixture
+            .a
+            .vaults
+            .move_item(fixture.vault_id, fixture.item_id, archive.id)
+            .unwrap();
+        fixture.sync();
+        for device in [&fixture.a, &fixture.b] {
+            assert_eq!(
+                live_vault_ids(device, fixture.item_id),
+                vec![archive.id],
+                "the move reached the destination"
+            );
+        }
+
+        fixture
+            .a
+            .vaults
+            .move_item(archive.id, fixture.item_id, fixture.vault_id)
+            .unwrap();
+        let (a_outcome, b_outcome) = fixture.sync();
+
+        for outcome in [&a_outcome, &b_outcome] {
+            assert!(outcome
+                .report
+                .duplicate_notes
+                .iter()
+                .all(|note| note.item_id != fixture.item_id));
+        }
+        for device in [&fixture.a, &fixture.b] {
+            assert_eq!(
+                live_vault_ids(device, fixture.item_id),
+                vec![fixture.vault_id],
+                "a move back is not a Duplicate"
+            );
+            let record = item_in(device, archive.id, fixture.item_id);
+            assert!(record.is_move_record());
+            assert_eq!(record.moved_to, Some(fixture.vault_id));
+            assert_eq!(
+                device
+                    .vaults
+                    .get_item_secret(fixture.vault_id, fixture.item_id, "password")
+                    .unwrap()
+                    .as_deref(),
+                Some("hunter2")
+            );
         }
     }
 }

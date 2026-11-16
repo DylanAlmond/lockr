@@ -949,7 +949,7 @@ impl VaultManager {
         self.get_vault(target_vault_id)?;
 
         // Remove the item and its secret entry from the source vault
-        let (item, mut secret) = {
+        let (mut item, mut secret) = {
             let device = self.device_id;
             let source = self.get_vault_mut(vault_id)?;
             let idx = source
@@ -993,7 +993,30 @@ impl VaultManager {
         // move out; the live item replaces it, so one identity never has two
         // entries in one vault.
         {
+            let device = self.device_id;
             let target = self.get_vault_mut(target_vault_id)?;
+
+            // Bringing the Item back is causally *after* any record this
+            // Vault already holds for it, even when that record is the mirror
+            // of the move out and carries the same clock. Absorb its clock
+            // and tick once more so this deliberate move strictly dominates
+            // it: an equal clock leaves the record in charge, and a merge
+            // would discard the Item. This matters after cross-Vault
+            // reconciliation retired an opposite move here with a joined
+            // clock.
+            if let Some(record) = target
+                .items
+                .iter()
+                .find(|existing| existing.id == item.id && existing.is_move_record())
+            {
+                item.clock.merge(&record.clock);
+                // Merge only treats a live copy as a move back when it
+                // *strictly* dominates the record: equal clocks keep the
+                // record, which is what stops a stale copy resurrecting an
+                // Item that moved away.
+                item.clock.increment(device);
+            }
+
             target.items.retain(|existing| existing.id != item.id);
             target
                 .secrets
