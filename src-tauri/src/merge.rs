@@ -1311,6 +1311,11 @@ pub(crate) struct MoveReconciliation {
     /// could not follow. The Item may still live there, so nothing is retired
     /// against such a record.
     pub(crate) unfollowed: Vec<(ItemId, VaultId)>,
+
+    /// `(Item, destination)` pairs where following Move Records looped back to
+    /// a Vault already visited. Nothing lives at the end of a loop, so this is
+    /// reported as a cycle rather than as an outside-session destination.
+    pub(crate) cycles: Vec<(ItemId, VaultId)>,
 }
 
 /// Reconcile Move Records against destination Vaults present in one session.
@@ -1364,6 +1369,9 @@ pub(crate) fn reconcile_moves<'a>(
                 FollowedMove::Unfollowed(destination) => {
                     reconciliation.unfollowed.push((item_id, destination));
                 }
+                FollowedMove::Cycle(destination) => {
+                    reconciliation.cycles.push((item_id, destination));
+                }
             }
         }
 
@@ -1376,6 +1384,9 @@ pub(crate) fn reconcile_moves<'a>(
         // is nothing to retire anything against: leave the copies and let the
         // report explain.
         let Some((winner, authority)) = winners.iter().next() else {
+            continue;
+        };
+        let Some(winner_live) = identity.live.get(winner) else {
             continue;
         };
 
@@ -1393,6 +1404,17 @@ pub(crate) fn reconcile_moves<'a>(
                 continue;
             }
 
+            // `authority` is the joined clock of every Move Record that led to
+            // the winner, including - in an opposite move - one that never
+            // reached this destination. It decides which record wins; it does
+            // not prove the winner's copy holds the loser's state. Require the
+            // winner to have observed every field write the loser records, or
+            // retirement would discard content (and secrets) only that copy
+            // has.
+            if !copy_covers_fields(winner_live, live) {
+                continue;
+            }
+
             reconciliation.retirements.push(MoveRetirement {
                 vault_id: *vault_id,
                 item_id,
@@ -1404,7 +1426,22 @@ pub(crate) fn reconcile_moves<'a>(
 
     reconciliation.unfollowed.sort();
     reconciliation.unfollowed.dedup();
+    reconciliation.cycles.sort();
+    reconciliation.cycles.dedup();
     reconciliation
+}
+
+/// Whether `copy` has observed every field write `other` records.
+///
+/// A move advances only the Item clock, not the per-field clocks, so equal
+/// content compares as covered. Any edit bumps both the Item clock and the
+/// edited field's clock; this check then sees a field version `copy` never
+/// observed, and retirement must keep the edited copy.
+fn copy_covers_fields(copy: &VaultItem, other: &VaultItem) -> bool {
+    other
+        .field_clocks
+        .values()
+        .all(|version| copy.clock.get(&version.device) >= version.counter)
 }
 
 /// Everything the session knows about one Item identity, by Vault.
@@ -1422,9 +1459,12 @@ enum FollowedMove<'a> {
         clock: &'a VersionVector,
     },
     Deleted,
-    /// The chain left this session, or looped. Nothing may be retired
-    /// against it: another Device could be holding the Item there.
+    /// The chain left this session. Nothing may be retired against it:
+    /// another Device could be holding the Item there.
     Unfollowed(VaultId),
+    /// The chain looped back to a Vault it had already visited. A loop has no
+    /// terminal live copy, so it is not the same as leaving the session.
+    Cycle(VaultId),
 }
 
 impl<'a> Identity<'a> {
@@ -1451,7 +1491,7 @@ impl<'a> Identity<'a> {
                 return FollowedMove::Deleted;
             }
             if !visited.insert(destination) {
-                return FollowedMove::Unfollowed(destination);
+                return FollowedMove::Cycle(destination);
             }
             let Some(next) = self.records.get(&destination) else {
                 return FollowedMove::Unfollowed(destination);
@@ -1994,6 +2034,78 @@ mod tests {
         assert!(
             reconciliation.retirements.is_empty(),
             "a copy the Move Record does not causally cover must be left alone"
+        );
+    }
+
+    #[test]
+    fn test_reconciliation_reports_a_move_record_cycle_separately() {
+        let (base, item_id, owner) = base_fixture();
+        let source = base.id;
+        let destination = Uuid::from_u128(0xB000);
+
+        // Two Move Records that name each other leave the identity nowhere.
+        let mut source_vault = vault_copy(&base, source);
+        source_vault.items = vec![VaultItem::move_record(
+            item_id,
+            source,
+            VersionVector::from_version(owner, 2),
+            destination,
+        )];
+        source_vault.secrets.clear();
+
+        let mut destination_vault = vault_copy(&base, destination);
+        destination_vault.items = vec![VaultItem::move_record(
+            item_id,
+            destination,
+            VersionVector::from_version(owner, 3),
+            source,
+        )];
+        destination_vault.secrets.clear();
+
+        let reconciliation = reconcile_moves([&source_vault, &destination_vault]);
+
+        assert!(reconciliation.retirements.is_empty());
+        assert!(
+            reconciliation.unfollowed.is_empty(),
+            "a loop is not an outside-session destination"
+        );
+        assert_eq!(
+            reconciliation.cycles,
+            vec![(item_id, source), (item_id, destination)],
+            "each Vault in the loop starts a walk that closes inside it"
+        );
+    }
+
+    #[test]
+    fn test_reconciliation_never_retires_against_a_stale_winner_copy() {
+        let (base, item_id, owner) = base_fixture();
+        let source = base.id;
+        let winner = Uuid::from_u128(0xB000);
+        let loser = Uuid::from_u128(0xC000);
+
+        let mut source_vault = vault_copy(&base, source);
+        source_vault.items = vec![VaultItem::move_record(
+            item_id,
+            source,
+            VersionVector::from_version(owner, 5),
+            winner,
+        )];
+        source_vault.secrets.clear();
+
+        // The destination claims to hold the moved Item but its copy predates
+        // the record naming it. Nothing proves it contains the loser's state.
+        let mut winner_vault = vault_copy(&base, winner);
+        winner_vault.items[0].clock = VersionVector::from_version(owner, 2);
+
+        let mut loser_vault = vault_copy(&base, loser);
+        loser_vault.items[0].clock = VersionVector::from_version(owner, 4);
+        loser_vault.items[0].record_field(SECRET_FIELD_PASSWORD, FieldVersion::new(owner, 4));
+
+        let reconciliation = reconcile_moves([&source_vault, &winner_vault, &loser_vault]);
+
+        assert!(
+            reconciliation.retirements.is_empty(),
+            "a winner that predates the naming record cannot justify retirement"
         );
     }
 

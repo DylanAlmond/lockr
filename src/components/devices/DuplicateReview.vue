@@ -190,6 +190,28 @@ function reviewNote(note: DuplicateIdentityNote) {
     selectedVaultId.value = firstVault;
   }
 }
+
+function noteTitle(note: DuplicateIdentityNote): string {
+  switch (note.reason) {
+    case 'cycle':
+      return 'Move history forms a loop';
+    case 'destination_outside_session':
+      return 'Moved to a Vault outside this sync';
+    default:
+      return `Same Item found in ${note.vault_ids.length} Vaults`;
+  }
+}
+
+function noteDetail(note: DuplicateIdentityNote): string {
+  switch (note.reason) {
+    case 'cycle':
+      return `This Item's move records point back to ${note.destinations.map(vaultName).join(' and ')}, so no single copy could be found.`;
+    case 'destination_outside_session':
+      return `A move points at ${note.destinations.map(vaultName).join(' and ')}, which this sync did not include. Sync with a Device that shares that Vault to review the Item.`;
+    default:
+      return `${note.vault_ids.map(vaultName).join(' and ')} hold live copies. Review it as a Duplicate so one identity can be retired.`;
+  }
+}
 </script>
 
 <template>
@@ -215,13 +237,17 @@ function reviewNote(note: DuplicateIdentityNote) {
     <div v-if="notes.length > 0" class="notes">
       <article v-for="note in notes" :key="note.item_id" class="note-card">
         <div>
-          <strong>Same Item found in {{ note.vault_ids.length }} Vaults</strong>
-          <p>
-            {{ note.vault_ids.map(vaultName).join(' and ') }} — review it as a Duplicate so one
-            identity can be retired.
-          </p>
+          <strong>{{ noteTitle(note) }}</strong>
+          <p>{{ noteDetail(note) }}</p>
         </div>
-        <Button variant="outline" size="xs" @click="reviewNote(note)">Review</Button>
+        <Button
+          v-if="note.vault_ids.length > 0"
+          variant="outline"
+          size="xs"
+          @click="reviewNote(note)"
+        >
+          Review
+        </Button>
       </article>
     </div>
 

@@ -446,6 +446,11 @@ pub enum DuplicateNoteReason {
     /// the Item may also live there. This is the case reconciliation cannot
     /// resolve: syncing with a Device whose Sync Set includes that Vault will.
     DestinationOutsideSession,
+
+    /// Following Move Records looped back to a Vault already visited, so no
+    /// terminal live copy exists. This is malformed history rather than a
+    /// Destination the session could reach by widening its Sync Set.
+    Cycle,
 }
 
 /// A same item identity the session could not settle across Vaults.
@@ -455,14 +460,19 @@ pub enum DuplicateNoteReason {
 /// the losing live copy becomes a Move Record naming the winner. This note is
 /// the residue. It says why reconciliation stopped short, and it never
 /// carries Item content or secrets.
+///
+/// It is scoped to the Vaults of the sync session, so both Devices derive the
+/// same note from the same merged state. `vault_ids` lists live copies only
+/// within that session; a copy outside it is named by `destinations` instead.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DuplicateIdentityNote {
     pub item_id: ItemId,
 
-    /// Every Vault still holding a live copy.
+    /// Every Vault of this session still holding a live copy.
     pub vault_ids: Vec<VaultId>,
 
-    /// Destinations named by Move Records that this session could not follow.
+    /// Vaults named by Move Records that this session could not follow: either
+    /// outside the session, or the point where a cycle closed.
     pub destinations: Vec<VaultId>,
 
     pub reason: DuplicateNoteReason,
@@ -1408,8 +1418,9 @@ impl<'a> SyncEngine<'a> {
             })
             .collect();
 
-        let unfollowed = self.reconcile_session_moves(session)?;
-        outcome.report.duplicate_notes = self.duplicate_identity_notes(&unfollowed);
+        let (unfollowed, cycles) = self.reconcile_session_moves(session)?;
+        outcome.report.duplicate_notes =
+            self.duplicate_identity_notes(session, &unfollowed, &cycles);
 
         progress(SyncProgress::Complete {
             vaults: outcome.report.vault_ids.len(),
@@ -1429,12 +1440,12 @@ impl<'a> SyncEngine<'a> {
     ///
     /// Both Devices walk the same session Vaults in the same merged state, so
     /// both retire the same copies. Nothing new is synced and no Vault outside
-    /// the session is touched; a destination the session cannot see is
-    /// returned so the report can say why it was left alone.
+    /// the session is touched; destinations the session cannot follow are
+    /// returned so the report can say why they were left alone.
     fn reconcile_session_moves(
         &mut self,
         session: &BTreeSet<VaultId>,
-    ) -> Result<Vec<(ItemId, VaultId)>, VaultError> {
+    ) -> Result<(Vec<(ItemId, VaultId)>, Vec<(ItemId, VaultId)>), VaultError> {
         let mut vaults: Vec<Vault> = Vec::new();
         for vault_id in session {
             // A Vault the two Sync Sets name but this Device does not hold is
@@ -1476,24 +1487,36 @@ impl<'a> SyncEngine<'a> {
             self.vault_manager.replace_vault(vault)?;
         }
 
-        Ok(reconciliation.unfollowed)
+        Ok((reconciliation.unfollowed, reconciliation.cycles))
     }
 
-    /// Same item identity still live in two local Vaults, or a Move Record
-    /// naming a destination this session could not compare against.
+    /// Same item identity still live in two session Vaults, a Move Record
+    /// naming a destination this session could not compare against, or a loop
+    /// of Move Records.
     ///
     /// Reconciliation removes the ordinary opposite-move case, so this is the
-    /// residue: an identity a Move Record did not settle, or a destination
-    /// outside the session. It never silently discards anything; it names the
-    /// reason so the caller can say why the Two Devices did not fully agree.
+    /// residue: an identity a Move Record did not settle, a destination
+    /// outside the session, or a cycle. It never silently discards anything;
+    /// it names the reason so the caller can say why the Two Devices did not
+    /// fully agree.
+    ///
+    /// Only the session's Vaults are considered. Scanning every unlocked
+    /// Vault made the same sync report different notes on each Device, and
+    /// surfaced local-only Duplicates in Vaults the session never touched.
     fn duplicate_identity_notes(
         &self,
+        session: &BTreeSet<VaultId>,
         unfollowed: &[(ItemId, VaultId)],
+        cycles: &[(ItemId, VaultId)],
     ) -> Vec<DuplicateIdentityNote> {
-        let mut by_item: BTreeMap<ItemId, (Vec<VaultId>, Vec<VaultId>)> = BTreeMap::new();
+        let mut by_item: BTreeMap<ItemId, (Vec<VaultId>, Vec<VaultId>, Vec<VaultId>)> =
+            BTreeMap::new();
 
-        for safe in self.vault_manager.get_unlocked_vaults() {
-            let Ok(vault) = self.vault_manager.get_vault(safe.id) else {
+        for vault_id in session {
+            if !self.vault_manager.has_vault_file(*vault_id) {
+                continue;
+            }
+            let Ok(vault) = self.vault_manager.get_vault(*vault_id) else {
                 continue;
             };
             for item in &vault.items {
@@ -1502,7 +1525,7 @@ impl<'a> SyncEngine<'a> {
                 if item.is_content_free() {
                     continue;
                 }
-                by_item.entry(item.id).or_default().0.push(safe.id);
+                by_item.entry(item.id).or_default().0.push(*vault_id);
             }
         }
 
@@ -1510,21 +1533,29 @@ impl<'a> SyncEngine<'a> {
             by_item.entry(*item_id).or_default().1.push(*destination);
         }
 
+        for (item_id, destination) in cycles {
+            by_item.entry(*item_id).or_default().2.push(*destination);
+        }
+
         by_item
             .into_iter()
-            .filter_map(|(item_id, (mut vault_ids, mut destinations))| {
+            .filter_map(|(item_id, (mut vault_ids, mut destinations, mut cycles))| {
                 vault_ids.sort();
                 vault_ids.dedup();
                 destinations.sort();
                 destinations.dedup();
+                cycles.sort();
+                cycles.dedup();
 
-                let reason = if destinations.is_empty() {
-                    if vault_ids.len() < 2 {
-                        return None;
-                    }
-                    DuplicateNoteReason::LiveInMultipleVaults
-                } else {
+                let reason = if !cycles.is_empty() {
+                    destinations.extend(cycles);
+                    DuplicateNoteReason::Cycle
+                } else if !destinations.is_empty() {
                     DuplicateNoteReason::DestinationOutsideSession
+                } else if vault_ids.len() < 2 {
+                    return None;
+                } else {
+                    DuplicateNoteReason::LiveInMultipleVaults
                 };
 
                 Some(DuplicateIdentityNote {
@@ -5445,7 +5476,13 @@ mod tests {
         assert!(record.is_move_record());
         assert_eq!(record.moved_to, Some(archive.id));
 
-        // Both Devices say why reconciliation stopped short.
+        // Both Devices say why reconciliation stopped short, and they say the
+        // same thing: the note is scoped to the session, not to whichever
+        // Vaults happen to be unlocked on one Device.
+        assert_eq!(
+            a_outcome.report.duplicate_notes, b_outcome.report.duplicate_notes,
+            "the same sync must produce the same notes on both Devices"
+        );
         for outcome in [&a_outcome, &b_outcome] {
             let note = outcome
                 .report
@@ -5456,8 +5493,8 @@ mod tests {
             assert_eq!(note.reason, DuplicateNoteReason::DestinationOutsideSession);
             assert!(note.destinations.contains(&archive.id));
             assert!(
-                !note.vault_ids.contains(&fixture.vault_id),
-                "the source holds a Move Record, not a live copy"
+                note.vault_ids.is_empty(),
+                "the destination is outside the session, so no session Vault holds a live copy"
             );
         }
     }
@@ -5526,6 +5563,172 @@ mod tests {
         fixture.sync();
         for device in [&fixture.a, &fixture.b] {
             assert!(live_vault_ids(device, fixture.item_id).is_empty());
+        }
+    }
+
+    #[test]
+    fn test_a_concurrently_edited_losing_copy_is_not_retired() {
+        let mut fixture = Fixture::new();
+        fixture.sync();
+
+        let archive = fixture
+            .a
+            .vaults
+            .create_vault(
+                "Archive".to_string(),
+                "#111111".to_string(),
+                MASTER_PW,
+                &fixture.a.secret_key,
+            )
+            .unwrap();
+        fixture.a.user.add_vault_to_user(archive.id).unwrap();
+        let holding = fixture
+            .a
+            .vaults
+            .create_vault(
+                "Holding".to_string(),
+                "#222222".to_string(),
+                MASTER_PW,
+                &fixture.a.secret_key,
+            )
+            .unwrap();
+        fixture.a.user.add_vault_to_user(holding.id).unwrap();
+        fixture.sync();
+
+        // A moves to the larger destination, so that copy is the one
+        // reconciliation would retire: the smaller destination wins.
+        let (a_destination, b_destination) = if archive.id < holding.id {
+            (holding.id, archive.id)
+        } else {
+            (archive.id, holding.id)
+        };
+        fixture
+            .a
+            .vaults
+            .move_item(fixture.vault_id, fixture.item_id, a_destination)
+            .unwrap();
+        fixture
+            .b
+            .vaults
+            .move_item(fixture.vault_id, fixture.item_id, b_destination)
+            .unwrap();
+
+        // The User edits the losing copy's password before syncing. Retirement
+        // drops content *and secrets*, so this edit must stop it: the copy is
+        // causally newer than the Move Record that would retire it.
+        fixture
+            .a
+            .vaults
+            .update_item_secret(
+                a_destination,
+                fixture.item_id,
+                "password",
+                Some("edited-after-move".to_string()),
+            )
+            .unwrap();
+
+        let (a_outcome, b_outcome) = fixture.sync();
+
+        assert_eq!(
+            a_outcome.report.duplicate_notes, b_outcome.report.duplicate_notes,
+            "both Devices must report the same residue"
+        );
+        for outcome in [&a_outcome, &b_outcome] {
+            let note = outcome
+                .report
+                .duplicate_notes
+                .iter()
+                .find(|note| note.item_id == fixture.item_id)
+                .expect("the edited loser stays live, so it is a Duplicate");
+            assert_eq!(note.reason, DuplicateNoteReason::LiveInMultipleVaults);
+            let mut expected = vec![a_destination, b_destination];
+            expected.sort();
+            assert_eq!(note.vault_ids, expected);
+        }
+
+        for device in [&fixture.a, &fixture.b] {
+            let mut expected = vec![a_destination, b_destination];
+            expected.sort();
+            assert_eq!(
+                live_vault_ids(device, fixture.item_id),
+                expected,
+                "the concurrently edited copy must survive retirement"
+            );
+            assert!(!item_in(device, a_destination, fixture.item_id).is_move_record());
+            assert_eq!(
+                device
+                    .vaults
+                    .get_item_secret(a_destination, fixture.item_id, "password")
+                    .unwrap()
+                    .as_deref(),
+                Some("edited-after-move"),
+                "the edited secret must not be silently discarded"
+            );
+        }
+    }
+
+    #[test]
+    fn test_a_move_record_cycle_is_reported_as_a_cycle() {
+        let mut fixture = Fixture::new();
+        fixture.sync();
+
+        let archive = fixture
+            .a
+            .vaults
+            .create_vault(
+                "Archive".to_string(),
+                "#111111".to_string(),
+                MASTER_PW,
+                &fixture.a.secret_key,
+            )
+            .unwrap();
+        fixture.a.user.add_vault_to_user(archive.id).unwrap();
+        fixture.sync();
+
+        fixture
+            .a
+            .vaults
+            .move_item(fixture.vault_id, fixture.item_id, archive.id)
+            .unwrap();
+        fixture.sync();
+
+        // Turn A's live destination copy into a Move Record pointing back at
+        // the source. With the source's record still naming the destination,
+        // the history is now a loop with no live copy anywhere. That state is
+        // not produced by ordinary moves, but sync must still describe it
+        // accurately rather than blame a Vault outside the session.
+        let mut vault = fixture.a.vaults.get_vault(archive.id).unwrap().clone();
+        let live = vault
+            .items
+            .iter()
+            .find(|item| item.id == fixture.item_id)
+            .expect("the moved copy is live")
+            .clone();
+        vault.items = vec![crate::VaultItem::move_record(
+            live.id,
+            archive.id,
+            live.clock,
+            fixture.vault_id,
+        )];
+        vault.secrets.clear();
+        fixture.a.vaults.replace_vault(vault).unwrap();
+
+        let (a_outcome, b_outcome) = fixture.sync();
+
+        assert_eq!(
+            a_outcome.report.duplicate_notes, b_outcome.report.duplicate_notes,
+            "both Devices must report the cycle identically"
+        );
+        for outcome in [&a_outcome, &b_outcome] {
+            let note = outcome
+                .report
+                .duplicate_notes
+                .iter()
+                .find(|note| note.item_id == fixture.item_id)
+                .expect("a cycle must be reported");
+            assert_eq!(note.reason, DuplicateNoteReason::Cycle);
+            assert!(note.vault_ids.is_empty(), "a loop ends at no live copy");
+            assert!(note.destinations.contains(&fixture.vault_id));
         }
     }
 
