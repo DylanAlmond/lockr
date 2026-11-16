@@ -23,9 +23,8 @@ export function useDeviceAdmin(options: DeviceAdminOptions) {
 
   const actionError = ref<string | null>(null);
 
-  function openPairing(initialMode: 'source' | 'join') {
+  function openPairing() {
     openModal(markRaw(PairingModal), {
-      initialMode,
       onClose: () => {
         void options.onChanged();
       }

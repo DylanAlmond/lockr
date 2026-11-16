@@ -12,7 +12,6 @@ defineProps<{
 
 const emit = defineEmits<{
   (e: 'pair'): void;
-  (e: 'join'): void;
   (e: 'sync', device: PairedDevice): void;
   (e: 'revoke', device: PairedDevice): void;
 }>();
@@ -28,7 +27,6 @@ const emit = defineEmits<{
     </div>
     <div class="pairing-actions">
       <Button variant="accent" size="small" @click="emit('pair')">Pair a new Device</Button>
-      <Button variant="outline" size="small" @click="emit('join')">Join a Device</Button>
     </div>
   </div>
 

@@ -295,6 +295,10 @@ pub(crate) fn kind_fields(kind: &ItemKind) -> &'static [ItemFieldSpec] {
 }
 
 /// The kind-specific field names as they appear on the wire.
+///
+/// Only the round-trip test consumes this list directly; production code goes
+/// through [`kind_fields`] / [`item_field_keys`].
+#[cfg(test)]
 pub fn kind_field_keys(kind: &ItemKind) -> Vec<&'static str> {
     kind_fields(kind).iter().map(|field| field.key).collect()
 }

@@ -18,11 +18,13 @@ const {
   approval,
   outcome,
   copied,
+  handoffCopied,
   secondsLeft,
   offerExpired,
   toggleVault,
   beginOffer,
   copyPayload,
+  copyHandoff,
   approve,
   reset
 } = usePairingOffer();
@@ -34,8 +36,8 @@ const {
 
     <template v-if="!offer && !outcome">
       <p class="panel-copy">
-        Start a single-use offer here, then read or scan it on the new Device. The code expires
-        after about a minute and can be used once.
+        Start a single-use offer here, then read or scan it on the new Device. The new Device
+        must have no User yet. The code expires after about a minute and can be used once.
       </p>
       <Button variant="accent" :disabled="busy" @click="beginOffer">
         <LoaderCircle v-if="busy" :size="16" class="spin" aria-hidden="true" />
@@ -52,9 +54,30 @@ const {
           </span>
         </div>
 
-        <p class="typed-code">{{ offer.typed_code }}</p>
+        <div class="handoff">
+          <div class="handoff-field">
+            <span class="offer-label">Pairing code</span>
+            <p class="typed-code">{{ offer.typed_code }}</p>
+          </div>
+
+          <div class="handoff-field">
+            <span class="offer-label">This Device id</span>
+            <code class="device-id">{{ offer.source_device_id }}</code>
+          </div>
+
+          <Button
+            variant="outline"
+            size="xs"
+            :icon-component="handoffCopied ? Check : Copy"
+            @click="copyHandoff"
+          >
+            {{ handoffCopied ? 'Copied code and Device id' : 'Copy code and Device id' }}
+          </Button>
+        </div>
+
         <p class="panel-copy">
-          Type this code on the new Device, or hand it the full payload below.
+          On the new Device, choose <strong>Join a Device</strong> and type both values. No
+          camera is needed; the QR payload below is only a shortcut.
         </p>
 
         <details class="payload-details">

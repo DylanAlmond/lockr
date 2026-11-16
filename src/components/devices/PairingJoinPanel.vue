@@ -1,11 +1,14 @@
 <script setup lang="ts">
+import { computed, watch } from 'vue';
 import { LoaderCircle, ShieldCheck } from '@lucide/vue';
 import Button from '../ui/Button.vue';
 import Input from '../ui/Input.vue';
 import { usePairingJoin } from '../../composables/usePairingJoin';
+import { typedJoinComplete } from '../../util/pairing';
 
 const emit = defineEmits<{
-  (e: 'close'): void;
+  (e: 'close', result?: { paired?: boolean }): void;
+  (e: 'paired'): void;
 }>();
 
 const {
@@ -22,9 +25,21 @@ const {
   joinSyncMessage,
   beginJoin,
   finishJoin,
-  runInitialSync,
-  reset
+  runInitialSync
 } = usePairingJoin();
+
+const canContinue = computed(
+  () => codeMode.value === 'qr' || typedJoinComplete(sourceDeviceId.value, typedCode.value)
+);
+
+/**
+ * The pair is written before the first Vault sync finishes, so the host
+ * surface can start treating this Device as signed in while the panel keeps
+ * showing transfer progress.
+ */
+watch(joinStage, (stage) => {
+  if (stage === 'done') emit('paired');
+});
 </script>
 
 <template>
@@ -50,7 +65,7 @@ const {
           v-model="sourceDeviceId"
           type="text"
           autocomplete="off"
-          placeholder="Shown on the other Device"
+          placeholder="Shown under the code on the other Device"
         />
 
         <label class="field-label" for="pairing-code">Pairing code</label>
@@ -76,11 +91,15 @@ const {
       </template>
 
       <p class="panel-copy">
-        The master password is typed on this Device only. It never crosses the network.
+        Asking the source Device for its <strong>Device id</strong> and <strong>code</strong> is
+        enough; it shows both together. The master password is typed on this Device only and
+        never crosses the network.
       </p>
 
       <div class="panel-actions">
-        <Button variant="accent" :disabled="busy" @click="beginJoin">Continue</Button>
+        <Button variant="accent" :disabled="busy || !canContinue" @click="beginJoin">
+          Continue
+        </Button>
       </div>
     </template>
 
@@ -97,7 +116,7 @@ const {
         </p>
 
         <div class="panel-actions">
-          <Button variant="label" @click="reset">Cancel</Button>
+          <Button variant="label" @click="emit('close', { paired: false })">Cancel</Button>
         </div>
       </div>
     </template>
@@ -124,7 +143,9 @@ const {
         />
 
         <div class="panel-actions">
-          <Button variant="label" :disabled="busy" @click="reset">Cancel</Button>
+          <Button variant="label" :disabled="busy" @click="emit('close', { paired: false })">
+            Cancel
+          </Button>
           <Button variant="accent" :disabled="busy || !joinPassword" @click="finishJoin">
             Finish pairing
           </Button>
@@ -173,7 +194,7 @@ const {
         <Button
           variant="label"
           :disabled="busy || joinSyncState === 'syncing'"
-          @click="emit('close')"
+          @click="emit('close', { paired: true })"
         >
           Close
         </Button>
