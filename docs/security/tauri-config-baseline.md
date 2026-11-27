@@ -1,8 +1,11 @@
 # Tauri security configuration baseline
 
 Recommendation for [#70](https://github.com/DylanAlmond/lockr/issues/70) (parent [#63](https://github.com/DylanAlmond/lockr/issues/63)).
-This is the diff-ready configuration and the reasoning for every non-default line. **Nothing here is
-applied**; fixes are out of scope for the audit map, and each line below becomes a fix ticket.
+This is the diff-ready configuration and the reasoning for every non-default line.
+
+**Partially applied:** the `csp` and `devCsp` objects in §1 were applied in `1b0b571` (F-01, F-09).
+`freezePrototype` (F-03), `headers` (F-06) and the remaining sections below are still recommendations;
+each is a fix ticket.
 
 Sources: Tauri 2 CSP docs (<https://v2.tauri.app/security/csp/>), the installed config schema
 (`node_modules/@tauri-apps/cli/config.schema.json`, Tauri CLI for `tauri` 2.11.4), and the
@@ -32,7 +35,7 @@ Replace the whole `app.security` object with:
     "style-src": "'self' 'unsafe-inline'",
     "img-src": "'self' data:",
     "font-src": "'self'",
-    "connect-src": "ipc: http://ipc.localhost ws://localhost:1421 ws://127.0.0.1:1421",
+    "connect-src": "ipc: http://ipc.localhost ws://localhost:1420 ws://127.0.0.1:1420 ws://localhost:1421 ws://127.0.0.1:1421",
     "object-src": "'none'",
     "base-uri": "'none'",
     "frame-ancestors": "'none'",
@@ -52,6 +55,9 @@ Replace the whole `app.security` object with:
 `dangerousDisableAssetCspModification` is **omitted on purpose**: its default `false` lets Tauri
 inject the nonces and hashes for bundled scripts and styles, which is what makes `script-src 'self'`
 sufficient.
+
+`devCsp` allows HMR on the Vite dev-server port (`1420`) and on Tauri's host-override port (`1421`);
+production's `connect-src` allows nothing but IPC.
 
 ## 2. Why each line
 

@@ -35,7 +35,9 @@ property is absent, not merely untested.
 
 **Evidence:** `src-tauri/tauri.conf.json` (`"csp": null`); config schema defaults `devCsp` to the
 production value, so dev mode is equally unprotected.
-**Fix:** `tauri-config-baseline.md` §1. **Status:** fix-specified.
+**Fix:** applied in `1b0b571`. `csp` and `devCsp` now carry the config-baseline policy, including
+`img-src 'self' data:`, `object-src 'none'` and an IPC-only `connect-src`.
+**Status:** fixed.
 
 ### F-02 — Dormant `opener` capability grants an unscoped filesystem surface · P2
 
@@ -173,8 +175,10 @@ script execution. It is egress.
 `IdentityDetails.vue:167`, `NoteDetails.vue:168`, `Sidebar.vue:131`, `LoginView.vue:91,131`,
 `IconUpload.vue:58`; `vault_manager.rs:16-19,459-463` (only empty-string normalisation);
 `csp: null` (F-01).
-**Fix:** `img-src 'self' data:` (config baseline §2) plus backend scheme validation.
-**Status:** fix-specified.
+**Fix:** applied in `1b0b571`. The CSP's `img-src 'self' data:` blocks a remote icon fetch, and
+`icons::is_allowed_icon` / `validate_icon` / `safe_icon` reject or withhold anything that is not a
+raster `data:` image or a relative name, on both the write and the read path.
+**Status:** fixed.
 
 ### F-10 — Revealed secrets never expire · P2
 
