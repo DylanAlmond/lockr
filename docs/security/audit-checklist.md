@@ -32,12 +32,12 @@ The rule: every row has one, and `manual:` states why automation is not possible
 
 | Field | Value |
 |---|---|
-| Commit | |
-| Date | |
-| Runner | |
-| Toolchain | Node · Rust · Tauri |
-| Automated checks | pass / fail / not run |
-| Rows: met / partial / deviated / n/a | |
+| Commit | `f3d5c82` (group 1 run) |
+| Date | 2026-11-27 |
+| Runner | OpenCode session |
+| Toolchain | Node 24.19 · Rust stable · Tauri 2.11.4 |
+| Automated checks | not run — harness pending [#74](https://github.com/DylanAlmond/lockr/issues/74) |
+| Rows: met / partial / deviated / n/a | group 1: 5 / 7 / 7 / 3 (1 unchecked) |
 
 ---
 
@@ -45,29 +45,29 @@ The rule: every row has one, and `manual:` states why automation is not possible
 
 | ID | Requirement | Verification | Status | Notes |
 |---|---|---|---|---|
-| T-01 | `app.security.csp` is set; no `unsafe-eval`/`unsafe-inline` for scripts | `static:csp` | unchecked | known open: `csp: null` |
-| T-02 | `devCsp` set separately; dev relaxations never ship | `static:csp-dev` | unchecked | |
-| T-03 | `dangerousDisableAssetCspModification` absent/false, so Tauri injects nonces | `static:csp-injection` | unchecked | |
-| T-04 | Capabilities are least privilege; no cross-window merge | `static:capabilities` | unchecked | |
-| T-05 | Commands are scoped per window/capability, not all-to-all | `static:command-scope` | unchecked | known open: no command scoping |
-| T-06 | IPC args deserialise into concrete types and are validated | `rust:command-validation` | unchecked | |
-| T-07 | Isolation pattern used, or its absence recorded as a decision | `manual:declined in tauri-config-baseline.md §6` | unchecked | |
-| T-08 | `freezePrototype` is `true` | `static:freeze-prototype` | unchecked | |
-| T-09 | Devtools unavailable in release builds | `manual:launch release build, attempt inspector` | unchecked | |
-| T-10 | No source maps in the release bundle | `static:bundle-sourcemaps` | unchecked | |
-| T-11 | `withGlobalTauri` is `false` | `static:config-global-tauri` | unchecked | |
-| T-12 | Single-instance plugin first, `argv`/`cwd` treated as untrusted | `manual:not present in 1.2.0` | unchecked | n/a if still absent |
-| T-13 | Deep links statically configured; URL shape validated | `manual:not present in 1.2.0` | unchecked | n/a if still absent |
-| T-14 | Updater artifacts signed, key pinned, HTTPS endpoints | `manual:not present in 1.2.0` | unchecked | n/a if still absent |
-| T-15 | Installers code-signed per platform | `manual:signtool/codesign on release artifact` | unchecked | |
-| T-16 | Headers supply nosniff and the supported security set | `static:headers` | unchecked | |
-| T-17 | Opener scope narrower than `opener:default` | `static:capabilities-opener` | unchecked | known open: `opener:default` granted |
-| 8.2.1 | Function-level access restricted to explicit permission | `static:capabilities` | unchecked | |
-| 13.1.1 | All communication needs documented, including destinations | `manual:document review (docs + bundle host list)` | unchecked | |
-| 13.2.2 | Local interfaces reachable only with least privilege | `static:capabilities` | unchecked | |
-| 13.2.4 | Allowlist defines external resources the app may contact | `static:csp` + `static:bundle-external-hosts` | unchecked | |
-| 13.3.1 | Secrets are not in source or build artifacts | `static:bundle-secrets` | unchecked | |
-| 13.3.2 | Access to secret assets follows least privilege | `static:bundle-secrets` | unchecked | |
+| T-01 | `app.security.csp` is set; no `unsafe-eval`/`unsafe-inline` for scripts | `static:csp` | deviated | F-01 — `csp: null` |
+| T-02 | `devCsp` set separately; dev relaxations never ship | `static:csp-dev` | deviated | F-01 — unset, so dev inherits the (absent) production policy |
+| T-03 | `dangerousDisableAssetCspModification` absent/false, so Tauri injects nonces | `static:csp-injection` | met | unset → default `false` |
+| T-04 | Capabilities are least privilege; no cross-window merge | `static:capabilities` | partial | F-04 — `core:default` + `core:window:default` over-grant |
+| T-05 | Commands are scoped per window/capability, not all-to-all | `static:command-scope` | deviated | F-05 — plain `tauri_build::build()` |
+| T-06 | IPC args deserialise into concrete types and are validated | `rust:command-validation` | partial | Typed via serde; bounds not enforced (F-01 group 3 will confirm authorisation) |
+| T-07 | Isolation pattern used, or its absence recorded as a decision | `manual:declined in tauri-config-baseline.md §6` | met | Declined, recorded |
+| T-08 | `freezePrototype` is `true` | `static:freeze-prototype` | deviated | F-03 — unset → default `false` |
+| T-09 | Devtools unavailable in release builds | `manual:launch release build, attempt inspector` | partial | No `devtools` Cargo feature; release artefact not inspected |
+| T-10 | No source maps in the release bundle | `static:bundle-sourcemaps` | partial | F-07 — absent by Vite default, not asserted |
+| T-11 | `withGlobalTauri` is `false` | `static:config-global-tauri` | met | unset → default `false` |
+| T-12 | Single-instance plugin first, `argv`/`cwd` treated as untrusted | `manual:not present in 1.2.0` | n/a | No single-instance plugin; row stays for a future addition |
+| T-13 | Deep links statically configured; URL shape validated | `manual:not present in 1.2.0` | n/a | No deep-link plugin |
+| T-14 | Updater artifacts signed, key pinned, HTTPS endpoints | `manual:not present in 1.2.0` | n/a | No updater |
+| T-15 | Installers code-signed per platform | `manual:signtool/codesign on release artifact` | unchecked | No release artefact available in this run |
+| T-16 | Headers supply nosniff and the supported security set | `static:headers` | deviated | F-06 — `headers` unset |
+| T-17 | Opener scope narrower than `opener:default` | `static:capabilities-opener` | deviated | F-02 — `opener:default` granted, unused |
+| 8.2.1 | Function-level access restricted to explicit permission | `static:capabilities` | partial | F-04 |
+| 13.1.1 | All communication needs documented, including destinations | `manual:document review (docs + bundle host list)` | partial | F-08 — no written inventory; bundle hosts are `w3.org` and `vuejs.org` |
+| 13.2.2 | Local interfaces reachable only with least privilege | `static:capabilities` | partial | F-04 |
+| 13.2.4 | Allowlist defines external resources the app may contact | `static:csp` + `static:bundle-external-hosts` | deviated | F-01 — no CSP source list; no egress allowlist |
+| 13.3.1 | Secrets are not in source or build artifacts | `static:bundle-secrets` | met | Token and logo.dev absent from `dist/` |
+| 13.3.2 | Access to secret assets follows least privilege | `static:bundle-secrets` | met | `.env` untracked; token not inlined |
 
 ---
 
