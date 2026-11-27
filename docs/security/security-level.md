@@ -29,12 +29,14 @@ split into a target and a status.
 **Target:** ASVS 5.0 Level 2, client tier, plus the Tauri supplement recorded in
 `docs/security/research/audit-baseline.md`.
 
-**Status:** *in assessment.* No ASVS level is claimed at the time of writing.
+**Status:** *assessed against L2.* The conformance sweep is complete against `f3d5c82` on 2026-11-27.
+**No ASVS level is claimed** — a compliance claim needs zero open deviations, and the sweep found one
+P0, two P1 and a long P2/P3 tail.
 
 | Rung | Meaning |
 |---|---|
-| **In assessment** | The sweep is not complete. No level is claimed. **← Lockr is here** |
-| **Assessed against L2** | The sweep is complete against a pinned commit; every deviation is enumerated below. Still not a compliance claim. |
+| **In assessment** | The sweep is not complete. No level is claimed. |
+| **Assessed against L2** | The sweep is complete against a pinned commit; every deviation is enumerated in `findings.md`. Still not a compliance claim. **← Lockr is here** |
 | **Compliant within a named profile** | Zero open deviations. Self-assessed. |
 | **Independently certified** | A third party has assessed it. Not claimed, not planned. |
 
@@ -52,25 +54,34 @@ re-pinned on every release.
 4. **Evidence** — governed by `evidence-standard.md`; automated tests are preferred wherever a
    control can be asserted mechanically.
 
-## 4. Known deviations at the time of writing
+## 4. Findings
 
-These are already established by the research and threat model. The completed sweep will replace
-this list with the full set, including anything new it finds.
+Across **105 checklist rows**: 40 met, 17 partial, 41 deviated, 6 not applicable, 1 unobservable
+(installer signing, which needs a signed release artefact).
 
-| ASVS | Requirement | State | Why |
-|---|---|---|---|
-| **3.4.3** | CSP with `object-src`/`base-uri` and an allowlist | **Deviated** — `csp: null` | Fix specified in `tauri-config-baseline.md` |
-| **8.2.2 / 8.3.1** | Data-specific and layer-enforced authorisation | **Deviated** — no command checks `vault_id ∈ active_user.vault_ids` | The core gates on "vault unlocked", not "vault owned"; `vault_ids` is never consulted outside login |
-| **7.3.1** | Inactivity timeout forces re-authentication | **Deviated** — no idle lock | A session lasts until logout or exit |
-| **7.4.2** | Terminating an account terminates its sessions | **Deviated** — `login_user` and `delete_user` do not end prior sessions | Prior vaults stay readable in RAM |
-| **14.3.1** | Authenticated data cleared when the session ends | **Deviated** — renderer caches secrets with no expiry | Policy specified in `secret-lifetime.md` |
-| **16.3.1 / 16.3.2** | Authentication and authorisation events are logged | **Deviated** — no log sink | Neither success nor failure is recorded |
-| **6.2.1** | Minimum password length | **Deviated** — registration accepts any password | The strength meter exists but registration never calls it |
-| **6.2.4** | Common-password check | **Deviated** — zxcvbn is advisory only | Not enforced as a gate |
-| **6.2.12** | Breached-password check | **Standing deviation** | A breach lookup needs a network call, contradicting the local-first premise |
-| **6.3.3** | MFA, or a combination of single factors | **Standing deviation** — single factor | The secret key is encrypted under the master password, so it is not independent; OS session authentication does not gate vault access |
-| **2.4.1 / 6.3.1** | Anti-automation and lockout | **Deviated** — no attempt limiting | Repeated `login_user` calls are unbounded |
-| **13.2.4** | Allowlist of external resources | **Deviated** — vault-controlled icon URLs can fetch | Closed by the `img-src 'self' data:` directive in the config baseline |
+The 41 deviated rows resolve into **29 findings**, in the project's severity scheme, not CVSS:
+
+| Severity | Count | Findings |
+|---|---|---|
+| **P0** — renderer compromise → vault read/write/exfiltration | 1 | F-14 |
+| **P1** — secret exposure to a local observer, or vault-derived data leaving the machine | 2 | F-09, F-12 |
+| **P2** — hardening gap that raises the likelihood of P0/P1 | 11 | F-01–F-04, F-10, F-11, F-13, F-15, F-18, F-19, F-28 |
+| **P3** — hygiene | 15 | F-05–F-08, F-16, F-17, F-20–F-27, F-29 |
+
+The three that matter most:
+
+- **F-14 (P0) — any vault file can be deleted by id.** No ownership check, no unlock requirement, no
+  re-authentication; `list_vault_ids` enumerates every vault file on disk. A compromised renderer can
+  destroy every User's vault on the machine.
+- **F-09 (P1) — vault-controlled icon URLs are fetched with no scheme allowlist.** Merely listing an
+  item can send a request to an attacker-chosen host, leaking IP and user agent.
+- **F-12 (P1) — no command checks `vault_id ∈ active_user.vault_ids`.** Latent while only one User's
+  vaults are unlocked, and a cross-User read path in combination with F-13.
+
+**Notable absence:** there is no HTML, script, navigation or `postMessage` sink in the renderer. The
+audit found no live cross-site-scripting path, which is why the missing CSP is P2 rather than P0.
+
+Full detail, evidence and status per finding: `findings.md`. Per-row status: `audit-checklist.md`.
 
 ### 6.3.3 in plain words
 
@@ -104,4 +115,5 @@ does not lead to a row, the claim is wrong and should be removed.
 
 | Date | Commit | Change |
 |---|---|---|
-| 2026-11-27 | `<sha>` | Document created; target set; status = in assessment |
+| 2026-11-27 | `f3d5c82` | Document created; target set |
+| 2026-11-27 | `f3d5c82` | Conformance sweep complete; status = assessed against L2; 29 findings recorded |

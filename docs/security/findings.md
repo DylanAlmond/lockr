@@ -555,6 +555,75 @@ back in the bundle.
 
 ---
 
-## Pending
+## Group 7 — Logging and error handling
 
-Group 7: logging and error handling.
+### F-28 — Vault writes are not atomic · P2
+
+```
+A1–A5  ← E2  ADV3 (crash/loss, not attacker)
+Rule broken: 16.5.3
+```
+
+`save_vault` encrypts in memory and then calls `std::fs::write(path, encrypted)`, which truncates the
+existing file before writing the new bytes. A crash, power loss or full disk during that window
+leaves a truncated or empty vault. The `.OLD` backup is written only during a schema migration
+(`vault_manager.rs:248`), not on ordinary saves, so it is not a recovery path for this.
+
+The fix is the standard one: write to a sibling temp file, fsync, then rename over the target.
+
+**Evidence:** `vault_manager.rs:292`; the only `fs::copy` is `backup_vault_file`, called from the
+migration path at `:248`.
+**Fix:** atomic replace (temp + rename). **Status:** open.
+
+### F-27 — No logging of authentication, authorisation or errors · P3
+
+```
+A1–A5  ← E1  ADV1
+Rule broken: 16.1.1, 16.3.1, 16.3.2, 16.3.4
+```
+
+There is no log sink. Successful and failed logins, authorisation denials (there is no authorisation
+check to deny, F-12) and unexpected errors are all unrecorded. For a local-first app this is a
+defensible choice, but it is currently an omission rather than a decision — there is no logging
+policy saying so, and no way for a User to see that someone tried their master password.
+
+**Evidence:** no `log`/`tracing` dependency; only two ad-hoc prints (`commands.rs:84`,
+`user_manager.rs:59`).
+**Fix:** a minimal local audit log, or a written decision that logging is deliberately absent plus
+the consequence. **Status:** open.
+
+### F-29 — Error strings and debug prints leak paths and identifiers · P3
+
+```
+A5  ← E1  ADV1
+Rule broken: 16.5.1
+```
+
+`VaultError` derives `Display` from the underlying error. `Io(#[from] std::io::Error)` serialises as
+`"IO error: <os message>"`, which includes the filesystem path, and serde errors likewise reach the
+UI verbatim. Separately, `println!("id: {}", user_id)` prints a user identifier on every
+`get_user` call, and `eprintln!` prints a profile path when a profile fails to parse.
+
+None of these is a secret, but together they hand a renderer (or anyone reading a terminal) the app
+data path and profile ids — useful reconnaissance for the filesystem-facing findings above.
+
+**Evidence:** `error.rs:19-23`; `commands.rs:84`; `user_manager.rs:59`.
+**Fix:** a UI-facing error type that carries a code and a generic message; delete the ad-hoc prints.
+**Status:** open.
+
+### Controls that held
+
+- No secret is logged: there is no log sink, and the two prints carry an id and a path, not a value.
+- `logout` zeroizes the cached password and key, and `delete_user` does the same before removing the
+  profile.
+- The migration path does take a backup before rewriting (`vault_manager.rs:248`).
+
+---
+
+## Complete
+
+All seven sweep groups are recorded. Totals across 105 rows: **40 met, 17 partial, 41 deviated,
+6 n/a, 1 unchecked**. The full set is 29 findings: one P0 (F-14), two P1 (F-09, F-12), and the rest
+P2/P3.
+
+The remaining unchecked row is T-15 (installer code signing), which needs a signed release artefact.

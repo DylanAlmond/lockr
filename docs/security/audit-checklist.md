@@ -37,7 +37,7 @@ The rule: every row has one, and `manual:` states why automation is not possible
 | Runner | OpenCode session |
 | Toolchain | Node 24.19 · Rust stable · Tauri 2.11.4 |
 | Automated checks | not run — harness pending [#74](https://github.com/DylanAlmond/lockr/issues/74) |
-| Rows: met / partial / deviated / n/a | group 1: 5 / 7 / 7 / 3 · group 2: 14 / 3 / 6 / 1 · group 3: 4 / 1 / 8 / 0 · group 4: 5 / 0 / 10 / 0 · group 5: 9 / 3 / 1 / 2 · group 6: 2 / 2 / 4 / 0 |
+| Rows: met / partial / deviated / n/a | g1 5/7/7/3 · g2 14/3/6/1 · g3 4/1/8/0 · g4 5/0/10/0 · g5 9/3/1/2 · g6 2/2/4/0 · g7 1/1/5/0 — **total 40 met · 17 partial · 41 deviated · 6 n/a · 1 unchecked** |
 
 ---
 
@@ -189,13 +189,13 @@ AS6).
 
 | ID | Requirement | Verification | Status | Notes |
 |---|---|---|---|---|
-| 16.1.1 | A log inventory covers events, format, storage, access, retention | `manual:document review (logging policy)` | unchecked | |
-| 16.2.5 | Logging of sensitive data follows its protection level | `static:source-logs` | unchecked | |
-| 16.3.1 | Authentication success and failure are logged | `rust:auth-logging` | unchecked | known open: no log sink |
-| 16.3.2 | Failed authorisation attempts are logged | `rust:auth-logging` | unchecked | known open |
-| 16.3.4 | Unexpected errors and control failures are logged | `rust:auth-logging` | unchecked | |
-| 16.5.1 | Generic error messages, no stack traces or secrets | `rust:error-messages` | unchecked | |
-| 16.5.3 | Application fails closed on exceptions | `rust:atomic-write` + `manual:failure injection` | unchecked | |
+| 16.1.1 | A log inventory covers events, format, storage, access, retention | `manual:document review (logging policy)` | deviated | F-27 — there is no log sink and no policy |
+| 16.2.5 | Logging of sensitive data follows its protection level | `static:source-logs` | met | Vacuously: no log sink, and no secret is written to stdout, stderr or the console (F-29 covers the identifier/path leaks that do occur) |
+| 16.3.1 | Authentication success and failure are logged | `rust:auth-logging` | deviated | F-27 — neither is recorded |
+| 16.3.2 | Failed authorisation attempts are logged | `rust:auth-logging` | deviated | F-27 — there is no authorisation check to fail |
+| 16.3.4 | Unexpected errors and control failures are logged | `rust:auth-logging` | deviated | F-27 |
+| 16.5.1 | Generic error messages, no stack traces or secrets | `rust:error-messages` | partial | F-29 — raw `io::Error`/serde strings reach the UI and include filesystem paths |
+| 16.5.3 | Application fails closed on exceptions | `rust:atomic-write` + `manual:failure injection` | deviated | F-28 — `std::fs::write` truncates in place; an interrupted save corrupts the vault |
 
 ---
 
