@@ -129,21 +129,11 @@ impl UserManager {
         Ok(decrypted_key)
     }
 
-    // Logout the active user
-    pub fn logout(&mut self) -> Result<(), VaultError> {
-        let user_id = self
-            .active_user_id
-            .as_ref()
-            .ok_or_else(|| VaultError::UserNotFound("No user is active".into()))?;
-
-        if !self.is_user_registered(user_id) {
-            return Err(VaultError::UserNotFound("User not registered".into()));
-        }
-
+    /// Forget the active user. Session teardown is the caller's job; this only
+    /// clears which profile is current, even if its file has since vanished.
+    pub fn clear_active_user(&mut self) {
         self.active_user_id = None;
         self.active_path = None;
-
-        Ok(())
     }
 
     /// The profile of the user that is currently logged in.

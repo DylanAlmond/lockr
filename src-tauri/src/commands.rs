@@ -26,6 +26,10 @@ pub struct ManagerState {
 
 type AppState<'a> = State<'a, Mutex<ManagerState>>;
 
+/// Defaults for the vault created with a new profile.
+const DEFAULT_VAULT_NAME: &str = "Personal";
+const DEFAULT_VAULT_COLOUR: &str = "#6240BF";
+
 impl ManagerState {
     /// Delete a vault the active user owns, after re-checking the master
     /// password.
@@ -51,6 +55,84 @@ impl ManagerState {
         }
 
         Ok(())
+    }
+
+    /// End the current session: persist unsaved changes, drop every unlocked
+    /// vault, zeroize the cached credentials and forget the active user.
+    fn end_session(&mut self) -> Result<(), VaultError> {
+        // Persist every unlocked vault, not only the active user's: the
+        // session is ending and all RAM state must reach disk before it is
+        // dropped.
+        self.vault_manager.flush_all()?;
+        self.vault_manager.lock_vault(None);
+        self.clear_credentials();
+        self.user_manager.clear_active_user();
+        Ok(())
+    }
+
+    fn clear_credentials(&mut self) {
+        if let Some(mut master_password) = self.master_password.take() {
+            master_password.zeroize();
+        }
+        if let Some(mut secret_key) = self.secret_key.take() {
+            secret_key.zeroize();
+        }
+    }
+
+    /// Register a user and start their session. Any previous session ends
+    /// first, so another user's unlocked vaults cannot outlive the switch.
+    pub fn register_user(
+        &mut self,
+        name: String,
+        master_password: String,
+    ) -> Result<Vec<SafeVault>, VaultError> {
+        self.end_session()?;
+
+        let user = self.user_manager.register(name, &master_password)?;
+
+        // `register` encrypts a fresh secret key; `login` decrypts it so the
+        // session holds the plaintext key. Two Argon2 passes, unavoidable.
+        let secret_key = self.user_manager.login(&user.id, &master_password)?;
+
+        let new_vault = self.vault_manager.create_vault(
+            DEFAULT_VAULT_NAME.to_string(),
+            DEFAULT_VAULT_COLOUR.to_string(),
+            &master_password,
+            &secret_key,
+        )?;
+
+        self.master_password = Some(master_password);
+        self.secret_key = Some(secret_key);
+        self.user_manager.add_vault_to_user(new_vault.id)?;
+
+        Ok(vec![new_vault.into_safe()])
+    }
+
+    /// Log in as a user and unlock their vaults. Any previous session ends
+    /// first, so another user's unlocked vaults cannot outlive the switch.
+    pub fn login_user(
+        &mut self,
+        user_id: UserId,
+        master_password: String,
+    ) -> Result<Vec<SafeVault>, VaultError> {
+        self.end_session()?;
+
+        let secret_key = self.user_manager.login(&user_id, &master_password)?;
+        let user = self.user_manager.get_user(&user_id)?;
+
+        // Each vault derives its master key once (Argon2id); further
+        // operations use the cached keys. A vault that fails to unlock stays
+        // locked and the session continues with the rest.
+        for vault_id in &user.vault_ids {
+            let _ = self
+                .vault_manager
+                .unlock_vault(*vault_id, &master_password, &secret_key);
+        }
+
+        self.master_password = Some(master_password);
+        self.secret_key = Some(secret_key);
+
+        self.get_unlocked_vaults()
     }
 
     /// The vault ids the active user owns, from the profile's `vault_ids`.
@@ -129,40 +211,9 @@ pub fn register_user(
 ) -> Result<Vec<SafeVault>, String> {
     let mut state = state.lock().map_err(|e| e.to_string())?;
 
-    let ManagerState {
-        vault_manager,
-        user_manager,
-        master_password: mp_state,
-        secret_key: sk_state,
-    } = &mut *state;
-
-    let user = user_manager
-        .register(name, &master_password)
-        .map_err(|e| e.to_string())?;
-
-    let sk = user_manager
-        .login(&user.id, &master_password)
-        .map_err(|e| e.to_string())?;
-
-    *mp_state = Some(master_password);
-    *sk_state = Some(sk);
-
-    let mp = mp_state.as_ref().ok_or("Not logged in")?;
-    let sk = sk_state.as_ref().ok_or("Not logged in")?;
-
-    // Create default vault
-    let new_vault = vault_manager
-        .create_vault("Personal".to_string(), "#6240BF".to_string(), mp, sk)
-        .map_err(|e| e.to_string())?;
-
-    user_manager
-        .add_vault_to_user(new_vault.id)
-        .map_err(|e| e.to_string())?;
-
-    // Return only the vault this registration created: an earlier session's
-    // vaults may still be unlocked in RAM until profile switching ends
-    // sessions (F-13).
-    Ok(vec![new_vault.into_safe()])
+    state
+        .register_user(name, master_password)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -220,72 +271,28 @@ pub fn login_user(
     master_password: String,
 ) -> Result<Vec<SafeVault>, String> {
     let mut state = state.lock().map_err(|e| e.to_string())?;
-
-    let ManagerState {
-        vault_manager,
-        user_manager,
-        master_password: mp_state,
-        secret_key: sk_state,
-    } = &mut *state;
-
     let user_id: UserId = Uuid::parse_str(&id).map_err(|e| e.to_string())?;
 
-    let sk = user_manager
-        .login(&user_id, &master_password)
-        .map_err(|e| e.to_string())?;
-
-    *mp_state = Some(master_password);
-    *sk_state = Some(sk);
-
-    let mp = mp_state.as_ref().ok_or("Not logged in")?;
-    let sk = sk_state.as_ref().ok_or("Not logged in")?;
-
-    let user = user_manager.get_user(&user_id).map_err(|e| e.to_string())?;
-
-    // Unlock all vaults — each derives its master key once (Argon2id).
-    // After this, all further operations use the cached keys.
-    for vault_id in &user.vault_ids {
-        let _ = vault_manager.unlock_vault(*vault_id, mp, sk);
-    }
-
-    // Return only this user's vaults: an earlier session's vaults may still
-    // be unlocked in RAM until profile switching ends sessions (F-13).
-    state.get_unlocked_vaults().map_err(|e| e.to_string())
+    state
+        .login_user(user_id, master_password)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub fn logout(state: AppState) -> Result<(), String> {
     let mut state = state.lock().map_err(|e| e.to_string())?;
 
-    state.user_manager.logout().map_err(|e| e.to_string())?;
-
-    // Flush any unsaved changes before locking
-    state.vault_manager.flush_all().map_err(|e| e.to_string())?;
-
-    state.vault_manager.lock_vault(None);
-
-    if let Some(mut mp) = state.master_password.take() {
-        mp.zeroize();
-    }
-    if let Some(mut sk) = state.secret_key.take() {
-        sk.zeroize();
-    }
-
-    Ok(())
+    state.end_session().map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub fn delete_user(state: AppState) -> Result<(), String> {
     let mut state = state.lock().map_err(|e| e.to_string())?;
 
+    // `delete_user` removes the profile and clears the active user itself;
+    // the account is going away, so there is no session to flush first.
     state.vault_manager.lock_vault(None);
-
-    if let Some(mut mp) = state.master_password.take() {
-        mp.zeroize();
-    }
-    if let Some(mut sk) = state.secret_key.take() {
-        sk.zeroize();
-    }
+    state.clear_credentials();
 
     state.user_manager.delete_user().map_err(|e| e.to_string())
 }
@@ -780,7 +787,7 @@ mod tests {
     #[test]
     fn test_require_owned_vault_needs_an_active_user() {
         let (mut state, owned, _) = setup();
-        state.user_manager.logout().unwrap();
+        state.user_manager.clear_active_user();
 
         let result = state.require_owned_vault(owned);
         assert!(
@@ -851,5 +858,77 @@ mod tests {
         let ids = state.list_vault_ids().unwrap();
 
         assert_eq!(ids, vec![owned.to_string()]);
+    }
+
+    // ============ Session switching ============
+
+    #[test]
+    fn test_end_session_locks_vaults_and_clears_credentials() {
+        let (mut state, owned, _) = setup();
+
+        state.end_session().unwrap();
+
+        assert!(
+            matches!(
+                state.vault_manager.get_vault(owned),
+                Err(VaultError::VaultLocked)
+            ),
+            "the previous session's vault must leave RAM"
+        );
+        assert!(state.master_password.is_none(), "the password must be dropped");
+        assert!(state.secret_key.is_none(), "the secret key must be dropped");
+        assert!(
+            state.user_manager.active_user_id.is_none(),
+            "no user may stay active"
+        );
+    }
+
+    #[test]
+    fn test_login_ends_the_previous_session() {
+        let (mut state, owned, _) = setup();
+
+        // A second profile becomes active without ending Alice's session:
+        // the state a compromised renderer can create.
+        let bob = state
+            .user_manager
+            .register("Bob".to_string(), "BobPassword")
+            .unwrap();
+        assert!(
+            state.vault_manager.get_vault(owned).is_ok(),
+            "precondition: Alice's vault is still unlocked"
+        );
+
+        state
+            .login_user(bob.id, "BobPassword".to_string())
+            .unwrap();
+
+        assert!(
+            matches!(
+                state.vault_manager.get_vault(owned),
+                Err(VaultError::VaultLocked)
+            ),
+            "logging in as Bob must lock Alice's vault"
+        );
+        assert!(state.get_unlocked_vaults().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_register_ends_the_previous_session() {
+        let (mut state, owned, _) = setup();
+
+        let vaults = state
+            .register_user("Bob".to_string(), "BobPassword".to_string())
+            .unwrap();
+
+        assert!(
+            matches!(
+                state.vault_manager.get_vault(owned),
+                Err(VaultError::VaultLocked)
+            ),
+            "registering Bob must lock Alice's vault"
+        );
+        assert_eq!(vaults.len(), 1);
+        assert_ne!(vaults[0].id, owned);
+        assert_eq!(state.get_unlocked_vaults().unwrap().len(), 1);
     }
 }
