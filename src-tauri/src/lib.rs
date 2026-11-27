@@ -1,6 +1,7 @@
 mod commands;
 mod crypto;
 mod error;
+mod icons;
 mod models;
 mod user_manager;
 mod vault_manager;

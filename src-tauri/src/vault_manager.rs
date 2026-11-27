@@ -11,6 +11,7 @@ use zxcvbn::{zxcvbn, Entropy};
 use crate::crypto::{
     decrypt_with_key, derive_master_key, encrypt_with_key, generate_salt, MasterKey, SALT_LEN,
 };
+use crate::icons::validate_icon;
 use crate::{
     ItemFilter, CURRENT_SCHEMA_VERSION, IntoSafe, ItemId, ItemKind, ItemSecrets,
     LegacyVault, NewItemData, SecretInput, SECRET_FIELD_PASSWORD, SafeItem, SafeVault, Vault,
@@ -452,6 +453,8 @@ impl VaultManager {
         data: NewItemData,
         secrets: Option<Vec<SecretInput>>,
     ) -> Result<SafeItem, VaultError> {
+        let icon = validate_icon(icon)?;
+
         let kind = match data {
             NewItemData::Account(mut account) => {
                 // Account email follows the shared text-field rule:
@@ -558,6 +561,10 @@ impl VaultManager {
         color: Option<String>,
         data: Option<NewItemData>,
     ) -> Result<SafeItem, VaultError> {
+        // Validate before mutating: a rejected icon must not leave the other
+        // fields half-applied in memory.
+        let icon = validate_icon(icon)?;
+
         {
             let vault = self.get_vault_mut(vault_id)?;
 
@@ -580,7 +587,7 @@ impl VaultManager {
                 item.display_name = normalize(Some(name));
             }
             if let Some(icon) = icon {
-                item.icon = normalize(Some(icon));
+                item.icon = Some(icon);
             }
 
             if let Some(data) = data {
@@ -1461,6 +1468,13 @@ mod tests {
                 None,
             )
             .unwrap()
+    }
+
+    fn add_test_note_id(manager: &mut VaultManager, vault_id: VaultId) -> ItemId {
+        match add_test_note(manager, vault_id, "Title", "body") {
+            SafeItem::Note(note) => note.id,
+            other => panic!("expected note item, got {other:?}"),
+        }
     }
 
     #[test]
@@ -2455,6 +2469,101 @@ mod tests {
         );
     }
 
+    // ============ Icon values ============
+
+    #[test]
+    fn test_add_item_rejects_a_remote_icon() {
+        let temp_dir = setup();
+        let mut manager = VaultManager::new(temp_dir).unwrap();
+        let vault = manager
+            .create_vault("Test".to_string(), "#6240BF".to_string(), MASTER_PW, &KEY)
+            .unwrap();
+
+        let result = manager.add_item(
+            vault.id,
+            None,
+            Some("https://attacker.example/x.png".to_string()),
+            crate::NewItemData::Note(crate::NoteData {
+                title: None,
+                body: "body".to_string(),
+            }),
+            None,
+        );
+
+        assert!(
+            matches!(result, Err(VaultError::Validation(_))),
+            "got {result:?}"
+        );
+        assert!(
+            manager.get_vault(vault.id).unwrap().items.is_empty(),
+            "a rejected icon must not create the item"
+        );
+    }
+
+    #[test]
+    fn test_update_item_rejects_a_remote_icon() {
+        let temp_dir = setup();
+        let mut manager = VaultManager::new(temp_dir).unwrap();
+        let vault = manager
+            .create_vault("Test".to_string(), "#6240BF".to_string(), MASTER_PW, &KEY)
+            .unwrap();
+        let item_id = add_test_note_id(&mut manager, vault.id);
+
+        let result = manager.update_item(
+            vault.id,
+            item_id,
+            Some("Renamed".to_string()),
+            Some("https://attacker.example/x.png".to_string()),
+            None,
+            None,
+            None,
+            None,
+        );
+
+        assert!(
+            matches!(result, Err(VaultError::Validation(_))),
+            "got {result:?}"
+        );
+        let stored = &manager.get_vault(vault.id).unwrap().items[0];
+        assert_eq!(
+            stored.icon, None,
+            "a rejected icon must leave the stored icon unchanged"
+        );
+        assert_eq!(
+            stored.display_name,
+            Some("Notebook".to_string()),
+            "a rejected update must not half-apply the other fields"
+        );
+    }
+
+    #[test]
+    fn test_safe_view_withholds_a_tampered_icon() {
+        let temp_dir = setup();
+        let mut manager = VaultManager::new(temp_dir).unwrap();
+        let vault = manager
+            .create_vault("Test".to_string(), "#6240BF".to_string(), MASTER_PW, &KEY)
+            .unwrap();
+        let item_id = add_test_note_id(&mut manager, vault.id);
+
+        // A tampered vault file can carry any stored icon string.
+        manager
+            .get_vault_mut(vault.id)
+            .unwrap()
+            .items
+            .iter_mut()
+            .find(|i| i.id == item_id)
+            .unwrap()
+            .icon = Some("https://attacker.example/x.png".to_string());
+
+        let view = manager.get_item_by_id(item_id).unwrap();
+        let icon = match view {
+            SafeItem::Note(note) => note.icon,
+            other => panic!("expected note safe view, got {other:?}"),
+        };
+
+        assert_eq!(icon, None, "a disallowed icon must not reach the UI");
+    }
+
     #[test]
     fn test_scoped_reads_check_the_containing_vault_not_the_item_label() {
         let temp_dir = setup();
@@ -2466,11 +2575,7 @@ mod tests {
             .create_vault("Foreign".to_string(), "#000000".to_string(), MASTER_PW, &KEY)
             .unwrap();
 
-        let item = add_test_note(&mut manager, foreign.id, "Hidden", "body");
-        let item_id = match item {
-            SafeItem::Note(note) => note.id,
-            other => panic!("expected note item, got {other:?}"),
-        };
+        let item_id = add_test_note_id(&mut manager, foreign.id);
 
         // A tampered vault can label its item with an owned vault id; the
         // scoped reads must still go by the vault that contains it.

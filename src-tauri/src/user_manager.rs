@@ -5,6 +5,7 @@ use zeroize::Zeroize;
 
 use crate::{
     crypto::{decrypt, encrypt},
+    icons::{safe_icon, validate_icon},
     User, UserId, VaultError, VaultId,
 };
 
@@ -52,7 +53,8 @@ impl UserManager {
             let json = std::fs::read_to_string(&path)?;
 
             match serde_json::from_str::<User>(&json) {
-                Ok(user_data) => {
+                Ok(mut user_data) => {
+                    user_data.icon = safe_icon(user_data.icon.as_deref());
                     available_accounts.push(user_data);
                 }
                 Err(err) => {
@@ -201,7 +203,8 @@ impl UserManager {
             .ok_or(VaultError::UserNotFound("active_path is not set".into()))?;
 
         let json: String = std::fs::read_to_string(path)?;
-        let user_file: User = serde_json::from_str(&json)?;
+        let mut user_file: User = serde_json::from_str(&json)?;
+        user_file.icon = safe_icon(user_file.icon.as_deref());
 
         Ok(user_file)
     }
@@ -227,7 +230,7 @@ impl UserManager {
             user.color = c;
         }
         if let Some(i) = icon {
-            user.icon = if i.is_empty() { None } else { Some(i) };
+            user.icon = validate_icon(Some(i))?;
         }
 
         self.save_user(&user)
@@ -386,6 +389,49 @@ mod tests {
 
         assert!(manager.owns_vault(owned).unwrap());
         assert!(!manager.owns_vault(foreign).unwrap());
+
+        std::fs::remove_dir_all(temp_dir).ok();
+    }
+
+    #[test]
+    fn test_update_profile_rejects_a_remote_icon() {
+        let temp_dir = setup();
+        let mut manager = UserManager::new(temp_dir.clone()).unwrap();
+        let user = manager.register("Heidi".to_string(), "Password").unwrap();
+
+        let result = manager.update_profile(
+            None,
+            None,
+            Some("https://attacker.example/x.png".to_string()),
+        );
+
+        assert!(
+            matches!(result, Err(VaultError::Validation(_))),
+            "got {result:?}"
+        );
+        assert_eq!(manager.get_user(&user.id).unwrap().icon, None);
+
+        std::fs::remove_dir_all(temp_dir).ok();
+    }
+
+    #[test]
+    fn test_user_reads_withhold_a_tampered_icon() {
+        let temp_dir = setup();
+        let mut manager = UserManager::new(temp_dir.clone()).unwrap();
+        let user = manager.register("Ivan".to_string(), "Password").unwrap();
+
+        // A tampered profile file can carry any stored icon string.
+        let path = temp_dir.join(format!("{}.json", user.id));
+        let mut stored: User = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        stored.icon = Some("https://attacker.example/x.png".to_string());
+        std::fs::write(&path, serde_json::to_string(&stored).unwrap()).unwrap();
+
+        assert_eq!(manager.get_user(&user.id).unwrap().icon, None);
+        assert_eq!(
+            manager.get_users().unwrap()[0].icon,
+            None,
+            "the user list must withhold a disallowed icon too"
+        );
 
         std::fs::remove_dir_all(temp_dir).ok();
     }
