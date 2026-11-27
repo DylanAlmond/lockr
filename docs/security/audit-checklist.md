@@ -37,7 +37,7 @@ The rule: every row has one, and `manual:` states why automation is not possible
 | Runner | OpenCode session |
 | Toolchain | Node 24.19 · Rust stable · Tauri 2.11.4 |
 | Automated checks | not run — harness pending [#74](https://github.com/DylanAlmond/lockr/issues/74) |
-| Rows: met / partial / deviated / n/a | group 1: 5 / 7 / 7 / 3 · group 2: 14 / 3 / 6 / 1 · group 3: 4 / 1 / 8 / 0 · group 4: 5 / 0 / 10 / 0 · group 5: 9 / 3 / 1 / 2 |
+| Rows: met / partial / deviated / n/a | group 1: 5 / 7 / 7 / 3 · group 2: 14 / 3 / 6 / 1 · group 3: 4 / 1 / 8 / 0 · group 4: 5 / 0 / 10 / 0 · group 5: 9 / 3 / 1 / 2 · group 6: 2 / 2 / 4 / 0 |
 
 ---
 
@@ -174,14 +174,14 @@ AS6).
 
 | ID | Requirement | Verification | Status | Notes |
 |---|---|---|---|---|
-| 13.4.1 | No VCS metadata shipped in the deployment | `manual:inspect installer payload` | unchecked | |
-| 13.4.2 | Debug modes disabled in production | `manual:release build, attempt inspector` | unchecked | |
-| 15.1.2 | SBOM/inventory of third-party libraries maintained | `manual:no SBOM tooling in 1.2.0` | unchecked | |
-| 15.2.1 | No component past its remediation timeframe | `static:deps-audit` | unchecked | known open: 5 Vite advisories |
-| 15.2.3 | Production contains only required functionality | `static:bundle-dead-code` | unchecked | |
-| 15.3.6 | JavaScript resists prototype pollution | `static:freeze-prototype` | unchecked | |
-| P-08 | Disabled-feature code and tokens absent from the bundle | `static:bundle-secrets` | unchecked | |
-| P-09 | No network egress from the renderer | `static:csp` + `static:bundle-external-hosts` | unchecked | |
+| 13.4.1 | No VCS metadata shipped in the deployment | `manual:inspect installer payload` | partial | `dist/` contains no `.git`/`.svn`; the installer payload was not available to inspect |
+| 13.4.2 | Debug modes disabled in production | `manual:release build, attempt inspector` | partial | No `devtools` Cargo feature; no release artefact to confirm against |
+| 15.1.2 | SBOM/inventory of third-party libraries maintained | `manual:no SBOM tooling in 1.2.0` | deviated | F-24 — no generator, no committed inventory, no audit script |
+| 15.2.1 | No component past its remediation timeframe | `static:deps-audit` | deviated | F-25 — `vite` 6.4.3 carries 5 advisories; no timeframe or gate exists |
+| 15.2.3 | Production contains only required functionality | `static:bundle-dead-code` | met | `dist/` has no seed fixture, no source map, no token, no dev-only module |
+| 15.3.6 | JavaScript resists prototype pollution | `static:freeze-prototype` | deviated | F-03 — `freezePrototype` unset (default `false`) |
+| P-08 | Disabled-feature code and tokens absent from the bundle | `static:bundle-secrets` | met | 0 hits for `logo.dev`, `VITE_LOGO_API_TOKEN`, `Dev seed data`, `test12`; dead source remains (F-26) |
+| P-09 | No network egress from the renderer | `static:csp` + `static:bundle-external-hosts` | deviated | F-09 (icon URLs) and F-01 (no CSP) — the only host literals are `w3.org` and `vuejs.org` |
 
 ---
 

@@ -491,6 +491,70 @@ secret key — but the comment is misleading.
 
 ---
 
+## Group 6 — Supply chain and release hygiene
+
+### F-24 — No SBOM and no dependency inventory · P3
+
+```
+A1–A5  ← build  ADV4
+Rule broken: 15.1.2
+```
+
+The lockfile is the only record of the 388 resolved packages; there is no generated SBOM, no
+committed inventory, and no script that produces one. An assessor cannot answer "what ships in this
+build" from a document, only by resolving the lockfile themselves.
+
+**Evidence:** no `cyclonedx`/`syft`/SBOM tooling in the tree; `package.json` has no audit or inventory
+script.
+**Fix:** generate an SBOM in the build, or commit one per release. **Status:** open.
+
+### F-25 — A known-vulnerable dev dependency with no remediation path · P3
+
+```
+A6  ← build  ADV4
+Rule broken: 15.2.1
+```
+
+`vite` 6.4.3 carries five advisories: one high (`launch-editor` `fs.existsSync` bypass on Windows),
+three moderate (editor CLI flag misinterpretation, `%` escaping, files outside `server.fs.allow`),
+and one low (cross-origin script execution through custom middleware). All are fixed by upgrading.
+None ships to the User — `vite` is a devDependency — but there is no audit script, no CI gate and no
+stated remediation timeframe, so the next advisory will be found the same way this one was: by
+accident.
+
+**Evidence:** dependency audit against the committed lockfile; `package.json` scripts contain no audit
+step. **Fix:** upgrade, then add an audit step and a remediation window.
+**Status:** open.
+
+### F-26 — A dead network path and its token remain in source · P3
+
+```
+A2, A4  ← E4  ADV4
+Rule broken: P-08 (source side), 13.3.1 (by margin)
+```
+
+`fetchBrandLogoAsBase64` still builds `https://img.logo.dev/name/<brand>?token=<VITE_LOGO_API_TOKEN>`
+and `fetch()`es it, even though both call sites are commented out. The bundle is clean today because
+Rollup tree-shakes the unreachable export — verified: 0 hits for the token or `logo.dev` in `dist/`.
+But `VITE_*` values are inlined at build time wherever reachable code references them, so a single
+re-enabled import, or a build change that keeps the module, puts both the token and the egress path
+back in the bundle.
+
+**Evidence:** `imageUpload.ts:263-310`; commented call sites at `AccountEdit.vue:130`,
+`NewAccountForm.vue:8`; bundle scan clean.
+**Fix:** delete the function and the token from `.env`. **Status:** open.
+
+### Controls that held
+
+- `dist/` contains no seed fixture, no source map, no token and no dev-only module; 0 hits for
+  `logo.dev`, `VITE_LOGO_API_TOKEN`, `Dev seed data` or `test12`.
+- The only external string literals in the bundle are `http://www.w3.org` (SVG namespace) and
+  `https://vuejs.org` (Vue error text).
+- The lockfile resolves 388 packages with no git, URL, file or portal resolutions and no non-default
+  registry.
+
+---
+
 ## Pending
 
-Groups 6–7: supply chain and release hygiene; logging and error handling.
+Group 7: logging and error handling.
