@@ -247,9 +247,13 @@ precondition beyond the IPC surface itself.
 
 **Evidence:** `commands.rs` `delete_vault`; `user_manager.rs:211-221`; `vault_manager.rs:364-374`;
 `vault_manager.rs:102-125` (`list_vault_ids`).
-**Fix:** add the ownership check and a re-authentication step; move the file aside (the `.deleted`
-pattern ADR-0002 once proposed does not exist) instead of unlinking.
-**Status:** open.
+**Fix:** applied in `98a35d1`. `delete_vault` now requires the vault in the active user's
+`vault_ids`, re-verifies the master password against the profile, and moves the file to an
+`<id>.vault.deleted` tombstone (ADR-0002) instead of unlinking it. Pinned by
+`test_delete_vault_requires_the_master_password`,
+`test_delete_vault_rejects_a_vault_the_active_user_does_not_own` and
+`test_delete_vault_tombstones_an_owned_vault`.
+**Status:** fixed.
 
 ### F-12 — No command checks vault ownership · P1
 
