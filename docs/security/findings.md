@@ -419,7 +419,78 @@ session lifetime. Without it, F-18 and F-19 cannot be judged as defects rather t
 
 ---
 
+## Group 5 — Cryptography, files and data protection
+
+### F-21 — Upload constraints are undocumented · P3
+
+```
+A6  ← E4  ADV2
+Rule broken: 5.1.1
+```
+
+`accept="image/*"` plus a client-side `file.type.startsWith('image/')` check are the only stated
+limits; there is no documented maximum size, dimension or format list. The transform bounds the
+output (128×128, PNG/WebP), but the decode step accepts whatever the platform image decoder accepts,
+and nothing records what that is.
+
+**Evidence:** `imageUpload.ts:8,322`; `IconUpload.vue`; no upload spec in `docs/`.
+**Fix:** document the accepted formats and a maximum input size, and enforce the size before decode.
+**Status:** open.
+
+### F-22 — No cryptographic inventory · P3
+
+```
+A1, A2  ← E2  ADV3
+Rule broken: 11.1.2 (partial), 11.2.2 (partial)
+```
+
+The primitives are discoverable in `crypto.rs` — Argon2id v0x13 with m=64 MiB, t=3, p=4; AES-256-GCM
+with a 12-byte nonce; a 32-byte salt; `OsRng` for salt, nonce and secret key. There is no document
+that lists them with their keys and uses, and ADR-0001 covers schema versioning rather than an
+inventory.
+
+The file format is `Base64(salt ‖ nonce ‖ ciphertext)` with a `schema_version` but **no algorithm
+identifier**. Changing the cipher therefore requires a schema migration, not a per-file tag. That is
+a reasonable choice; it is recorded here rather than in a document a reviewer can find.
+
+**Evidence:** `crypto.rs:43-57,95`; `vault_manager.rs` save/load; `ADR-0001`.
+**Fix:** a crypto inventory section in the security-level document or its own `docs/` file.
+**Status:** open.
+
+### F-23 — Per-tier protection requirements are incomplete · P3
+
+```
+A1–A6  ← all  ADV1–ADV3
+Rule broken: 14.1.2 (partial)
+```
+
+The threat model classifies assets into T1/T2/T3 and `secret-lifetime.md` defines handling for T1
+field-key secrets. There is no single statement of what each tier requires — encrypted at rest,
+masked in the UI, never logged, retention and retention on lock — so a future asset has no template
+to follow.
+
+**Evidence:** `threat-model.md` §2; `secret-lifetime.md` §1.
+**Fix:** a per-tier requirements table alongside the asset classification.
+**Status:** open.
+
+### Controls that held
+
+- AES-256-GCM, an approved AEAD mode, with a fresh 12-byte nonce per encryption.
+- Argon2id v0x13 at m=64 MiB, t=3, p=4 — above the OWASP minimum of m=19 MiB, t=2, p=1.
+- `OsRng` for every non-guessable value: 32-byte salt, 12-byte nonce, 32-byte secret key.
+- No MD5 or SHA-1 anywhere; Argon2id is the only password KDF.
+- Every filesystem-touching id is a parsed `Uuid`; `vault_path()` formats it, and free-text fields
+  never reach a path — structural traversal resistance, asserted rather than assumed.
+- Uploaded images are decoded, rasterised and re-encoded, so a polyglot never reaches the vault as
+  markup.
+- The shipped app makes no external HTTP call, so there is no TLS surface to misconfigure.
+
+The one naming wart: `derive_key` is marked "(old)" in `crypto.rs` but is the live path used to wrap
+the secret key in the user profile. It is correct — password-only derivation is what encrypts the
+secret key — but the comment is misleading.
+
+---
+
 ## Pending
 
-Groups 5–7: cryptography, files and data protection; supply chain and release hygiene; logging and
-error handling.
+Groups 6–7: supply chain and release hygiene; logging and error handling.

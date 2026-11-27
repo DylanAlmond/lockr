@@ -37,7 +37,7 @@ The rule: every row has one, and `manual:` states why automation is not possible
 | Runner | OpenCode session |
 | Toolchain | Node 24.19 · Rust stable · Tauri 2.11.4 |
 | Automated checks | not run — harness pending [#74](https://github.com/DylanAlmond/lockr/issues/74) |
-| Rows: met / partial / deviated / n/a | group 1: 5 / 7 / 7 / 3 · group 2: 14 / 3 / 6 / 1 · group 3: 4 / 1 / 8 / 0 · group 4: 5 / 0 / 10 / 0 |
+| Rows: met / partial / deviated / n/a | group 1: 5 / 7 / 7 / 3 · group 2: 14 / 3 / 6 / 1 · group 3: 4 / 1 / 8 / 0 · group 4: 5 / 0 / 10 / 0 · group 5: 9 / 3 / 1 / 2 |
 
 ---
 
@@ -148,21 +148,21 @@ The rule: every row has one, and `manual:` states why automation is not possible
 
 | ID | Requirement | Verification | Status | Notes |
 |---|---|---|---|---|
-| 5.1.1 | Permitted file types, extensions and max sizes documented | `manual:document review (upload spec)` | unchecked | |
-| 5.2.2 | Accepted files checked so content matches extension | `renderer:upload-rasterisation` | unchecked | |
-| 5.3.2 | File paths built from trusted/internal data | `rust:uuid-traversal` | unchecked | |
-| 5.4.1 | Download filenames validated or app-generated | `manual:no export/download feature in 1.2.0` | unchecked | n/a if still absent |
-| 11.1.2 | Cryptographic inventory lists keys, algorithms, uses | `manual:document review (crypto inventory)` | unchecked | |
-| 11.2.1 | Industry-validated crypto implementations | `static:deps-crypto` | unchecked | |
-| 11.2.2 | Crypto agility: algorithms/keys can be swapped | `rust:format-version` | unchecked | |
-| 11.3.2 | Approved ciphers and modes (AEAD) | `rust:crypto-attrs` | unchecked | |
-| 11.4.1 | Approved hash functions | `rust:crypto-attrs` | unchecked | |
-| 11.4.2 | Passwords stored with a computationally intensive KDF | `rust:crypto-attrs` | unchecked | |
-| 11.5.1 | Non-guessable values from a CSPRNG with ≥128 bits | `rust:crypto-attrs` | unchecked | |
-| 12.2.1 | TLS for all external HTTP, no insecure fallback | `static:bundle-external-hosts` | unchecked | |
-| 12.3.2 | TLS clients validate certificates | `manual:no external TLS calls in 1.2.0` | unchecked | n/a if still true |
-| 14.1.1 | Sensitive data identified and classified | `manual:document review (threat-model.md §2)` | unchecked | |
-| 14.1.2 | Each protection level has documented requirements | `manual:document review (threat-model.md §2)` | unchecked | |
+| 5.1.1 | Permitted file types, extensions and max sizes documented | `manual:document review (upload spec)` | deviated | F-21 — no upload spec; `accept="image/*"` and a client MIME check are the only limits |
+| 5.2.2 | Accepted files checked so content matches extension | `renderer:upload-rasterisation` | met | The file is decoded as an image, drawn to canvas and re-encoded PNG/WebP; a non-image polyglot fails to decode |
+| 5.3.2 | File paths built from trusted/internal data | `rust:uuid-traversal` | met | Every id is parsed to `Uuid` before `vault_path()` formats it; free-text fields never reach a path |
+| 5.4.1 | Download filenames validated or app-generated | `manual:no export/download feature in 1.2.0` | n/a | Import/export are disabled "coming soon" in Settings |
+| 11.1.2 | Cryptographic inventory lists keys, algorithms, uses | `manual:document review (crypto inventory)` | partial | F-22 — primitives are in `crypto.rs`; ADR-0001 covers versioning, not an inventory |
+| 11.2.1 | Industry-validated crypto implementations | `static:deps-crypto` | met | `argon2` 0.5 and `aes-gcm` 0.11, both maintained RustCrypto crates |
+| 11.2.2 | Crypto agility: algorithms/keys can be swapped | `rust:format-version` | partial | `schema_version` enables migration, but the file format carries no algorithm identifier, so a cipher change is a schema migration |
+| 11.3.2 | Approved ciphers and modes (AEAD) | `rust:crypto-attrs` | met | AES-256-GCM, 12-byte nonce |
+| 11.4.1 | Approved hash functions | `rust:crypto-attrs` | met | No MD5/SHA-1 anywhere; Argon2id is the only KDF |
+| 11.4.2 | Passwords stored with a computationally intensive KDF | `rust:crypto-attrs` | met | Argon2id v0x13, m=64 MiB, t=3, p=4 — above the OWASP minimum |
+| 11.5.1 | Non-guessable values from a CSPRNG with ≥128 bits | `rust:crypto-attrs` | met | `OsRng` for the 32-byte salt, 12-byte nonce and 32-byte secret key |
+| 12.2.1 | TLS for all external HTTP, no insecure fallback | `static:bundle-external-hosts` | met | The shipped app makes no external HTTP call; the only `http://` is the dev server |
+| 12.3.2 | TLS clients validate certificates | `manual:no external TLS calls in 1.2.0` | n/a | Nothing to validate; revisit with any updater or network feature |
+| 14.1.1 | Sensitive data identified and classified | `manual:document review (threat-model.md §2)` | met | A1–A6 in three tiers |
+| 14.1.2 | Each protection level has documented requirements | `manual:document review (threat-model.md §2)` | partial | F-23 — tiers are classified, but per-tier handling rules are incomplete |
 
 **Scope note:** these rows assert configuration and usage facts (primitives, parameters, formats).
 They are not cryptanalysis; correctness of the vault format is ADR-0001's authority (threat model
