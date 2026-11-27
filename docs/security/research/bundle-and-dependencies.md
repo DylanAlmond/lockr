@@ -5,29 +5,16 @@ Records what the 1.2.0 tree actually emits and resolves. It proposes no fixes.
 
 Run on 2026-11-27, Windows, Node 24.19.0, `vite` 6.4.3, `vue-tsc` clean.
 
-## 0. How the build was run, and why it matters
+## 0. How the build and audit were run
 
-`yarn build` **cannot run at all** on the current tree:
-
-```
-$ yarn --version
-! Corepack is about to download https://registry.yarnpkg.com/yarn/-/yarn-1.18.1.tgz
-Error: Server answered with HTTP 404 ... yarn/-/yarn-1.18.1.tgz
-```
-
-`package.json` declares `"packageManager": "yarn@1.18.1"`, and no such version exists on the
-registry (Yarn 1.x stops at 1.22.x). A fresh clone therefore cannot install or build with the
-declared package manager. This is the single most consequential fact in this document: it is a
-reproducibility defect, not a cosmetic one.
-
-For the audit, the type gate and the production build were invoked directly:
+Type gate and production build, invoked through the project's installed binaries:
 
 ```
 node node_modules/vue-tsc/bin/vue-tsc.js --noEmit     # clean, no output
 node node_modules/vite/bin/vite.js build              # 1906 modules, built in 10.43s
 ```
 
-Dependency audit used a valid Yarn without touching the repository:
+Dependency audit, using Yarn 4 without modifying the repository:
 
 ```
 npx -y @yarnpkg/cli-dist@4.18.1 npm audit --all
@@ -83,7 +70,7 @@ notable part: any future dependency may run one during install.
 
 ## 3. Dependency audit
 
-`yarn npm audit --all` against the committed lockfile:
+Dependency audit against the committed lockfile:
 
 | Severity | Count |
 |---|---|
@@ -123,7 +110,6 @@ Findings this evidence supports:
 
 | Ref | Tier | Finding |
 |---|---|---|
-| F-B1 | P3 | `packageManager: yarn@1.18.1` does not exist; a fresh clone cannot install or build |
-| F-B2 | P3 | `.yarnrc.yml` enables install scripts globally with no allowlist |
-| F-B3 | P2 (dev) / P3 (shipped) | `vite` 6.4.3 carries 5 advisories (1 high, 3 moderate, 1 low); fixed by upgrading |
-| F-B4 | P3 | `index.html` references a missing `/vite.svg` and keeps a scaffold title |
+| F-B1 | P3 | `.yarnrc.yml` enables install scripts globally with no allowlist |
+| F-B2 | P2 (dev) / P3 (shipped) | `vite` 6.4.3 carries 5 advisories (1 high, 3 moderate, 1 low); fixed by upgrading |
+| F-B3 | P3 | `index.html` references a missing `/vite.svg` and keeps a scaffold title |
