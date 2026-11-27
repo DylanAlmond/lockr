@@ -151,8 +151,83 @@ inventory of permitted destinations, so the claim cannot be checked against a do
 
 ---
 
+## Group 2 — Renderer injection and secret exposure
+
+### F-09 — Vault-controlled icon URLs are fetched without a scheme allowlist · P1
+
+```
+A4, A5  ← E2, E4  ADV2
+Rule broken: 1.2.2, 14.2.3, 13.2.4
+```
+
+An icon is an arbitrary backend string. Uploads are rasterised, but nothing validates the stored
+value, and it is bound to `<img :src>` at nine sites. A tampered, imported or restored vault can set
+`icon: "https://attacker.example/x.png"`; the request fires when the item is listed, with no action
+beyond opening the app. That leaks the User's IP and user agent, and confirms to the attacker that
+the vault was opened and which item was shown — vault-derived data leaving the machine.
+
+`javascript:` is inert in `img.src` and SVG loaded through `<img>` does not execute, so this is not
+script execution. It is egress.
+
+**Evidence:** `ItemList.vue:248`, `AccountDetails.vue:199`, `CardDetails.vue:238`,
+`IdentityDetails.vue:167`, `NoteDetails.vue:168`, `Sidebar.vue:131`, `LoginView.vue:91,131`,
+`IconUpload.vue:58`; `vault_manager.rs:16-19,459-463` (only empty-string normalisation);
+`csp: null` (F-01).
+**Fix:** `img-src 'self' data:` (config baseline §2) plus backend scheme validation.
+**Status:** fix-specified.
+
+### F-10 — Revealed secrets never expire · P2
+
+```
+A3  ← E1  ADV1, ADV3
+Rule broken: 14.3.1, P-03, R-S2
+```
+
+`AccountDetails` holds the decrypted password and `CardDetails` holds each card secret; both are
+cleared only when the item id, `updated_at`, or the mutation counter changes. There is no timer, no
+window-focus handler and no visibility handler — all ten `@blur` handlers are field-level re-masks,
+not window-level. A revealed password therefore stays visible and reachable until the User navigates
+or edits something.
+
+**Evidence:** `AccountDetails.vue:125-140`; `CardDetails.vue:167`; zero
+`addEventListener('blur'|'visibilitychange')` in `src/`; the only timer in the secret path is
+`ItemField`'s two-second label cooldown.
+**Fix:** `secret-lifetime.md` R-S2. **Status:** fix-specified.
+
+### F-11 — Clipboard retains secrets indefinitely · P2
+
+```
+A3  ← E5  ADV3
+Rule broken: P-04, R-S4
+```
+
+The only clipboard interaction is `navigator.clipboard.writeText`. The two-second timer resets the
+"Copied" label and nothing else. The clipboard is not cleared on timeout, logout or exit, so any
+process in the User's session can read the password long after the copy.
+
+**Evidence:** `ItemField.vue:64-70`; no `clipboard.readText` or clear anywhere in `src/`.
+**Fix:** `secret-lifetime.md` R-S4, plus the backend copy path in §5. **Status:** fix-specified.
+
+### A rule refinement this sweep forced
+
+P-06 originally said a mask never contains a character of the value. The card-number mask
+deliberately shows the real last four digits (`secrets.ts:28`). The rule, not the product, was wrong:
+R-S6 now permits the last four and nothing more, so the checklist no longer demands something the
+design intentionally violates.
+
+### Controls that held
+
+- No HTML, script, navigation or `postMessage` sink exists in `src/` — zero hits across all six
+  classes, corroborating the research.
+- Uploaded images are rasterised through a canvas and re-encoded, so an SVG payload never renders as
+  inline SVG.
+- No `localStorage`, `sessionStorage` or IndexedDB use.
+- No secret reaches the router, the query string, or a console call (the `seed.ts` fixture logs a
+  test password, but it is not bundled).
+
+---
+
 ## Pending
 
-Groups 2–7: renderer injection and secret exposure; IPC and authorisation; authentication and
-session; cryptography, files and data protection; supply chain and release hygiene; logging and
-error handling.
+Groups 3–7: IPC and authorisation; authentication and session; cryptography, files and data
+protection; supply chain and release hygiene; logging and error handling.

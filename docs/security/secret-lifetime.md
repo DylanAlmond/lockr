@@ -31,11 +31,13 @@ copied afterwards.
 `sessionStorage`, IndexedDB, the URL, logs, error strings, `aria-label`/`title`/placeholder
 attributes, or any telemetry.
 
-**R-S6 — Masking invariant.** A display value is the structural mask until an explicit reveal, and
-the mask never contains any character of the value. `ACCOUNT_PASSWORD_MASK` remains the copy gate:
-a display value equal to it means "nothing real to copy". The strength meter may send plaintext to
-the backend on keystroke — IPC is local and the backend already holds the plaintext — but its result
-may never include the value.
+**R-S6 — Masking invariant.** A display value is the structural mask until an explicit reveal. The
+account-password mask and the security-code/PIN masks contain no character of the value. The one
+deliberate exception is the card-number mask, which may expose the last four digits and no more;
+that is the product's card UX, recorded rather than hidden. `ACCOUNT_PASSWORD_MASK` remains the copy
+gate: a display value equal to it means "nothing real to copy". The strength meter may send plaintext
+to the backend on keystroke — IPC is local and the backend already holds the plaintext — but its
+result may never include the value.
 
 **R-S7 — No false zeroization.** The renderer must not attempt to scrub a secret by overwriting or
 rebinding it. A JavaScript string is immutable; `secret = 'x'.repeat(secret.length)` allocates a new

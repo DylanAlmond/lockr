@@ -32,12 +32,12 @@ The rule: every row has one, and `manual:` states why automation is not possible
 
 | Field | Value |
 |---|---|
-| Commit | `f3d5c82` (group 1 run) |
+| Commit | `f3d5c82` app code (groups 1–2) |
 | Date | 2026-11-27 |
 | Runner | OpenCode session |
 | Toolchain | Node 24.19 · Rust stable · Tauri 2.11.4 |
 | Automated checks | not run — harness pending [#74](https://github.com/DylanAlmond/lockr/issues/74) |
-| Rows: met / partial / deviated / n/a | group 1: 5 / 7 / 7 / 3 (1 unchecked) |
+| Rows: met / partial / deviated / n/a | group 1: 5 / 7 / 7 / 3 (1 unchecked) · group 2: 14 / 3 / 6 / 1 |
 
 ---
 
@@ -75,30 +75,30 @@ The rule: every row has one, and `manual:` states why automation is not possible
 
 | ID | Requirement | Verification | Status | Notes |
 |---|---|---|---|---|
-| 1.2.1 | Output encoding matches the context written into | `static:source-injection-sinks` | unchecked | |
-| 1.2.2 | Dynamically built URLs are encoded and protocol-restricted | `static:source-url-attrs` | unchecked | |
-| 1.2.3 | Dynamically built JS/JSON is injection-safe | `static:source-injection-sinks` | unchecked | |
-| 1.3.2 | No `eval` or dynamic code execution | `static:source-eval` | unchecked | |
-| 1.3.3 | Dangerous-context data is sanitised and length-limited | `rust:command-bounds` | unchecked | known open: no length caps |
-| 1.3.4 | User-supplied SVG validated/sanitised | `renderer:upload-rasterisation` | unchecked | |
-| 1.5.2 | Deserialisation uses an allowlist of types | `rust:serde-targets` | unchecked | |
-| 3.2.1 | Controls prevent rendering in the wrong context | `static:source-injection-sinks` | unchecked | |
-| 3.2.2 | Text rendered with text APIs, not HTML sinks | `static:source-injection-sinks` | unchecked | |
-| 3.4.3 | CSP sets `object-src`, `base-uri`, and an allowlist | `static:csp` | unchecked | known open: `csp: null` |
-| 3.4.4 | `X-Content-Type-Options: nosniff` on responses | `static:headers` | unchecked | |
-| 3.4.5 | Referrer policy limits path/query leakage | `manual:not settable via app.security.headers in Tauri 2.11` | unchecked | met by exclusion via CSP; record as such |
-| 3.5.5 | `postMessage` dropped unless origin trusted and syntax valid | `static:source-postmessage` | unchecked | |
-| 3.7.2 | Automatic redirects only to allowlisted destinations | `static:source-navigation` | unchecked | |
-| 14.2.1 | Sensitive data never placed in a URL or query | `static:source-url-secrets` | unchecked | |
-| 14.2.3 | Defined sensitive data not sent to untrusted parties | `static:csp` + `static:bundle-external-hosts` | unchecked | |
-| 14.3.1 | Authenticated data cleared when the session ends | `renderer:secret-lifetime` | unchecked | known open: cached until item change |
-| 14.3.2 | Anti-caching headers keep sensitive data out of caches | `manual:custom protocol serves static assets only; no sensitive HTTP response` | unchecked | record n/a with that reason |
-| 14.3.3 | Browser storage holds no sensitive data | `static:source-storage` + `renderer:never-hold` | unchecked | |
-| P-03 | Reveal re-masks within 10 s and on blur/visibility | `renderer:reveal-timeout` | unchecked | |
-| P-04 | Clipboard compare-and-cleared at 30 s, cleared on logout | `renderer:clipboard-expiry` | unchecked | |
-| P-05 | Never-hold list respected | `renderer:never-hold` | unchecked | |
-| P-06 | Masking invariant (mask never contains value characters) | `renderer:masking` | unchecked | |
-| P-07 | No false zeroization of JS strings | `static:source-zeroization` | unchecked | |
+| 1.2.1 | Output encoding matches the context written into | `static:source-injection-sinks` | met | 0 hits for `v-html`/`innerHTML`/`outerHTML`/`document.write`/`insertAdjacentHTML`/`srcdoc`/`DOMParser`; text goes through Vue interpolation |
+| 1.2.2 | Dynamically built URLs are encoded and protocol-restricted | `static:source-url-attrs` | partial | F-09 — nine `<img :src>` bindings accept a backend string with no scheme allowlist |
+| 1.2.3 | Dynamically built JS/JSON is injection-safe | `static:source-injection-sinks` | met | No runtime template compilation; 0 hits for `new Function`/`eval(`/`compile(` |
+| 1.3.2 | No `eval` or dynamic code execution | `static:source-eval` | met | 0 hits in `src/` |
+| 1.3.3 | Dangerous-context data is sanitised and length-limited | `rust:command-bounds` | partial | No dangerous context exists; string length is unbounded on IPC (assessed in group 3) |
+| 1.3.4 | User-supplied SVG validated/sanitised | `renderer:upload-rasterisation` | met | Uploads decode via `Image`, draw to canvas, re-encode PNG/WebP; stored as an image `data:` URL |
+| 1.5.2 | Deserialisation uses an allowlist of types | `rust:serde-targets` | met | Backend deserialises into concrete structs; renderer `invoke<T>` is an erased assertion but receives JSON, not code |
+| 3.2.1 | Controls prevent rendering in the wrong context | `static:source-injection-sinks` | met | Same evidence as 1.2.1 |
+| 3.2.2 | Text rendered with text APIs, not HTML sinks | `static:source-injection-sinks` | met | Same evidence as 1.2.1 |
+| 3.4.3 | CSP sets `object-src`, `base-uri`, and an allowlist | `static:csp` | deviated | F-01 — `csp: null` |
+| 3.4.4 | `X-Content-Type-Options: nosniff` on responses | `static:headers` | deviated | F-06 — `headers` unset |
+| 3.4.5 | Referrer policy limits path/query leakage | `manual:not settable via app.security.headers in Tauri 2.11` | partial | No header possible; residual leakage is the app origin only, and F-09 is the one outbound path |
+| 3.5.5 | `postMessage` dropped unless origin trusted and syntax valid | `static:source-postmessage` | met | 0 listeners in `src/`; IPC is `invoke` only |
+| 3.7.2 | Automatic redirects only to allowlisted destinations | `static:source-navigation` | met | 0 `href`/`action`/`formaction`/`window.open`; router targets are constants or encoded params |
+| 14.2.1 | Sensitive data never placed in a URL or query | `static:source-url-secrets` | met | 0 secret tokens in `src/router`, `useSearch`, `useRouterHistory` |
+| 14.2.3 | Defined sensitive data not sent to untrusted parties | `static:csp` + `static:bundle-external-hosts` | deviated | F-09 — a vault-derived icon URL can reach an arbitrary host |
+| 14.3.1 | Authenticated data cleared when the session ends | `renderer:secret-lifetime` | deviated | F-10 — revealed secrets persist until item change |
+| 14.3.2 | Anti-caching headers keep sensitive data out of caches | `manual:custom protocol serves static assets only; no sensitive HTTP response` | n/a | Vault data travels over IPC, which is not an HTTP cache participant |
+| 14.3.3 | Browser storage holds no sensitive data | `static:source-storage` + `renderer:never-hold` | met | 0 hits for `localStorage`/`sessionStorage`/`indexedDB` |
+| P-03 | Reveal re-masks within 10 s and on blur/visibility | `renderer:reveal-timeout` | deviated | F-10 — no timer; the 10 `@blur` handlers are field-level, not window-level |
+| P-04 | Clipboard compare-and-cleared at 30 s, cleared on logout | `renderer:clipboard-expiry` | deviated | F-11 — one `writeText`, no clear anywhere |
+| P-05 | Never-hold list respected | `renderer:never-hold` | met | No store/URL/storage path holds a secret; console calls log history and labels, not values (the `seed.ts` fixture logs a test password but is not bundled) |
+| P-06 | Masking invariant | `renderer:masking` | met | Masks expose nothing of the value except the card number's last four digits, by design (R-S6) |
+| P-07 | No false zeroization of JS strings | `static:source-zeroization` | met | 0 scrub attempts; the policy forbids them (R-S7) |
 
 ---
 
