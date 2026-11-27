@@ -9,8 +9,8 @@ use zxcvbn::{zxcvbn, Entropy};
 use crate::user_manager::UserManager;
 use crate::vault_manager::VaultManager;
 use crate::{
-    ItemFilter, IntoSafe, NewItemData, SafeItem, SafeVault, SecretInput, User, UserId, VaultError,
-    VaultId,
+    ItemFilter, ItemId, IntoSafe, NewItemData, SafeItem, SafeVault, SecretInput, User, UserId,
+    VaultError, VaultId,
 };
 
 pub struct ManagerState {
@@ -38,10 +38,7 @@ impl ManagerState {
         vault_id: VaultId,
         master_password: &str,
     ) -> Result<(), VaultError> {
-        if !self.user_manager.owns_vault(vault_id)? {
-            return Err(VaultError::Unauthorised);
-        }
-
+        self.require_owned_vault(vault_id)?;
         self.user_manager.verify_password(master_password)?;
 
         // Move the file aside first, then record the deletion. If recording
@@ -51,6 +48,73 @@ impl ManagerState {
         if let Err(error) = self.user_manager.remove_vault_from_user(vault_id) {
             let _ = self.vault_manager.restore_vault(vault_id, &tombstone);
             return Err(error);
+        }
+
+        Ok(())
+    }
+
+    /// The vault ids the active user owns, from the profile's `vault_ids`.
+    fn owned_vault_ids(&self) -> Result<Vec<VaultId>, VaultError> {
+        Ok(self.user_manager.active_user()?.vault_ids)
+    }
+
+    /// Reject a vault the active user does not own. Commands that read or
+    /// mutate vault data call this first; locking and creating a vault do not
+    /// need it.
+    fn require_owned_vault(&self, vault_id: VaultId) -> Result<(), VaultError> {
+        if self.user_manager.owns_vault(vault_id)? {
+            Ok(())
+        } else {
+            Err(VaultError::Unauthorised)
+        }
+    }
+
+    /// Vault ids on disk that the active user owns.
+    pub fn list_vault_ids(&self) -> Result<Vec<String>, VaultError> {
+        let owned = self.owned_vault_ids()?;
+        Ok(self
+            .vault_manager
+            .list_vault_ids()?
+            .into_iter()
+            .filter(|id| owned.contains(id))
+            .map(|id| id.to_string())
+            .collect())
+    }
+
+    /// Unlocked vaults the active user owns.
+    pub fn get_unlocked_vaults(&self) -> Result<Vec<SafeVault>, VaultError> {
+        let owned = self.owned_vault_ids()?;
+        let mut vaults = self.vault_manager.get_unlocked_vaults();
+        vaults.retain(|vault| owned.contains(&vault.id));
+        Ok(vaults)
+    }
+
+    /// Items in the active user's vaults. A filter naming a vault outside
+    /// that set is rejected; an unfiltered scan only visits owned vaults.
+    pub fn get_all_items(&self, filter: ItemFilter) -> Result<Vec<SafeItem>, VaultError> {
+        let owned = self.owned_vault_ids()?;
+
+        if let Some(vault_id) = filter.vault_id {
+            if !owned.contains(&vault_id) {
+                return Err(VaultError::Unauthorised);
+            }
+        }
+
+        self.vault_manager.get_all_items_in(&owned, filter)
+    }
+
+    /// An item in one of the active user's vaults, by id. An item in an
+    /// unowned vault is not found rather than forbidden, so the response does
+    /// not reveal that it exists.
+    pub fn get_item_by_id(&self, item_id: ItemId) -> Result<SafeItem, VaultError> {
+        let owned = self.owned_vault_ids()?;
+        self.vault_manager.get_item_by_id_in(&owned, item_id)
+    }
+
+    /// Flush unsaved changes for the active user's vaults only.
+    pub fn flush_all(&mut self) -> Result<(), VaultError> {
+        for vault_id in self.owned_vault_ids()? {
+            self.vault_manager.flush_vault(vault_id)?;
         }
 
         Ok(())
@@ -95,7 +159,10 @@ pub fn register_user(
         .add_vault_to_user(new_vault.id)
         .map_err(|e| e.to_string())?;
 
-    Ok(vault_manager.get_unlocked_vaults())
+    // Return only the vault this registration created: an earlier session's
+    // vaults may still be unlocked in RAM until profile switching ends
+    // sessions (F-13).
+    Ok(vec![new_vault.into_safe()])
 }
 
 #[tauri::command]
@@ -181,7 +248,9 @@ pub fn login_user(
         let _ = vault_manager.unlock_vault(*vault_id, mp, sk);
     }
 
-    Ok(vault_manager.get_unlocked_vaults())
+    // Return only this user's vaults: an earlier session's vaults may still
+    // be unlocked in RAM until profile switching ends sessions (F-13).
+    state.get_unlocked_vaults().map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -224,17 +293,14 @@ pub fn delete_user(state: AppState) -> Result<(), String> {
 #[tauri::command]
 pub fn list_vault_ids(state: AppState) -> Result<Vec<String>, String> {
     let state = state.lock().map_err(|e| e.to_string())?;
-    state
-        .vault_manager
-        .list_vault_ids()
-        .map_err(|e| e.to_string())
+    state.list_vault_ids().map_err(|e| e.to_string())
 }
 
-/// Returns metadata for all vaults currently sitting in RAM
+/// Returns metadata for the active user's vaults currently sitting in RAM
 #[tauri::command]
 pub fn get_unlocked_vaults(state: AppState) -> Result<Vec<SafeVault>, String> {
     let state = state.lock().map_err(|e| e.to_string())?;
-    Ok(state.vault_manager.get_unlocked_vaults())
+    state.get_unlocked_vaults().map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -267,6 +333,8 @@ pub fn get_vault_by_id(state: AppState, vault_id: String) -> Result<SafeVault, S
     let state = state.lock().map_err(|e| e.to_string())?;
     let id = Uuid::parse_str(&vault_id).map_err(|e| e.to_string())?;
 
+    state.require_owned_vault(id).map_err(|e| e.to_string())?;
+
     let vault = state
         .vault_manager
         .get_vault(id)
@@ -281,6 +349,8 @@ pub fn unlock_vault(state: AppState, vault_id: String) -> Result<SafeVault, Stri
 
     // Vue sends a string but Rust needs a Uuid
     let id = Uuid::parse_str(&vault_id).map_err(|e| e.to_string())?;
+
+    state.require_owned_vault(id).map_err(|e| e.to_string())?;
 
     let ManagerState {
         vault_manager,
@@ -306,6 +376,10 @@ pub fn lock_vault(state: AppState, vault_id: Option<String>) -> Result<(), Strin
         .map(|vid| Uuid::parse_str(&vid).map_err(|e| e.to_string()))
         .transpose()?;
 
+    if let Some(id) = id {
+        state.require_owned_vault(id).map_err(|e| e.to_string())?;
+    }
+
     state.vault_manager.lock_vault(id);
     Ok(())
 }
@@ -319,6 +393,8 @@ pub fn update_vault(
 ) -> Result<(), String> {
     let mut state = state.lock().map_err(|e| e.to_string())?;
     let id = Uuid::parse_str(&vault_id).map_err(|e| e.to_string())?;
+
+    state.require_owned_vault(id).map_err(|e| e.to_string())?;
 
     state
         .vault_manager
@@ -350,6 +426,8 @@ pub fn get_item_password_strength(
     let vid = Uuid::parse_str(&vault_id).map_err(|e| e.to_string())?;
     let iid = Uuid::parse_str(&item_id).map_err(|e| e.to_string())?;
 
+    state.require_owned_vault(vid).map_err(|e| e.to_string())?;
+
     state
         .vault_manager
         .get_item_password_strength(vid, iid)
@@ -367,6 +445,7 @@ pub fn get_password_strength(password: String) -> Result<Entropy, String> {
 pub fn flush_vault(state: AppState, vault_id: String) -> Result<(), String> {
     let mut state = state.lock().map_err(|e| e.to_string())?;
     let id = Uuid::parse_str(&vault_id).map_err(|e| e.to_string())?;
+    state.require_owned_vault(id).map_err(|e| e.to_string())?;
     state
         .vault_manager
         .flush_vault(id)
@@ -378,7 +457,7 @@ pub fn flush_vault(state: AppState, vault_id: String) -> Result<(), String> {
 #[tauri::command]
 pub fn flush_all(state: AppState) -> Result<(), String> {
     let mut state = state.lock().map_err(|e| e.to_string())?;
-    state.vault_manager.flush_all().map_err(|e| e.to_string())
+    state.flush_all().map_err(|e| e.to_string())
 }
 
 /// Toggle autosave on/off.
@@ -396,6 +475,7 @@ pub fn set_autosave(state: AppState, enabled: bool) -> Result<(), String> {
 pub fn is_vault_dirty(state: AppState, vault_id: String) -> Result<bool, String> {
     let state = state.lock().map_err(|e| e.to_string())?;
     let id = Uuid::parse_str(&vault_id).map_err(|e| e.to_string())?;
+    state.require_owned_vault(id).map_err(|e| e.to_string())?;
     Ok(state.vault_manager.is_dirty(id))
 }
 
@@ -412,6 +492,8 @@ pub fn add_item(
 ) -> Result<SafeItem, String> {
     let mut state = state.lock().map_err(|e| e.to_string())?;
     let id = Uuid::parse_str(&vault_id).map_err(|e| e.to_string())?;
+
+    state.require_owned_vault(id).map_err(|e| e.to_string())?;
 
     state
         .vault_manager
@@ -435,6 +517,8 @@ pub fn update_item(
     let vid = Uuid::parse_str(&vault_id).map_err(|e| e.to_string())?;
     let iid = Uuid::parse_str(&item_id).map_err(|e| e.to_string())?;
 
+    state.require_owned_vault(vid).map_err(|e| e.to_string())?;
+
     state
         .vault_manager
         .update_item(vid, iid, display_name, icon, favourite, tags, color, data)
@@ -446,6 +530,8 @@ pub fn delete_item(state: AppState, vault_id: String, item_id: String) -> Result
     let mut state = state.lock().map_err(|e| e.to_string())?;
     let vid = Uuid::parse_str(&vault_id).map_err(|e| e.to_string())?;
     let iid = Uuid::parse_str(&item_id).map_err(|e| e.to_string())?;
+
+    state.require_owned_vault(vid).map_err(|e| e.to_string())?;
 
     state
         .vault_manager
@@ -465,6 +551,9 @@ pub fn move_item(
     let iid = Uuid::parse_str(&item_id).map_err(|e| e.to_string())?;
     let tid = Uuid::parse_str(&target_vault_id).map_err(|e| e.to_string())?;
 
+    state.require_owned_vault(vid).map_err(|e| e.to_string())?;
+    state.require_owned_vault(tid).map_err(|e| e.to_string())?;
+
     state
         .vault_manager
         .move_item(vid, iid, tid)
@@ -477,7 +566,6 @@ pub fn get_item_by_id(state: AppState, item_id: String) -> Result<SafeItem, Stri
     let id = Uuid::parse_str(&item_id).map_err(|e| e.to_string())?;
 
     state
-        .vault_manager
         .get_item_by_id(id)
         .map_err(|e| e.to_string())
 }
@@ -487,7 +575,6 @@ pub fn get_all_items(state: AppState, filter: ItemFilter) -> Result<Vec<SafeItem
     let state = state.lock().map_err(|e| e.to_string())?;
 
     state
-        .vault_manager
         .get_all_items(filter)
         .map_err(|e| e.to_string())
 }
@@ -504,6 +591,8 @@ pub fn get_item_secret(
     let state = state.lock().map_err(|e| e.to_string())?;
     let vid = Uuid::parse_str(&vault_id).map_err(|e| e.to_string())?;
     let iid = Uuid::parse_str(&item_id).map_err(|e| e.to_string())?;
+
+    state.require_owned_vault(vid).map_err(|e| e.to_string())?;
 
     state
         .vault_manager
@@ -522,6 +611,8 @@ pub fn update_item_secret(
     let mut state = state.lock().map_err(|e| e.to_string())?;
     let vid = Uuid::parse_str(&vault_id).map_err(|e| e.to_string())?;
     let iid = Uuid::parse_str(&item_id).map_err(|e| e.to_string())?;
+
+    state.require_owned_vault(vid).map_err(|e| e.to_string())?;
 
     state
         .vault_manager
@@ -596,17 +687,9 @@ mod tests {
     #[test]
     fn test_delete_vault_rejects_a_vault_the_active_user_does_not_own() {
         let (mut state, _, temp_dir) = setup();
-        let foreign = state
-            .vault_manager
-            .create_vault(
-                "Foreign".to_string(),
-                "#000000".to_string(),
-                MASTER_PW,
-                &SECRET_KEY,
-            )
-            .unwrap();
+        let foreign = add_unowned_unlocked_vault(&mut state);
 
-        let result = state.delete_vault(foreign.id, MASTER_PW);
+        let result = state.delete_vault(foreign, MASTER_PW);
 
         assert!(
             matches!(result, Err(VaultError::Unauthorised)),
@@ -615,7 +698,7 @@ mod tests {
         assert!(
             temp_dir
                 .join("vaults")
-                .join(format!("{}.vault", foreign.id))
+                .join(format!("{}.vault", foreign))
                 .exists(),
             "an unowned vault must not be deleted"
         );
@@ -642,5 +725,131 @@ mod tests {
             !state.user_manager.owns_vault(vault_id).unwrap(),
             "deletion must remove the vault from the user's list"
         );
+    }
+
+    // ============ Ownership across the read surface ============
+
+    fn add_account(state: &mut ManagerState, vault_id: VaultId, username: &str) -> Uuid {
+        match state
+            .vault_manager
+            .add_item(
+                vault_id,
+                None,
+                None,
+                NewItemData::Account(crate::AccountData {
+                    username: username.to_string(),
+                    email: None,
+                }),
+                None,
+            )
+            .unwrap()
+        {
+            SafeItem::Account(account) => account.id,
+            other => panic!("expected account item, got {other:?}"),
+        }
+    }
+
+    /// A vault that is unlocked in RAM but missing from the active user's
+    /// `vault_ids` — the state F-13 can leave behind.
+    fn add_unowned_unlocked_vault(state: &mut ManagerState) -> VaultId {
+        state
+            .vault_manager
+            .create_vault(
+                "Foreign".to_string(),
+                "#000000".to_string(),
+                MASTER_PW,
+                &SECRET_KEY,
+            )
+            .unwrap()
+            .id
+    }
+
+    #[test]
+    fn test_require_owned_vault_rejects_an_unowned_vault_id() {
+        let (state, owned, _) = setup();
+
+        state.require_owned_vault(owned).unwrap();
+
+        let result = state.require_owned_vault(Uuid::new_v4());
+        assert!(
+            matches!(result, Err(VaultError::Unauthorised)),
+            "got {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_require_owned_vault_needs_an_active_user() {
+        let (mut state, owned, _) = setup();
+        state.user_manager.logout().unwrap();
+
+        let result = state.require_owned_vault(owned);
+        assert!(
+            matches!(result, Err(VaultError::UserNotFound(_))),
+            "got {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_get_all_items_excludes_vaults_the_active_user_does_not_own() {
+        let (mut state, owned, _) = setup();
+        add_account(&mut state, owned, "owned-user");
+
+        let foreign = add_unowned_unlocked_vault(&mut state);
+        add_account(&mut state, foreign, "foreign-user");
+
+        let items = state
+            .get_all_items(ItemFilter::default())
+            .unwrap();
+
+        assert_eq!(items.len(), 1, "only the owned vault's items are visible");
+        assert_eq!(items[0].vault_id(), owned);
+    }
+
+    #[test]
+    fn test_get_all_items_rejects_an_unowned_vault_filter() {
+        let (mut state, _, _) = setup();
+        let foreign = add_unowned_unlocked_vault(&mut state);
+
+        let result = state.get_all_items(ItemFilter {
+            vault_id: Some(foreign),
+            ..ItemFilter::default()
+        });
+
+        assert!(matches!(result, Err(VaultError::Unauthorised)));
+    }
+
+    #[test]
+    fn test_get_item_by_id_does_not_find_an_item_in_an_unowned_vault() {
+        let (mut state, _, _) = setup();
+        let foreign = add_unowned_unlocked_vault(&mut state);
+        let foreign_item = add_account(&mut state, foreign, "foreign-user");
+
+        let result = state.get_item_by_id(foreign_item);
+
+        assert!(
+            matches!(result, Err(VaultError::ItemNotFound(_))),
+            "got {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_get_unlocked_vaults_excludes_unowned_vaults() {
+        let (mut state, owned, _) = setup();
+        add_unowned_unlocked_vault(&mut state);
+
+        let vaults = state.get_unlocked_vaults().unwrap();
+
+        assert_eq!(vaults.len(), 1);
+        assert_eq!(vaults[0].id, owned);
+    }
+
+    #[test]
+    fn test_list_vault_ids_excludes_unowned_vaults() {
+        let (mut state, owned, _) = setup();
+        add_unowned_unlocked_vault(&mut state);
+
+        let ids = state.list_vault_ids().unwrap();
+
+        assert_eq!(ids, vec![owned.to_string()]);
     }
 }

@@ -130,8 +130,9 @@ impl VaultManager {
         Ok(&mut uv.vault)
     }
 
-    /// Returns a list of existing vault IDs (filenames) without unlocking them
-    pub fn list_vault_ids(&self) -> Result<Vec<String>, VaultError> {
+    /// Returns a list of existing vault IDs without unlocking them. Files
+    /// whose stem is not a UUID are not vaults and are skipped.
+    pub fn list_vault_ids(&self) -> Result<Vec<VaultId>, VaultError> {
         let mut ids = Vec::new();
 
         if !self.vaults_dir.exists() {
@@ -146,7 +147,9 @@ impl VaultManager {
                 if extension == "vault" {
                     if let Some(stem) = path.file_stem() {
                         if let Some(id_str) = stem.to_str() {
-                            ids.push(id_str.to_string());
+                            if let Ok(id) = Uuid::parse_str(id_str) {
+                                ids.push(id);
+                            }
                         }
                     }
                 }
@@ -614,7 +617,23 @@ impl VaultManager {
 
     /// Retrieve a specific item of any sendable kind by id (all unlocked vaults).
     pub fn get_item_by_id(&self, item_id: ItemId) -> Result<SafeItem, VaultError> {
+        let unlocked: Vec<VaultId> = self.unlocked_vaults.keys().copied().collect();
+        self.get_item_by_id_in(&unlocked, item_id)
+    }
+
+    /// Retrieve an item by id from one of the `allowed` vaults only. The
+    /// check is against the containing vault, not the item's own `vault_id`
+    /// field, which a tampered vault could mislabel.
+    pub fn get_item_by_id_in(
+        &self,
+        allowed: &[VaultId],
+        item_id: ItemId,
+    ) -> Result<SafeItem, VaultError> {
         for uv in self.unlocked_vaults.values() {
+            if !allowed.contains(&uv.vault.id) {
+                continue;
+            }
+
             if let Some(item) = uv.vault.items.iter().find(|i| i.id == item_id) {
                 return Ok(item_to_safe(item, &uv.vault.secrets));
             }
@@ -683,12 +702,31 @@ impl VaultManager {
 
     /// Retrieves items of all kinds across one or all vaults, applying filters.
     pub fn get_all_items(&self, filter: ItemFilter) -> Result<Vec<SafeItem>, VaultError> {
+        let unlocked: Vec<VaultId> = self.unlocked_vaults.keys().copied().collect();
+        self.get_all_items_in(&unlocked, filter)
+    }
+
+    /// Retrieves items from the `allowed` vaults only. A filter naming a
+    /// vault outside that set is rejected, and an unfiltered scan iterates
+    /// the allowed vaults rather than every unlocked one.
+    pub fn get_all_items_in(
+        &self,
+        allowed: &[VaultId],
+        filter: ItemFilter,
+    ) -> Result<Vec<SafeItem>, VaultError> {
         let mut results: Vec<SafeItem> = Vec::new();
 
         let vaults_to_scan: Vec<&Vault> = if let Some(id) = filter.vault_id {
+            if !allowed.contains(&id) {
+                return Err(VaultError::Unauthorised);
+            }
             vec![self.get_vault(id)?]
         } else {
-            self.unlocked_vaults.values().map(|uv| &uv.vault).collect()
+            allowed
+                .iter()
+                .filter_map(|id| self.unlocked_vaults.get(id))
+                .map(|uv| &uv.vault)
+                .collect()
         };
 
         let query = filter.search_query.map(|q| q.to_lowercase());
@@ -2415,6 +2453,48 @@ mod tests {
             first.exists() && second.exists(),
             "both deletions must stay recoverable"
         );
+    }
+
+    #[test]
+    fn test_scoped_reads_check_the_containing_vault_not_the_item_label() {
+        let temp_dir = setup();
+        let mut manager = VaultManager::new(temp_dir.clone()).unwrap();
+        let owned = manager
+            .create_vault("Owned".to_string(), "#6240BF".to_string(), MASTER_PW, &KEY)
+            .unwrap();
+        let foreign = manager
+            .create_vault("Foreign".to_string(), "#000000".to_string(), MASTER_PW, &KEY)
+            .unwrap();
+
+        let item = add_test_note(&mut manager, foreign.id, "Hidden", "body");
+        let item_id = match item {
+            SafeItem::Note(note) => note.id,
+            other => panic!("expected note item, got {other:?}"),
+        };
+
+        // A tampered vault can label its item with an owned vault id; the
+        // scoped reads must still go by the vault that contains it.
+        manager
+            .get_vault_mut(foreign.id)
+            .unwrap()
+            .items
+            .iter_mut()
+            .find(|i| i.id == item_id)
+            .unwrap()
+            .vault_id = owned.id;
+
+        let listed = manager
+            .get_all_items_in(&[owned.id], ItemFilter::default())
+            .unwrap();
+        assert!(
+            listed.is_empty(),
+            "an item in an unowned vault must not be listed"
+        );
+
+        assert!(matches!(
+            manager.get_item_by_id_in(&[owned.id], item_id),
+            Err(VaultError::ItemNotFound(_))
+        ));
     }
 
     #[test]

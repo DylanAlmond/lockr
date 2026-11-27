@@ -539,6 +539,18 @@ pub enum SafeItem {
     Identity(SafeIdentity),
 }
 
+impl SafeItem {
+    /// The vault this item belongs to.
+    pub fn vault_id(&self) -> VaultId {
+        match self {
+            SafeItem::Account(item) => item.vault_id,
+            SafeItem::Card(item) => item.vault_id,
+            SafeItem::Note(item) => item.vault_id,
+            SafeItem::Identity(item) => item.vault_id,
+        }
+    }
+}
+
 /// The Safe View of an item: only account-kind items have an account view.
 /// Returns `None` for every other kind.
 pub fn account_from_item(item: &VaultItem) -> Option<SafeAccount> {
