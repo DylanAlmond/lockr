@@ -39,6 +39,10 @@ The in-memory state between login and logout: the active user, the cached master
 
 The copy of a vault's encrypted file written immediately before a schema migration persists. Named `<vault_id>.vault.OLD`, sitting beside the vault file. It is the rollback path for a migration: the app itself never reads, rewrites, or deletes it — restoring it manually rolls the vault back.
 
+## Write Temp File
+
+The sibling file `<vault_id>.vault.tmp` a save writes before replacing the live vault file (ADR-0003). It holds the same encrypted payload, is never read, is ignored by `list_vault_ids`, and is truncated by the next save if a crash left it behind.
+
 ## Tombstone
 
 The renamed file a deleted vault leaves behind: `<vault_id>.vault.deleted`, with a numbered suffix when the same vault is deleted again. Deletion moves the encrypted file out of the live `.vault` set instead of unlinking it, so its bytes can be recovered from disk out of band. The app never lists, unlocks, reads, or deletes a tombstone, and there is no in-app restore.

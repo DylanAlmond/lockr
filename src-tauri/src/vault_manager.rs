@@ -1,6 +1,7 @@
 use std::{
     collections::HashMap,
     fs::read_dir,
+    io::Write,
     path::{Path, PathBuf},
 };
 
@@ -77,6 +78,13 @@ impl VaultManager {
     /// ever written at migration time, never on plain unlocks.
     fn vault_backup_path(&self, vault_id: VaultId) -> PathBuf {
         self.vaults_dir.join(format!("{}.vault.OLD", vault_id))
+    }
+
+    /// Sibling temp file used while writing a vault. A crash can leave one
+    /// behind; its `.tmp` extension keeps it out of `list_vault_ids`, and the
+    /// next save truncates it rather than reading it.
+    fn vault_temp_path(&self, vault_id: VaultId) -> PathBuf {
+        self.vaults_dir.join(format!("{}.vault.tmp", vault_id))
     }
 
     /// Get path to the tombstone a deleted vault is moved to. Deletion never
@@ -324,12 +332,43 @@ impl VaultManager {
         };
         // Immutable borrow ends here — NLL allows mutable borrow below
 
-        let path = self.vault_path(vault_id);
-        std::fs::write(path, encrypted)?;
+        self.write_vault_file(vault_id, &encrypted)?;
 
         // Clear dirty flag
         if let Some(uv) = self.unlocked_vaults.get_mut(&vault_id) {
             uv.dirty = false;
+        }
+
+        Ok(())
+    }
+
+    /// Write the encrypted vault to a sibling temp file, fsync it, then rename
+    /// over the live file. A crash between those steps leaves either the old
+    /// vault or the complete new one, never a truncated file.
+    fn write_vault_file(&self, vault_id: VaultId, encrypted: &str) -> Result<(), VaultError> {
+        let path = self.vault_path(vault_id);
+        let temp = self.vault_temp_path(vault_id);
+
+        let write_result = (|| -> std::io::Result<()> {
+            let mut file = std::fs::File::create(&temp)?;
+            file.write_all(encrypted.as_bytes())?;
+            file.sync_all()?;
+            // Windows blocks renaming over a file with an open handle.
+            drop(file);
+            std::fs::rename(&temp, &path)
+        })();
+
+        if let Err(error) = write_result {
+            let _ = std::fs::remove_file(&temp);
+            return Err(error.into());
+        }
+
+        // Persist the rename itself on Unix; Windows has no directory fsync.
+        #[cfg(unix)]
+        {
+            if let Ok(dir) = std::fs::File::open(&self.vaults_dir) {
+                let _ = dir.sync_all();
+            }
         }
 
         Ok(())
@@ -1451,6 +1490,104 @@ mod tests {
         manager.lock_vault(Some(vault.id));
         let re_unlocked = manager.unlock_vault(vault.id, MASTER_PW, &KEY).unwrap();
         assert_eq!(re_unlocked.items.len(), 1);
+    }
+
+    // ============ Atomic saves ============
+
+    #[test]
+    fn test_failed_save_leaves_the_existing_vault_intact() {
+        let temp_dir = setup();
+        let mut manager = VaultManager::new(temp_dir.clone()).unwrap();
+        let vault = manager
+            .create_vault("Test".to_string(), "#6240BF".to_string(), MASTER_PW, &KEY)
+            .unwrap();
+
+        let vault_path = manager.vault_path(vault.id);
+        let temp_path = manager.vault_temp_path(vault.id);
+        let original = std::fs::read(&vault_path).unwrap();
+
+        // A directory where the sibling temp file belongs makes the write
+        // fail before it can touch the live vault.
+        std::fs::create_dir(&temp_path).unwrap();
+
+        let result = manager.update_vault(vault.id, Some("Renamed".to_string()), None);
+
+        assert!(
+            matches!(result, Err(VaultError::Io(_))),
+            "the save must fail with an I/O error, got {result:?}"
+        );
+        assert_eq!(
+            std::fs::read(&vault_path).unwrap(),
+            original,
+            "a failed save must leave the existing vault untouched"
+        );
+    }
+
+    /// Windows refuses to replace a read-only file, so this injects a rename
+    /// failure *after* the temp file has been written and synced.
+    #[cfg(windows)]
+    #[test]
+    fn test_failed_rename_keeps_the_existing_vault_and_cleans_up() {
+        let temp_dir = setup();
+        let mut manager = VaultManager::new(temp_dir.clone()).unwrap();
+        let vault = manager
+            .create_vault("Test".to_string(), "#6240BF".to_string(), MASTER_PW, &KEY)
+            .unwrap();
+
+        let vault_path = manager.vault_path(vault.id);
+        let temp_path = manager.vault_temp_path(vault.id);
+        let original = std::fs::read(&vault_path).unwrap();
+
+        let mut permissions = std::fs::metadata(&vault_path).unwrap().permissions();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(&vault_path, permissions).unwrap();
+
+        let result = manager.update_vault(vault.id, Some("Renamed".to_string()), None);
+
+        let mut permissions = std::fs::metadata(&vault_path).unwrap().permissions();
+        permissions.set_readonly(false);
+        std::fs::set_permissions(&vault_path, permissions).unwrap();
+
+        assert!(
+            matches!(result, Err(VaultError::Io(_))),
+            "the rename must fail with an I/O error, got {result:?}"
+        );
+        assert_eq!(
+            std::fs::read(&vault_path).unwrap(),
+            original,
+            "a failed rename must leave the existing vault untouched"
+        );
+        assert!(
+            !temp_path.exists(),
+            "a failed rename must remove the temp file"
+        );
+    }
+
+    #[test]
+    fn test_save_leaves_no_temp_file_and_persists_the_new_content() {
+        let temp_dir = setup();
+        let mut manager = VaultManager::new(temp_dir.clone()).unwrap();
+        let vault = manager
+            .create_vault("Test".to_string(), "#6240BF".to_string(), MASTER_PW, &KEY)
+            .unwrap();
+
+        manager
+            .update_vault(vault.id, Some("Renamed".to_string()), None)
+            .unwrap();
+
+        let leftovers: Vec<String> = std::fs::read_dir(temp_dir.join("vaults"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".tmp"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "a completed save must not leave temp files: {leftovers:?}"
+        );
+
+        manager.lock_vault(Some(vault.id));
+        let reloaded = manager.unlock_vault(vault.id, MASTER_PW, &KEY).unwrap();
+        assert_eq!(reloaded.name, "Renamed");
     }
 
     // ============ Item command surface (notes first) ============
