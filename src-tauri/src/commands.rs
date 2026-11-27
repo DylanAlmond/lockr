@@ -94,12 +94,19 @@ impl ManagerState {
         // session holds the plaintext key. Two Argon2 passes, unavoidable.
         let secret_key = self.user_manager.login(&user.id, &master_password)?;
 
-        let new_vault = self.vault_manager.create_vault(
+        let new_vault = match self.vault_manager.create_vault(
             DEFAULT_VAULT_NAME.to_string(),
             DEFAULT_VAULT_COLOUR.to_string(),
             &master_password,
             &secret_key,
-        )?;
+        ) {
+            Ok(vault) => vault,
+            Err(error) => {
+                // Do not leave an active user with no cached credentials.
+                self.user_manager.clear_active_user();
+                return Err(error);
+            }
+        };
 
         self.master_password = Some(master_password);
         self.secret_key = Some(secret_key);
@@ -910,6 +917,36 @@ mod tests {
             "logging in as Bob must lock Alice's vault"
         );
         assert!(state.get_unlocked_vaults().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_failed_login_still_ends_the_previous_session() {
+        let (mut state, owned, _) = setup();
+
+        // The same precondition, but the new login is rejected: the teardown
+        // must already have happened, not be skipped because authentication
+        // failed.
+        let bob = state
+            .user_manager
+            .register("Bob".to_string(), "BobPassword")
+            .unwrap();
+
+        let result = state.login_user(bob.id, "WrongPassword".to_string());
+
+        assert!(
+            matches!(result, Err(VaultError::AuthenticationFailed)),
+            "got {result:?}"
+        );
+        assert!(
+            matches!(
+                state.vault_manager.get_vault(owned),
+                Err(VaultError::VaultLocked)
+            ),
+            "a failed login must still lock the previous vault"
+        );
+        assert!(state.master_password.is_none());
+        assert!(state.secret_key.is_none());
+        assert!(state.user_manager.active_user_id.is_none());
     }
 
     #[test]
