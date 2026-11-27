@@ -31,6 +31,10 @@ The name under which a single secret value is stored for an item — for example
 
 The version stamp on a vault's on-disk format (`schema_version`). It tells the app which shape the decrypted vault content has, so old files can be recognized and migrated instead of failing to parse. Files written before versioning existed omit the field and default to version 1.
 
+## Session
+
+The in-memory state between login and logout: the active user, the cached master password and secret key, and the unlocked vaults. A session ends at logout, at user deletion, and at the start of any login or registration — switching users never leaves the previous session's vaults unlocked. Ending a session flushes unsaved changes, drops every unlocked vault, and zeroizes the cached password and secret key.
+
 ## Migration Backup
 
 The copy of a vault's encrypted file written immediately before a schema migration persists. Named `<vault_id>.vault.OLD`, sitting beside the vault file. It is the rollback path for a migration: the app itself never reads, rewrites, or deletes it — restoring it manually rolls the vault back.

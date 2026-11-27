@@ -301,8 +301,10 @@ and it is the precondition that turns F-12 into a cross-User path.
 
 **Evidence:** `commands.rs` `login_user` (credentials overwritten before any lock);
 `vault_manager.rs:128-133`; `commands.rs` `logout` (the only path that locks).
-**Fix:** end every session at the start of `login_user`/`register_user`.
-**Status:** open.
+**Fix:** applied in `ed0afaf`. `ManagerState::end_session` flushes and locks every unlocked vault,
+zeroizes the cached password and key, and clears the active user; `login_user` and `register_user`
+call it before setting any credential. `logout` reuses the same path.
+**Status:** fixed.
 
 ### F-15 — No anti-automation on login · P2
 
