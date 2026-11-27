@@ -227,7 +227,129 @@ design intentionally violates.
 
 ---
 
+## Group 3 — IPC and authorisation
+
+### F-14 — Any vault file can be deleted by id, with no ownership, unlock or re-authentication · P0
+
+```
+A1–A5  ← E1  ADV1
+Rule broken: 8.2.2, 8.3.1, P-01
+```
+
+`list_vault_ids` enumerates **every** `.vault` file on disk. `delete_vault` then removes the file for
+any parsed UUID: it does not check that the vault belongs to the active User, does not require the
+vault to be unlocked, and asks for no confirmation. `remove_vault_from_user` silently no-ops for ids
+not in the active User's list, so the deletion is not even recorded against a profile.
+
+A compromised renderer can therefore destroy every User's vault on the machine in one call per file.
+This is the audit's only P0: write access to data outside the active session, reachable with no
+precondition beyond the IPC surface itself.
+
+**Evidence:** `commands.rs` `delete_vault`; `user_manager.rs:211-221`; `vault_manager.rs:364-374`;
+`vault_manager.rs:102-125` (`list_vault_ids`).
+**Fix:** add the ownership check and a re-authentication step; move the file aside (the `.deleted`
+pattern ADR-0002 once proposed does not exist) instead of unlinking.
+**Status:** open.
+
+### F-12 — No command checks vault ownership · P1
+
+```
+A3, A4  ← E1  ADV1
+Rule broken: 8.2.2, 8.3.1, P-01; threat-model §8
+```
+
+`vault_ids` is documented in code as "IDs of all vaults this user owns" and is consulted exactly once:
+in the login unlock loop. Every vault and item command gates on "present in the unlocked map"
+(`vault_manager.rs:83-99`), never on "owned by the active User". `get_item_secret` additionally
+validates the item and the field key, but not the caller.
+
+Today only the active User's vaults are unlocked, so this is latent — it becomes a cross-User read
+and write path the moment two Users' vaults are open at once, which F-13 makes possible, or if any
+feature introduces concurrent sessions. It is a P1 rather than P0 because it needs that second
+condition; F-14 does not.
+
+**Evidence:** `commands.rs:148` (only `vault_ids` use); `vault_manager.rs:83-99`;
+`commands.rs` `get_item_secret`.
+**Fix:** assert `vault_id ∈ active_user.vault_ids` in every vault/item command.
+**Status:** open.
+
+### F-13 — Switching the active User does not end prior sessions · P2
+
+```
+A1–A3  ← E1  ADV1
+Rule broken: 7.4.2, P-02; threat-model §7
+```
+
+`login_user` and `register_user` overwrite the cached master password and secret key without locking
+what was already unlocked. `get_unlocked_vaults` and an unfiltered `get_all_items` then return every
+unlocked vault, so the previous User's data stays readable in RAM.
+
+The normal flow is safe because logout locks everything and the router only shows the login screen
+when no User is active. The gap is reachable by a compromised renderer calling `login_user` directly,
+and it is the precondition that turns F-12 into a cross-User path.
+
+**Evidence:** `commands.rs` `login_user` (credentials overwritten before any lock);
+`vault_manager.rs:128-133`; `commands.rs` `logout` (the only path that locks).
+**Fix:** end every session at the start of `login_user`/`register_user`.
+**Status:** open.
+
+### F-15 — No anti-automation on login · P2
+
+```
+A1  ← E1  ADV1, ADV3
+Rule broken: 2.4.1, 6.3.1
+```
+
+`login_user` has no attempt counter, delay, lockout or audit entry. Argon2id makes each guess
+expensive, which is the only brake; a local attacker can retry indefinitely and nothing records it.
+
+**Evidence:** `commands.rs` `login_user`; `user_manager.rs:110-132`.
+**Fix:** a counter with backoff, plus an auth log (group 7).
+**Status:** open.
+
+### F-16 — Validation and authorisation rules are undocumented · P3
+
+```
+A1–A5  ← E1  ADV1
+Rule broken: 2.1.1, 2.3.2, 8.1.1
+```
+
+There is no written record of which command validates what, which fields a caller may set, or that
+`vault_ids` is the access-control list. The knowledge exists only in the code, which is why F-12 and
+F-14 were not obvious.
+
+**Evidence:** no validation or authorisation document in `docs/`.
+**Fix:** command→caller matrix and per-command validation rules.
+**Status:** open.
+
+### F-17 — No length bounds on strings crossing IPC · P3
+
+```
+A1–A5  ← E1  ADV1
+Rule broken: 2.2.1 (partial)
+```
+
+Display names, tags, notes, URLs and secret values are accepted at unbounded length. The renderer
+does not send dangerous lengths today, but the backend is the trusted layer and does not bound what
+arrives.
+
+**Evidence:** no length checks in `validation` paths of `vault_manager.rs`; `models.rs` uses `String`.
+**Fix:** per-field maximum lengths, rejected with a validation error.
+**Status:** open.
+
+### Controls that held
+
+- The safe-view pattern is real: `SafeItem`/`SafeVault` structurally omit secret values, and
+  `get_item_secret` is the only egress.
+- Field-level access is correct: the field key must be legal for the item kind
+  (`vault_manager.rs:711-720`).
+- `update_item` takes explicit named fields; ids, timestamps and `vault_ids` are not caller-settable,
+  so mass assignment is not available.
+- All validation that exists is in Rust, not in Vue.
+
+---
+
 ## Pending
 
-Groups 3–7: IPC and authorisation; authentication and session; cryptography, files and data
-protection; supply chain and release hygiene; logging and error handling.
+Groups 4–7: authentication and session; cryptography, files and data protection; supply chain and
+release hygiene; logging and error handling.

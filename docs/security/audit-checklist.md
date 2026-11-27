@@ -37,7 +37,7 @@ The rule: every row has one, and `manual:` states why automation is not possible
 | Runner | OpenCode session |
 | Toolchain | Node 24.19 · Rust stable · Tauri 2.11.4 |
 | Automated checks | not run — harness pending [#74](https://github.com/DylanAlmond/lockr/issues/74) |
-| Rows: met / partial / deviated / n/a | group 1: 5 / 7 / 7 / 3 (1 unchecked) · group 2: 14 / 3 / 6 / 1 |
+| Rows: met / partial / deviated / n/a | group 1: 5 / 7 / 7 / 3 · group 2: 14 / 3 / 6 / 1 · group 3: 4 / 1 / 8 / 0 |
 
 ---
 
@@ -106,19 +106,19 @@ The rule: every row has one, and `manual:` states why automation is not possible
 
 | ID | Requirement | Verification | Status | Notes |
 |---|---|---|---|---|
-| 2.1.1 | Input-validation rules documented per data item | `manual:document review (validation rules)` | unchecked | |
-| 2.2.1 | All input validated against allowlists/patterns/ranges | `rust:command-validation` | unchecked | |
-| 2.2.2 | Validation enforced at a trusted layer | `rust:command-validation` | unchecked | |
-| 2.3.2 | Documented business-logic limits implemented | `rust:login-limits` | unchecked | |
-| 2.4.1 | Anti-automation controls on abusable functions | `rust:login-rate-limit` | unchecked | known open: no attempt limiting |
-| 8.1.1 | Function- and data-authorisation rules documented | `manual:document review (command→caller matrix)` | unchecked | |
-| 8.2.2 | Data-specific access requires explicit permission (IDOR/BOLA) | `rust:ownership` | unchecked | known open: no `vault_ids` check |
-| 8.2.3 | Field-level read/write restricted (BOPLA) | `rust:secret-surface` | unchecked | |
-| 8.3.1 | Authorisation enforced at a trusted layer | `rust:ownership` | unchecked | known open |
-| 15.3.1 | Only required fields returned from data objects | `rust:secret-surface` | unchecked | |
-| 15.3.3 | Mass assignment prevented with per-action allowlists | `rust:update-allowlist` | unchecked | |
-| P-01 | Renderer untrusted for authorisation (R1/R2) | `rust:ownership` | unchecked | |
-| P-02 | Switching the active User ends every prior session | `rust:profile-switch-lock` | unchecked | known open |
+| 2.1.1 | Input-validation rules documented per data item | `manual:document review (validation rules)` | deviated | F-16 — no validation-rules document exists |
+| 2.2.1 | All input validated against allowlists/patterns/ranges | `rust:command-validation` | partial | UUIDs parsed, kinds and field keys checked; no string length bounds (F-17) |
+| 2.2.2 | Validation enforced at a trusted layer | `rust:command-validation` | met | All checks live in `commands.rs`/`vault_manager.rs`, never only in Vue |
+| 2.3.2 | Documented business-logic limits implemented | `rust:login-limits` | deviated | F-16 — no documented limits, no attempt counter |
+| 2.4.1 | Anti-automation controls on abusable functions | `rust:login-rate-limit` | deviated | F-15 — `login_user` has no counter, delay or lockout |
+| 8.1.1 | Function- and data-authorisation rules documented | `manual:document review (command→caller matrix)` | deviated | F-16 — `vault_ids` is the only ACL and it is undocumented as such |
+| 8.2.2 | Data-specific access requires explicit permission (IDOR/BOLA) | `rust:ownership` | deviated | F-12 — no command checks `vault_id ∈ active_user.vault_ids`; F-14 — deletion needs no ownership |
+| 8.2.3 | Field-level read/write restricted (BOPLA) | `rust:secret-surface` | met | `SafeItem`/`SafeVault` structurally omit secrets; `get_item_secret` is the only egress and validates kind + field key |
+| 8.3.1 | Authorisation enforced at a trusted layer | `rust:ownership` | deviated | F-12 — "vault unlocked" is the whole gate |
+| 15.3.1 | Only required fields returned from data objects | `rust:secret-surface` | met | Safe-view pattern; note bodies and identity PII remain, by product design |
+| 15.3.3 | Mass assignment prevented with per-action allowlists | `rust:update-allowlist` | met | `update_item` takes explicit named fields; ids, timestamps and `vault_ids` are not caller-settable |
+| P-01 | Renderer untrusted for authorisation (R1/R2) | `rust:ownership` | deviated | F-12 — the core trusts the ids the renderer sends |
+| P-02 | Switching the active User ends every prior session | `rust:profile-switch-lock` | deviated | F-13 — `login_user` overwrites credentials without locking |
 
 ---
 
