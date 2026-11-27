@@ -51,8 +51,9 @@ re-pinned on every release.
    in `audit-checklist.md`.
 3. **Adversarial pass** — the threat model's in-scope adversaries are exercised against the renderer,
    and findings are recorded with the citation format in `threat-model.md` §11.
-4. **Evidence** — governed by `evidence-standard.md`; automated tests are preferred wherever a
-   control can be asserted mechanically.
+4. **Evidence** — governed by `evidence-standard.md`; automated checks are preferred wherever a
+   control can be asserted mechanically, and the suite that implements them is specified in
+   `compliance-tests.md`.
 
 ## 4. Findings
 
