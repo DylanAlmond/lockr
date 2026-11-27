@@ -53,8 +53,9 @@ authentication on Windows.
 
 **Evidence:** `src-tauri/capabilities/default.json`; `src-tauri/Cargo.toml:22`;
 `src-tauri/src/lib.rs:44`; `research/opener-scope.md`.
-**Fix:** remove the capability, plugin and package (`tauri-config-baseline.md` §4). **Status:**
-fix-specified.
+**Fix:** applied in `bcce2f5`: the capability entry, Cargo dependency, plugin registration and npm
+package are gone. Pinned by `static:capabilities-opener`.
+**Status:** fixed.
 
 ### F-03 — `Object.prototype` is mutable in the webview · P2
 
@@ -68,7 +69,8 @@ plain objects; a polluted prototype is a persistence and logic-confusion vector 
 introduced.
 
 **Evidence:** config shows no `freezePrototype`; schema default is `false`.
-**Fix:** `tauri-config-baseline.md` §1. **Status:** fix-specified.
+**Fix:** applied in `bcce2f5` — `freezePrototype: true`. Pinned by `static:freeze-prototype`.
+**Status:** fixed.
 
 ### F-04 — `core:default` and `core:window:default` over-grant the window · P2
 
@@ -84,7 +86,10 @@ included in that default. The app uses a handful: window controls, `isMaximized`
 
 **Evidence:** `src-tauri/capabilities/default.json`; call sites in `src/components/layout/Titlebar.vue`
 and `src/components/ui/AboutAppModal.vue`.
-**Fix:** the seven-permission file in `tauri-config-baseline.md` §5. **Status:** fix-specified.
+**Fix:** applied in `bcce2f5` — the eight-permission file from `tauri-config-baseline.md` §5, one per
+call site (including `internal_toggle_maximize` for drag-region double-click). Pinned by
+`static:capabilities`.
+**Status:** fixed.
 
 ### F-05 — Commands are not scoped to a capability · P3
 
@@ -111,7 +116,9 @@ Rule broken: 3.4.4, T-16
 `Cross-Origin-Resource-Policy`, `Cross-Origin-Opener-Policy` or `Permissions-Policy`.
 
 **Evidence:** config shows no `headers`.
-**Fix:** `tauri-config-baseline.md` §1. **Status:** fix-specified.
+**Fix:** applied in `bcce2f5` — `nosniff`, CORP/COOP `same-origin` and a `Permissions-Policy`
+denying device APIs. Pinned by `static:headers`.
+**Status:** fixed.
 
 ### F-07 — Source maps are absent by accident, not by assertion · P3
 

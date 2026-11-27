@@ -41,8 +41,12 @@ A test must print the checklist id it satisfies on failure, so a red run maps st
 
 ## 3. Static suite
 
-One module per area, each exporting `{ id, run }`. `run.mjs` executes them all and exits non-zero on
-the first failure, printing the row id and the observed value.
+One module per area, each exporting `{ id, run }`. `run.mjs` executes them all, prints every result,
+and exits non-zero if any check failed.
+
+**Implemented in `bcce2f5`:** `csp.mjs`, `capabilities.mjs` and `run.mjs`, wired as
+`yarn test:compliance`. `static:command-scope` is deferred until F-05; `source.mjs`, `bundle.mjs` and
+`deps.mjs` are still pending.
 
 ### `csp.mjs`
 
@@ -59,7 +63,7 @@ the first failure, printing the row id and the observed value.
 
 | Id | Assertion |
 |---|---|
-| `static:capabilities` | Permission list equals the expected seven-entry set (config baseline §5) |
+| `static:capabilities` | Permission list equals the expected eight-entry set (config baseline §5) |
 | `static:capabilities-opener` | No permission starts with `opener:`; `tauri-plugin-opener` absent from `Cargo.toml` and `package.json` |
 | `static:command-scope` | `build.rs` references `AppManifest::commands` (currently expected to fail) |
 

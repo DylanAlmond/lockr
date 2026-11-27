@@ -3,9 +3,8 @@
 Recommendation for [#70](https://github.com/DylanAlmond/lockr/issues/70) (parent [#63](https://github.com/DylanAlmond/lockr/issues/63)).
 This is the diff-ready configuration and the reasoning for every non-default line.
 
-**Partially applied:** the `csp` and `devCsp` objects in §1 were applied in `1b0b571` (F-01, F-09).
-`freezePrototype` (F-03), `headers` (F-06) and the remaining sections below are still recommendations;
-each is a fix ticket.
+**Applied:** §1 in `1b0b571` (CSP) and `bcce2f5` (`freezePrototype`, `headers`), and §4/§5 in
+`bcce2f5`. §6 is the recorded decline; §7 (source maps) is still a recommendation (F-07).
 
 Sources: Tauri 2 CSP docs (<https://v2.tauri.app/security/csp/>), the installed config schema
 (`node_modules/@tauri-apps/cli/config.schema.json`, Tauri CLI for `tauri` 2.11.4), and the
@@ -129,15 +128,17 @@ URL" feature should arrive as a scoped permission with an explicit host allowlis
     "core:window:allow-minimize",
     "core:window:allow-toggle-maximize",
     "core:window:allow-is-maximized",
-    "core:window:allow-start-dragging"
+    "core:window:allow-start-dragging",
+    "core:window:allow-internal-toggle-maximize"
   ]
 }
 ```
 
 Each entry has a call site: `core:event` for `onResized`; `app:allow-version` for `AboutAppModal`'s
-`getVersion`; the window permissions for `Titlebar.vue` and `data-tauri-drag-region`. `core:default`
-is dropped because it also bundles menu, tray, image, resources and path permissions the app never
-uses. `invoke` of app-defined commands needs no entry.
+`getVersion`; the window permissions for `Titlebar.vue` and `data-tauri-drag-region`. Tauri's drag
+script invokes `internal_toggle_maximize` on a drag-region double-click, so that permission is
+required too. `core:default` is dropped because it also bundles menu, tray, image, resources and path
+permissions the app never uses. `invoke` of app-defined commands needs no entry.
 
 ## 6. Isolation pattern: declined, recorded
 
