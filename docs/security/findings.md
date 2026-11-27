@@ -274,8 +274,11 @@ condition; F-14 does not.
 
 **Evidence:** `commands.rs:148` (only `vault_ids` use); `vault_manager.rs:83-99`;
 `commands.rs` `get_item_secret`.
-**Fix:** assert `vault_id ∈ active_user.vault_ids` in every vault/item command.
-**Status:** open.
+**Fix:** applied in `0a9fb7d`. Every vault/item command calls
+`ManagerState::require_owned_vault`; scan commands are scoped to the active user's vaults by
+containing-vault id (`get_all_items`, `get_item_by_id`, `get_unlocked_vaults`, `list_vault_ids`), and
+`flush_all`, `lock_vault`, `login_user` and `register_user` no longer reach across sessions.
+**Status:** fixed.
 
 ### F-13 — Switching the active User does not end prior sessions · P2
 
