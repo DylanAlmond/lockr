@@ -594,7 +594,12 @@ The fix is the standard one: write to a sibling temp file, fsync, then rename ov
 
 **Evidence:** `vault_manager.rs:292`; the only `fs::copy` is `backup_vault_file`, called from the
 migration path at `:248`.
-**Fix:** atomic replace (temp + rename). **Status:** open.
+**Fix:** applied in `da46178`, recorded in ADR-0003: write `<id>.vault.tmp`, sync it, rename over the
+live file. Pinned by `test_failed_save_leaves_the_existing_vault_intact`,
+`test_failed_rename_keeps_the_existing_vault_and_cleans_up` (Windows) and
+`test_save_leaves_no_temp_file_and_persists_the_new_content`. The Rust compliance suite
+(`compliance-tests.md` §4) remains the planned home for the re-runnable assertion.
+**Status:** fixed.
 
 ### F-27 — No logging of authentication, authorisation or errors · P3
 
