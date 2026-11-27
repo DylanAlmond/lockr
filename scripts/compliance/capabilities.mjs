@@ -2,25 +2,24 @@
 //
 // Each entry is `{ id, run }`; `run` throws with the observed value on
 // failure. Ids match the rows in docs/security/compliance-tests.md.
+//
+// `static:command-scope` is deferred: build.rs has no `AppManifest::commands`
+// yet (F-05), so the check would be red by design.
 
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { readJson, readText } from './lib.mjs';
 
-const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
-
-const capability = JSON.parse(
-  readFileSync(join(root, 'src-tauri', 'capabilities', 'default.json'), 'utf8')
-);
+const capability = readJson('src-tauri', 'capabilities', 'default.json');
 const permissions = capability.permissions ?? [];
-const cargo = readFileSync(join(root, 'src-tauri', 'Cargo.toml'), 'utf8');
-const packageJson = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
+const cargo = readText('src-tauri', 'Cargo.toml');
+const packageJson = readJson('package.json');
 
+// The set from tauri-config-baseline.md §5, each entry with a call site.
 const EXPECTED_PERMISSIONS = [
   'core:app:allow-version',
   'core:event:default',
   'core:window:allow-close',
+  'core:window:allow-internal-toggle-maximize',
   'core:window:allow-is-maximized',
   'core:window:allow-minimize',
   'core:window:allow-start-dragging',
@@ -32,9 +31,10 @@ export const checks = [
     id: 'static:capabilities',
     run() {
       const actual = [...permissions].sort();
+      const expected = [...EXPECTED_PERMISSIONS].sort();
       assert.deepEqual(
         actual,
-        EXPECTED_PERMISSIONS,
+        expected,
         `capability permissions must equal the expected set (got ${JSON.stringify(actual)})`
       );
     },
