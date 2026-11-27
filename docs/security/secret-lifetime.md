@@ -37,6 +37,14 @@ a display value equal to it means "nothing real to copy". The strength meter may
 the backend on keystroke — IPC is local and the backend already holds the plaintext — but its result
 may never include the value.
 
+**R-S7 — No false zeroization.** The renderer must not attempt to scrub a secret by overwriting or
+rebinding it. A JavaScript string is immutable; `secret = 'x'.repeat(secret.length)` allocates a new
+string and leaves the original intact until the GC frees — not zeroes — it. Engines copy strings
+freely (concatenation, `slice`, `JSON.parse`, reactive proxying), the DOM keeps rendered values and
+undo state, and Vue's reactivity caches derived strings, so no single reference owns the only copy.
+Bounding lifetime and copies (R-S2, R-S3) is the achievable control. Any code that appears to erase
+a string is a false assurance and should be rejected in review.
+
 ## 2. The limitation that must be stated publicly
 
 JavaScript strings are immutable and cannot be zeroized. R-S2 and R-S3 drop the **reference**; they
@@ -44,9 +52,12 @@ do not scrub memory, and the string may survive in the webview heap until garbag
 policy bounds *reachability* — what the UI and any injected script can ask for — not memory
 residency.
 
+The asymmetry is worth naming: the Rust core uses `zeroize` and that scrubbing is real; the renderer
+cannot make the equivalent claim, and must not imply it. The public security-level document should
+say exactly that rather than "secrets are wiped".
+
 That is why the policy is paired with the threat model's session rule and the no-network CSP: an
-attacker who can read webview memory has already defeated the renderer. The public security-level
-document must say this rather than imply that "secrets are wiped".
+attacker who can read webview memory has already defeated the renderer.
 
 ## 3. Current behaviour against the rule
 
@@ -70,20 +81,41 @@ document must say this rather than imply that "secrets are wiped".
 - **Editors** — drop `passwordOriginal`/`passwordInput` and card field drafts on `onUnmounted` and
   on route change. Keeping the original while the form is open is what makes "leave the password
   untouched" safe; it has no reason to outlive the form.
-- **Copier** — record the copied value in a short-lived holder, start a 30 s timer, and
-  compare-and-clear on expiry. Logout clears immediately. The holder is dropped as soon as the
-  timer fires.
+- **Copier** — copy should not fetch the value into the renderer at all; see §5. Until the backend
+  command lands, record the copied value in a short-lived holder, start a 30 s timer, and
+  compare-and-clear on expiry. Logout clears immediately.
 - **App shell** — a single `blur` + `visibilitychange` listener that broadcasts "hide all reveals",
   rather than eight components each listening.
 
-## 5. Bound, not solved
+## 5. The copy path should leave the renderer
+
+Copying is the most frequent secret interaction and the only one that needs no display. It should not
+involve the webview.
+
+**Target.** An app command `copy_item_secret(vault_id, item_id, field_key) -> Result<(), String>`
+that reads the value from the decrypted vault in the core, writes it to the OS clipboard, and
+returns only success. Nothing crosses IPC but a boolean.
+
+What this removes:
+
+- the plaintext never becomes a JavaScript string, so it never enters the webview heap at all;
+- the 30 s compare-and-clear timer moves to Rust, where it survives route changes, component
+  teardown and the window being backgrounded;
+- `ItemField`'s copy path stops being a secret-fetch path, so `get_item_secret` serves reveal only.
+
+Trade-offs: it needs a clipboard dependency in the core (`tauri-plugin-clipboard-manager` or
+platform APIs) and the compare-and-clear read must also live there. Reveal still needs the string, so
+this narrows the surface rather than eliminating it — which is exactly the point: it removes the
+copy path from the renderer's attack surface entirely and leaves one irreducible reveal path.
+
+## 6. Bound, not solved
 
 This policy reduces the window in which a compromised or observed renderer can read a secret. It
 does **not** stop ADV1 from calling `get_item_secret` directly: a renderer that is already executing
 attacker code has full access to the command surface until the ownership check and session rules
 land. Stated plainly: lifetime policy is exposure minimisation, not access control.
 
-## 6. Out of scope
+## 7. Out of scope
 
 - **Core-side plaintext.** The Rust core holds decrypted vaults for the whole session, and
   `set_autosave(false)` can extend that indefinitely. Renderer copies are bounded here; core
@@ -95,7 +127,7 @@ land. Stated plainly: lifetime policy is exposure minimisation, not access contr
 - **OS clipboard history.** Clipboard managers may retain the value; outside app control, and stated
   in the public document.
 
-## 7. Verification
+## 8. Verification
 
 1. Reveal a password; it re-masks after 10 s without input.
 2. Reveal, then focus another window; it re-masks immediately. Repeat with the window minimised /
@@ -106,10 +138,25 @@ land. Stated plainly: lifetime policy is exposure minimisation, not access contr
 6. In a dev build, leave an editor, then inspect component state — both secret refs are `null`.
 7. Inspect storage, the URL, and the console after a full session — no secret appears.
 
-## 8. Checklist rows
+## 9. Checklist rows
 
 Discharges or partly discharges: ASVS **14.3.1** (authenticated data cleared when the session ends),
 **14.2.1** (no sensitive data in URLs), **16.2.5** (no secrets in logs), **7.4.1** (a terminated
 session cannot be used again — with the session rule). Leaves **7.3.1** (inactivity timeout) open as
 a finding, and adds the project-specific rows: reveal bound, clipboard expiry, never-hold list,
-masking invariant.
+masking invariant, and no-false-zeroization.
+
+## 10. Named follow-ups
+
+Fix tickets after the map closes, in priority order:
+
+1. **Backend clipboard command** — `copy_item_secret` in the core, with Rust-side compare-and-clear;
+   removes the copy path from the renderer (§5).
+2. **Shared reveal primitive** — one 10 s timer plus blur/visibility handling, used by both detail
+   views and `Input`'s password toggle.
+3. **Editor draft teardown** — drop `passwordOriginal`/`passwordInput` and card drafts on unmount and
+   route change.
+4. **Remove the cosmetic cooldown** — `ItemField`'s 2 s timer should not be mistaken for clipboard
+   expiry once the real policy exists.
+5. **Idle auto-lock decision** — close the ASVS 7.3.1 finding by deciding lock semantics, or record
+   the acceptance.
