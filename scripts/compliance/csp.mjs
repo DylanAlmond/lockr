@@ -4,19 +4,14 @@
 // failure. Ids match the rows in docs/security/compliance-tests.md.
 
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { readJson } from './lib.mjs';
 
-const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
-const config = JSON.parse(
-  readFileSync(join(root, 'src-tauri', 'tauri.conf.json'), 'utf8')
-);
+const config = readJson('src-tauri', 'tauri.conf.json');
 const security = config.app?.security ?? {};
 
 const PRODUCTION_CONNECT = 'ipc: http://ipc.localhost';
 
-function assertNoInlineScript(sources, directive) {
+function assertNoUnsafeSources(sources, directive) {
   assert.ok(
     !/unsafe-inline|unsafe-eval/.test(sources ?? ''),
     `${directive} must not allow 'unsafe-inline' or 'unsafe-eval' (got ${
@@ -34,7 +29,7 @@ export const checks = [
 
       assert.equal(csp['default-src'], "'self'");
       assert.equal(csp['script-src'], "'self'");
-      assertNoInlineScript(csp['script-src'], "csp['script-src']");
+      assertNoUnsafeSources(csp['script-src'], "csp['script-src']");
       assert.equal(csp['object-src'], "'none'");
       assert.equal(csp['base-uri'], "'none'");
       assert.equal(csp['frame-ancestors'], "'none'");
@@ -70,7 +65,7 @@ export const checks = [
         );
       }
 
-      assertNoInlineScript(dev['script-src'], "devCsp['script-src']");
+      assertNoUnsafeSources(dev['script-src'], "devCsp['script-src']");
       assert.equal(dev['img-src'], csp['img-src']);
     },
   },
@@ -100,7 +95,7 @@ export const checks = [
   {
     id: 'static:freeze-prototype',
     run() {
-      assert.equal(security.freezePrototype, true);
+      assert.equal(security.freezePrototype, true, 'freezePrototype must be true');
     },
   },
   {

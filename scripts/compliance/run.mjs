@@ -1,4 +1,5 @@
-// Runs every static compliance check and exits non-zero on the first failure.
+// Runs every static compliance check, prints each result, and exits non-zero
+// if any check failed.
 //
 // A check prints its checklist id, so a red run maps straight back to a row
 // in docs/security/audit-checklist.md.
