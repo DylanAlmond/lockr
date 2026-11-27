@@ -55,7 +55,7 @@ Requirement text is paraphrased for width; the ID is authoritative and resolves 
 | V8 | [Authorization](https://github.com/OWASP/ASVS/blob/master/5.0/en/0x17-V8-Authorization.md) | 5 | Multi-profile support plus a 30-command surface creates function/data/field access questions |
 | V11 | [Cryptography](https://github.com/OWASP/ASVS/blob/master/5.0/en/0x20-V11-Cryptography.md) | 7 | Vault confidentiality and password storage are core product claims |
 | V12 | [Secure Communication](https://github.com/OWASP/ASVS/blob/master/5.0/en/0x21-V12-Secure-Communication.md) | 2 | logo.dev and any future updater are client-initiated TLS calls |
-| V13 | [Configuration](https://github.com/OWASP/ASVS/blob/master/5.0/en/0x22-V13-Configuration.md) | 6 | Build-time secrets, debug modes, and egress allowlists are client configuration |
+| V13 | [Configuration](https://github.com/OWASP/ASVS/blob/master/5.0/en/0x22-V13-Configuration.md) | 7 | Build-time secrets, debug modes, and egress allowlists are client configuration |
 | V14 | [Data Protection](https://github.com/OWASP/ASVS/blob/master/5.0/en/0x23-V14-Data-Protection.md) | 7 | Plaintext secrets transit and render in the webview |
 | V15 | [Secure Coding and Architecture](https://github.com/OWASP/ASVS/blob/master/5.0/en/0x24-V15-Secure-Coding-and-Architecture.md) | 6 | Dependencies, shipped functionality, object shaping, prototype pollution |
 | V16 | [Security Logging and Error Handling](https://github.com/OWASP/ASVS/blob/master/5.0/en/0x25-V16-Security-Logging-and-Error-Handling.md) | 7 | Unlock failures and command denials need local records without leaking secrets |
@@ -117,6 +117,7 @@ Requirement text is paraphrased for width; the ID is authoritative and resolves 
 | **12.2.1** | TLS is used for all client-to-external HTTP, with no insecure fallback | yes | `rg "http://" src src-tauri`; only the dev server URL should match |
 | **12.3.2** | TLS clients validate certificates before communicating | yes | Confirm no certificate-verification bypass is configured for logo.dev or updater calls |
 | **13.1.1** | All communication needs are documented, including user-supplied destinations | partial | Check docs for a list of egress hosts; settles on logo.dev being the only one |
+| **13.2.2** | Local service interfaces are reachable only with least necessary privilege | partial | Review capability grants; settles on whether the webview needs every granted window permission |
 | **13.2.4** | An allowlist defines external resources the application may contact | partial | Compare CSP `connect-src`/`img-src` and opener scope to actual egress; a mismatch settles it as unmet |
 | **13.3.1** | Secrets are not in source or build artifacts | yes | Run `yarn build`, then search `dist/` for `VITE_LOGO_API_TOKEN` or the token value |
 | **13.3.2** | Access to secret assets follows least privilege | partial | Confirm `.env` is ignored and the token is not webview-readable; settles on whether it is inlined at build time |
@@ -129,18 +130,18 @@ Requirement text is paraphrased for width; the ID is authoritative and resolves 
 | **14.3.1** | Authenticated data is cleared from client storage when the session ends | partial | Lock the vault, then search `document.body.innerText` for a known secret; settles on in-memory retention |
 | **14.3.2** | Anti-caching headers keep sensitive data out of webview caches | partial | `jq '.app.security.headers'`; settles on whether the custom protocol cache is disabled |
 | **14.3.3** | Browser storage contains no sensitive data except session tokens | yes | Devtools Application tab after unlock: no vault data in storage |
-| **15.1.2** | An SBOM/inventory of third-party libraries is maintained from trusted repositories | partial | Check CI for `cargo cyclonedx` or equivalent output |
+| **15.1.2** | An SBOM/inventory of third-party libraries is maintained from trusted repositories | partial | Check CI for `cargo cyclonedx` or equivalent output; absence settles it as unmet |
 | **15.2.1** | No component has breached its remediation timeframe | partial | Run `cargo audit` and `yarn npm audit`; settles on a documented timeframe existing |
-| **15.2.3** | Production contains only required functionality, with no test or dev code | partial | Search the release bundle for `seed.ts` fixtures, devtools, and source maps |
+| **15.2.3** | Production contains only required functionality, with no test or dev code | partial | Search the release bundle for `seed.ts` fixtures, devtools, and source maps; a match settles it as unmet |
 | **15.3.1** | Only the required subset of fields is returned from data objects | yes | Inspect `SafeItem`/`SafeVault`; confirm list responses omit secrets |
-| **15.3.3** | Mass assignment is prevented with per-action field allowlists | partial | Check whether `update_item` accepts caller-supplied ids, timestamps, or owner fields |
+| **15.3.3** | Mass assignment is prevented with per-action field allowlists | partial | Check whether `update_item` accepts caller-supplied ids, timestamps, or owner fields; acceptance settles it as unmet |
 | **15.3.6** | JavaScript resists prototype pollution | partial | Check `freezePrototype`; `rg "Object.assign|__proto__" src`; settles on whether the config flag is enabled |
 | **16.1.1** | A log inventory covers events, format, storage, access, and retention | partial | Look for a logging doc; settles on whether any log sink exists at all |
 | **16.2.5** | Logging of sensitive data follows the data's protection level | partial | `rg "log::|println!|console.log" src src-tauri/src`; settles on whether secrets appear in any sink |
-| **16.3.1** | All authentication operations are logged, success and failure | partial | Perform one successful and one failed unlock; check for entries |
-| **16.3.2** | Failed authorization attempts are logged | partial | Invoke a command against a vault the profile does not own; check for a denial record |
+| **16.3.1** | All authentication operations are logged, success and failure | partial | Perform one successful and one failed unlock; absence of entries settles it as unmet |
+| **16.3.2** | Failed authorization attempts are logged | partial | Invoke a command against a vault the profile does not own; absence of a denial record settles it as unmet |
 | **16.3.4** | Unexpected errors and security-control failures are logged | partial | Force a logo.dev failure; settles on whether the failure is recorded without secrets |
-| **16.5.1** | A generic message is returned on error, with no stack traces or secrets | partial | Trigger a Rust error; confirm the UI does not print raw `String` errors containing paths |
+| **16.5.1** | A generic message is returned on error, with no stack traces or secrets | partial | Trigger a Rust error; a raw filesystem path in the UI settles it as unmet |
 | **16.5.3** | The application fails closed and securely on exceptions | partial | Interrupt a save; settles on whether a partial vault file can result |
 
 ## 4. Dropped ASVS families, and why
@@ -232,8 +233,8 @@ than the control describes; `unknown` means it cannot be decided without inspect
 3. **Operating-system entry points (G3).** Deep links, launch `argv`, and second-instance activation are ways
    for another local process to inject data into the app. ASVS has no chapter for this; 3.7.2 covers only
    in-app redirects. Tauri documents static-scheme matching, the single-instance-first ordering, and warns
-   that "the user could trigger a fake deep link manually by including the URL as argument", so the app must
-   still validate URL shape.
+   that "the user could trigger a fake deep link manually by including the URL as argument", so URL-shape
+   validation remains the application's responsibility.
 
 **Where the ASVS covers something Tauri does not:** V11 cryptography, V14 data classification, V16 logging
 and error handling, V2 input validation, and V6 authentication quality have no Tauri guidance beyond generic
