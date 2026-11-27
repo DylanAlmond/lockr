@@ -35,6 +35,10 @@ The version stamp on a vault's on-disk format (`schema_version`). It tells the a
 
 The copy of a vault's encrypted file written immediately before a schema migration persists. Named `<vault_id>.vault.OLD`, sitting beside the vault file. It is the rollback path for a migration: the app itself never reads, rewrites, or deletes it — restoring it manually rolls the vault back.
 
+## Tombstone
+
+The renamed file a deleted vault leaves behind: `<vault_id>.vault.deleted`, with a numbered suffix when the same vault is deleted again. Deletion moves the encrypted file out of the live `.vault` set instead of unlinking it, so its bytes can be recovered from disk out of band. The app never lists, unlocks, reads, or deletes a tombstone, and there is no in-app restore.
+
 ## Safe View Pattern
 
 The rule that secrets never leave the backend except through an explicit per-field fetch:

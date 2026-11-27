@@ -118,12 +118,8 @@ impl UserManager {
 
         let user_file: User = serde_json::from_str(&json)?;
 
-        let decrypted_key = decrypt(&master_password, &user_file.encrypted_secret_key)?;
-
-        // Verify it's exactly 32 bytes (sanity check)
-        if decrypted_key.len() != 32 {
-            return Err(VaultError::Decryption("Invalid secret key length".into()));
-        }
+        let decrypted_key =
+            Self::decrypt_secret_key(master_password, &user_file.encrypted_secret_key)?;
 
         self.active_user_id = Some(user_file.id);
         self.active_path = Some(path);
@@ -146,6 +142,51 @@ impl UserManager {
         self.active_path = None;
 
         Ok(())
+    }
+
+    /// The profile of the user that is currently logged in.
+    pub fn active_user(&self) -> Result<User, VaultError> {
+        let user_id = self
+            .active_user_id
+            .as_ref()
+            .ok_or_else(|| VaultError::UserNotFound("No user is active".into()))?;
+
+        self.get_user(user_id)
+    }
+
+    /// Re-check the master password of the active user without changing the
+    /// session. The decrypted secret key is zeroized before returning, so a
+    /// successful check leaves no new copy of key material behind.
+    pub fn verify_password(&self, master_password: &str) -> Result<(), VaultError> {
+        let user = self.active_user()?;
+
+        let mut secret_key =
+            Self::decrypt_secret_key(master_password, &user.encrypted_secret_key)?;
+        secret_key.zeroize();
+
+        Ok(())
+    }
+
+    /// Whether the active user's profile lists this vault. The profile's
+    /// `vault_ids` is the access-control list vault-scoped commands check.
+    pub fn owns_vault(&self, vault_id: VaultId) -> Result<bool, VaultError> {
+        Ok(self.active_user()?.vault_ids.contains(&vault_id))
+    }
+
+    /// Decrypt a user's secret key with a master password and sanity-check
+    /// its length. Callers that only verify the password must zeroize the
+    /// returned key.
+    fn decrypt_secret_key(
+        master_password: &str,
+        encrypted_secret_key: &str,
+    ) -> Result<Vec<u8>, VaultError> {
+        let secret_key = decrypt(master_password, encrypted_secret_key)?;
+
+        if secret_key.len() != 32 {
+            return Err(VaultError::Decryption("Invalid secret key length".into()));
+        }
+
+        Ok(secret_key)
     }
 
     /// Get the user profile metadata (does NOT decrypt the secret key)
@@ -312,6 +353,39 @@ mod tests {
         // Assertion: Should fail (AES-GCM will fail to decrypt, resulting in an error)
         assert!(result.is_err());
         assert!(matches!(result, Err(VaultError::AuthenticationFailed)));
+
+        std::fs::remove_dir_all(temp_dir).ok();
+    }
+
+    #[test]
+    fn test_verify_password_checks_the_active_users_master_password() {
+        let temp_dir = setup();
+        let mut manager = UserManager::new(temp_dir.clone()).unwrap();
+        manager.register("Frank".to_string(), "CorrectHorse").unwrap();
+
+        manager.verify_password("CorrectHorse").unwrap();
+
+        let wrong = manager.verify_password("WrongHorse");
+        assert!(
+            matches!(wrong, Err(VaultError::AuthenticationFailed)),
+            "got {wrong:?}"
+        );
+
+        std::fs::remove_dir_all(temp_dir).ok();
+    }
+
+    #[test]
+    fn test_owns_vault_reflects_the_active_users_vault_list() {
+        let temp_dir = setup();
+        let mut manager = UserManager::new(temp_dir.clone()).unwrap();
+        manager.register("Grace".to_string(), "Password").unwrap();
+
+        let owned = Uuid::new_v4();
+        let foreign = Uuid::new_v4();
+        manager.add_vault_to_user(owned).unwrap();
+
+        assert!(manager.owns_vault(owned).unwrap());
+        assert!(!manager.owns_vault(foreign).unwrap());
 
         std::fs::remove_dir_all(temp_dir).ok();
     }

@@ -17,6 +17,9 @@ pub enum VaultError {
     #[error("Vault is locked")]
     VaultLocked,
 
+    #[error("Not authorised")]
+    Unauthorised,
+
     #[error("Encryption error: {0}")]
     Encryption(String),
 

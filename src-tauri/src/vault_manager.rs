@@ -1,4 +1,8 @@
-use std::{collections::HashMap, fs::read_dir, path::PathBuf};
+use std::{
+    collections::HashMap,
+    fs::read_dir,
+    path::{Path, PathBuf},
+};
 
 use chrono::Utc;
 use uuid::Uuid;
@@ -72,6 +76,34 @@ impl VaultManager {
     /// ever written at migration time, never on plain unlocks.
     fn vault_backup_path(&self, vault_id: VaultId) -> PathBuf {
         self.vaults_dir.join(format!("{}.vault.OLD", vault_id))
+    }
+
+    /// Get path to the tombstone a deleted vault is moved to. Deletion never
+    /// unlinks vault data: the file is renamed out of the enumerable `.vault`
+    /// set, so it can still be recovered from disk out of band.
+    fn vault_tombstone_path(&self, vault_id: VaultId) -> PathBuf {
+        self.vaults_dir.join(format!("{}.vault.deleted", vault_id))
+    }
+
+    /// A tombstone path that does not exist yet. A repeated delete of the same
+    /// vault gets a numbered suffix rather than overwriting the earlier copy,
+    /// so every deletion stays recoverable.
+    fn next_tombstone_path(&self, vault_id: VaultId) -> PathBuf {
+        let base = self.vault_tombstone_path(vault_id);
+        if !base.exists() {
+            return base;
+        }
+
+        let mut generation = 1u32;
+        loop {
+            let candidate = self
+                .vaults_dir
+                .join(format!("{}.{}.vault.deleted", vault_id, generation));
+            if !candidate.exists() {
+                return candidate;
+            }
+            generation += 1;
+        }
     }
 
     /// Check if a SPECIFIC vault is unlocked
@@ -360,16 +392,32 @@ impl VaultManager {
         Ok(())
     }
 
-    /// Delete a given vault file and remove from RAM.
-    pub fn delete_vault(&mut self, vault_id: VaultId) -> Result<(), VaultError> {
+    /// Move a vault file to a fresh tombstone and remove it from RAM.
+    ///
+    /// The file is renamed rather than unlinked, and the `.deleted` suffix
+    /// keeps it out of `list_vault_ids`. Returns the tombstone path so the
+    /// caller can undo the move if a later step fails.
+    pub fn delete_vault(&mut self, vault_id: VaultId) -> Result<PathBuf, VaultError> {
+        let path = self.vault_path(vault_id);
+        if !path.exists() {
+            return Err(VaultError::NotFound(vault_id.to_string()));
+        }
+
         if self.is_vault_unlocked(vault_id) {
             self.lock_vault(Some(vault_id));
         }
 
-        let path = self.vault_path(vault_id);
+        let tombstone = self.next_tombstone_path(vault_id);
+        std::fs::rename(path, &tombstone)?;
 
-        std::fs::remove_file(path).map_err(VaultError::Io)?;
+        Ok(tombstone)
+    }
 
+    /// Undo a tombstone move, putting the vault file back in its live place.
+    /// Used to keep the file and the user's vault list consistent when
+    /// recording a deletion fails.
+    pub fn restore_vault(&self, vault_id: VaultId, tombstone: &Path) -> Result<(), VaultError> {
+        std::fs::rename(tombstone, self.vault_path(vault_id))?;
         Ok(())
     }
 
@@ -2305,5 +2353,90 @@ mod tests {
         );
 
         assert_eq!(manager.get_vault(vault.id).unwrap().items.len(), 0);
+    }
+
+    // ============ Deletion ============
+
+    #[test]
+    fn test_delete_vault_moves_file_to_tombstone() {
+        let temp_dir = setup();
+        let mut manager = VaultManager::new(temp_dir.clone()).unwrap();
+        let vault = manager
+            .create_vault("Test".to_string(), "#6240BF".to_string(), MASTER_PW, &KEY)
+            .unwrap();
+
+        let vaults_dir = temp_dir.join("vaults");
+        let live = vaults_dir.join(format!("{}.vault", vault.id));
+        let tombstone = vaults_dir.join(format!("{}.vault.deleted", vault.id));
+        let original = std::fs::read(&live).unwrap();
+
+        manager.delete_vault(vault.id).unwrap();
+
+        assert!(!live.exists(), "the live vault file must be moved aside");
+        assert!(tombstone.exists(), "the deleted vault must be recoverable");
+        assert_eq!(
+            std::fs::read(&tombstone).unwrap(),
+            original,
+            "the tombstone must preserve the vault bytes"
+        );
+        assert!(
+            !manager.is_vault_unlocked(vault.id),
+            "deletion must drop the unlocked vault from RAM"
+        );
+    }
+
+    #[test]
+    fn test_delete_vault_never_overwrites_an_existing_tombstone() {
+        let temp_dir = setup();
+        let mut manager = VaultManager::new(temp_dir.clone()).unwrap();
+        let vault = manager
+            .create_vault("Test".to_string(), "#6240BF".to_string(), MASTER_PW, &KEY)
+            .unwrap();
+
+        let first = manager.delete_vault(vault.id).unwrap();
+
+        // Put a live copy back beside the existing tombstone (an operator
+        // restoring from disk, or a file sync) and delete it again: the first
+        // tombstone must survive.
+        std::fs::copy(
+            &first,
+            temp_dir
+                .join("vaults")
+                .join(format!("{}.vault", vault.id)),
+        )
+        .unwrap();
+        let second = manager.delete_vault(vault.id).unwrap();
+
+        assert_ne!(
+            first, second,
+            "the second tombstone must not reuse the first path"
+        );
+        assert!(
+            first.exists() && second.exists(),
+            "both deletions must stay recoverable"
+        );
+    }
+
+    #[test]
+    fn test_restore_vault_puts_the_file_back() {
+        let temp_dir = setup();
+        let mut manager = VaultManager::new(temp_dir.clone()).unwrap();
+        let vault = manager
+            .create_vault("Test".to_string(), "#6240BF".to_string(), MASTER_PW, &KEY)
+            .unwrap();
+
+        let live = temp_dir
+            .join("vaults")
+            .join(format!("{}.vault", vault.id));
+        let tombstone = manager.delete_vault(vault.id).unwrap();
+        assert!(!live.exists());
+
+        manager.restore_vault(vault.id, &tombstone).unwrap();
+
+        assert!(
+            live.exists(),
+            "restore must put the vault back in its live place"
+        );
+        assert!(!tombstone.exists(), "restore must consume the tombstone");
     }
 }

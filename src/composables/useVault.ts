@@ -89,13 +89,15 @@ export function useVault() {
     }
   }
 
-  async function deleteVault(vaultId: string): Promise<boolean> {
+  /** Returns the failure message, or null when the vault was deleted. */
+  async function deleteVault(vaultId: string, masterPassword: string): Promise<string | null> {
+    error.value = null;
     try {
-      await invoke('delete_vault', { vaultId });
-      return true;
+      await invoke('delete_vault', { vaultId, masterPassword });
+      return null;
     } catch (e) {
       error.value = String(e);
-      return false;
+      return error.value;
     }
   }
 

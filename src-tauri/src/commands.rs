@@ -9,7 +9,8 @@ use zxcvbn::{zxcvbn, Entropy};
 use crate::user_manager::UserManager;
 use crate::vault_manager::VaultManager;
 use crate::{
-    ItemFilter, IntoSafe, NewItemData, SafeItem, SafeVault, SecretInput, User, UserId,
+    ItemFilter, IntoSafe, NewItemData, SafeItem, SafeVault, SecretInput, User, UserId, VaultError,
+    VaultId,
 };
 
 pub struct ManagerState {
@@ -24,6 +25,37 @@ pub struct ManagerState {
 }
 
 type AppState<'a> = State<'a, Mutex<ManagerState>>;
+
+impl ManagerState {
+    /// Delete a vault the active user owns, after re-checking the master
+    /// password.
+    ///
+    /// A compromised renderer must not be able to destroy vaults with a
+    /// single IPC call, so deletion is gated on ownership and on a fresh
+    /// password verification rather than on the cached session alone.
+    pub fn delete_vault(
+        &mut self,
+        vault_id: VaultId,
+        master_password: &str,
+    ) -> Result<(), VaultError> {
+        if !self.user_manager.owns_vault(vault_id)? {
+            return Err(VaultError::Unauthorised);
+        }
+
+        self.user_manager.verify_password(master_password)?;
+
+        // Move the file aside first, then record the deletion. If recording
+        // fails, put the file back rather than leaving an orphaned tombstone
+        // the user's profile still points at.
+        let tombstone = self.vault_manager.delete_vault(vault_id)?;
+        if let Err(error) = self.user_manager.remove_vault_from_user(vault_id) {
+            let _ = self.vault_manager.restore_vault(vault_id, &tombstone);
+            return Err(error);
+        }
+
+        Ok(())
+    }
+}
 
 #[tauri::command]
 pub fn register_user(
@@ -295,18 +327,16 @@ pub fn update_vault(
 }
 
 #[tauri::command]
-pub fn delete_vault(state: AppState, vault_id: String) -> Result<(), String> {
+pub fn delete_vault(
+    state: AppState,
+    vault_id: String,
+    master_password: String,
+) -> Result<(), String> {
     let mut state = state.lock().map_err(|e| e.to_string())?;
     let id = Uuid::parse_str(&vault_id).map_err(|e| e.to_string())?;
 
     state
-        .user_manager
-        .remove_vault_from_user(id)
-        .map_err(|e| e.to_string())?;
-
-    state
-        .vault_manager
-        .delete_vault(id)
+        .delete_vault(id, &master_password)
         .map_err(|e| e.to_string())
 }
 
@@ -497,4 +527,120 @@ pub fn update_item_secret(
         .vault_manager
         .update_item_secret(vid, iid, &field_key, value)
         .map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    const MASTER_PW: &str = "CorrectHorseBattery";
+    const SECRET_KEY: [u8; 32] = [7u8; 32];
+
+    /// A logged-in user with one owned vault and the raw managers, so the
+    /// deletion preconditions can be exercised without a Tauri harness.
+    fn setup() -> (ManagerState, VaultId, PathBuf) {
+        let temp_dir = std::env::temp_dir().join(format!("commands_test_{}", Uuid::new_v4()));
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let mut user_manager = UserManager::new(temp_dir.clone()).unwrap();
+        user_manager
+            .register("Alice".to_string(), MASTER_PW)
+            .unwrap();
+
+        let mut vault_manager = VaultManager::new(temp_dir.clone()).unwrap();
+        let vault = vault_manager
+            .create_vault(
+                "Personal".to_string(),
+                "#6240BF".to_string(),
+                MASTER_PW,
+                &SECRET_KEY,
+            )
+            .unwrap();
+        user_manager.add_vault_to_user(vault.id).unwrap();
+
+        let state = ManagerState {
+            vault_manager,
+            user_manager,
+            master_password: Some(MASTER_PW.to_string()),
+            secret_key: Some(SECRET_KEY.to_vec()),
+        };
+
+        (state, vault.id, temp_dir)
+    }
+
+    #[test]
+    fn test_delete_vault_requires_the_master_password() {
+        let (mut state, vault_id, temp_dir) = setup();
+
+        let result = state.delete_vault(vault_id, "WrongPassword");
+
+        assert!(
+            matches!(result, Err(VaultError::AuthenticationFailed)),
+            "got {result:?}"
+        );
+        assert!(
+            temp_dir
+                .join("vaults")
+                .join(format!("{}.vault", vault_id))
+                .exists(),
+            "a failed re-authentication must leave the vault in place"
+        );
+        assert!(
+            state.user_manager.owns_vault(vault_id).unwrap(),
+            "a failed re-authentication must not touch the user's vault list"
+        );
+    }
+
+    #[test]
+    fn test_delete_vault_rejects_a_vault_the_active_user_does_not_own() {
+        let (mut state, _, temp_dir) = setup();
+        let foreign = state
+            .vault_manager
+            .create_vault(
+                "Foreign".to_string(),
+                "#000000".to_string(),
+                MASTER_PW,
+                &SECRET_KEY,
+            )
+            .unwrap();
+
+        let result = state.delete_vault(foreign.id, MASTER_PW);
+
+        assert!(
+            matches!(result, Err(VaultError::Unauthorised)),
+            "got {result:?}"
+        );
+        assert!(
+            temp_dir
+                .join("vaults")
+                .join(format!("{}.vault", foreign.id))
+                .exists(),
+            "an unowned vault must not be deleted"
+        );
+    }
+
+    #[test]
+    fn test_delete_vault_tombstones_an_owned_vault() {
+        let (mut state, vault_id, temp_dir) = setup();
+
+        state.delete_vault(vault_id, MASTER_PW).unwrap();
+
+        let vaults_dir = temp_dir.join("vaults");
+        assert!(
+            !vaults_dir.join(format!("{}.vault", vault_id)).exists(),
+            "the live vault file must be moved aside"
+        );
+        assert!(
+            vaults_dir
+                .join(format!("{}.vault.deleted", vault_id))
+                .exists(),
+            "the deleted vault must be recoverable"
+        );
+        assert!(
+            !state.user_manager.owns_vault(vault_id).unwrap(),
+            "deletion must remove the vault from the user's list"
+        );
+    }
 }
