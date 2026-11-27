@@ -349,7 +349,77 @@ arrives.
 
 ---
 
+## Group 4 — Authentication and session
+
+### F-18 — No master-password policy at registration · P2
+
+```
+A1  ← E1  ADV3
+Rule broken: 6.2.1, 6.2.4, 6.2.11
+```
+
+`register_user` accepts any non-empty master password. The strength meter exists but is called only
+from the item editors (`AccountEdit`, `NewAccountForm`); registration never invokes it. The backend
+`zxcvbn(&password, &[])` call also passes an empty user-input list, so product names and context
+words are not penalised even where the meter does run.
+
+The master password is the only factor protecting the vault, so a weak one is a weak vault regardless
+of Argon2id. The KDF raises the cost per guess; it does not make a guessable password unguessable.
+
+**Evidence:** `commands.rs` `register_user`; `commands.rs:330`;
+`RegisterView.vue:27`; no strength call on the registration path.
+**Fix:** enforce a minimum length and a strength floor at registration, pass product/context words to
+zxcvbn. **Status:** open.
+
+### F-19 — No idle or absolute session timeout · P2
+
+```
+A1–A3  ← E1  ADV3
+Rule broken: 7.3.1, 7.3.2, 7.1.1
+```
+
+A session lasts from login until `logout` or process exit. `lock_vault` exists as a command but has
+no renderer call site and no timer drives it. An unattended machine therefore leaves every vault
+unlocked and every secret one reveal away.
+
+**Evidence:** `commands.rs` `login_user` / `logout`; `lock_vault` registered at `lib.rs:61` with no
+call site; no timer or inactivity listener anywhere in `src/`.
+**Fix:** an idle lock with a documented timeout, plus an absolute lifetime. **Status:** open.
+
+### F-20 — No documented authentication or session policy · P3
+
+```
+A1  ← E1  ADV1
+Rule broken: 6.1.1, 7.1.1
+```
+
+There is no written statement of the master-password rules, the lock semantics, or the intended
+session lifetime. Without it, F-18 and F-19 cannot be judged as defects rather than choices.
+
+**Evidence:** no auth or session document in `docs/`.
+**Fix:** a short auth policy covering password rules, lock triggers and session lifetime.
+**Status:** open.
+
+### Two standing deviations, not new findings
+
+- **6.2.12 (breached-password check)** — a breach lookup needs a network call, which contradicts the
+  local-first premise. Recorded in `security-level.md` §4 as a standing deviation.
+- **6.3.3 (MFA)** — the only factor is the master password; the secret key is encrypted under it and
+  is not independent possession. Recorded in `security-level.md` §4.1.
+
+### Controls that held
+
+- Password inputs are `type=password` on both auth screens, with an explicit reveal toggle.
+- The exact password string is used for the KDF — no trimming or case folding.
+- No forced rotation exists.
+- `logout` flushes, locks every vault and zeroizes the cached password and key, so a terminated
+  session is unusable (7.4.1).
+- `delete_user` locks all vaults and zeroizes before deleting the profile, so account termination does
+  end sessions (7.4.2). Profile *switching* is the separate F-13.
+
+---
+
 ## Pending
 
-Groups 4–7: authentication and session; cryptography, files and data protection; supply chain and
-release hygiene; logging and error handling.
+Groups 5–7: cryptography, files and data protection; supply chain and release hygiene; logging and
+error handling.

@@ -37,7 +37,7 @@ The rule: every row has one, and `manual:` states why automation is not possible
 | Runner | OpenCode session |
 | Toolchain | Node 24.19 · Rust stable · Tauri 2.11.4 |
 | Automated checks | not run — harness pending [#74](https://github.com/DylanAlmond/lockr/issues/74) |
-| Rows: met / partial / deviated / n/a | group 1: 5 / 7 / 7 / 3 · group 2: 14 / 3 / 6 / 1 · group 3: 4 / 1 / 8 / 0 |
+| Rows: met / partial / deviated / n/a | group 1: 5 / 7 / 7 / 3 · group 2: 14 / 3 / 6 / 1 · group 3: 4 / 1 / 8 / 0 · group 4: 5 / 0 / 10 / 0 |
 
 ---
 
@@ -126,21 +126,21 @@ The rule: every row has one, and `manual:` states why automation is not possible
 
 | ID | Requirement | Verification | Status | Notes |
 |---|---|---|---|---|
-| 6.1.1 | Rate limiting and anti-automation documented | `manual:document review (auth policy)` | unchecked | |
-| 6.2.1 | Minimum password length enforced | `rust:password-policy` | unchecked | known open |
-| 6.2.4 | New passwords checked against common passwords | `rust:password-policy` | unchecked | known open: zxcvbn advisory |
-| 6.2.6 | Password inputs use `type=password` | `static:source-password-inputs` | unchecked | |
-| 6.2.8 | Passwords verified exactly, no truncation/case change | `rust:password-verbatim` | unchecked | |
-| 6.2.10 | No forced periodic credential rotation | `rust:no-rotation` | unchecked | |
-| 6.2.11 | Context-specific word list blocks guessable passwords | `rust:password-policy` | unchecked | |
-| 6.2.12 | Breached-password check | `manual:standing deviation (local-first)` | unchecked | record the trade-off in security-level §4 |
-| 6.3.1 | Brute-force/credential-stuffing controls | `rust:login-rate-limit` | unchecked | known open |
-| 6.3.3 | MFA, or a combination of single factors | `manual:standing deviation (single factor)` | unchecked | security-level §4.1 |
-| 7.1.1 | Inactivity and absolute lifetimes documented with justification | `manual:document review (session policy)` | unchecked | |
-| 7.3.1 | Inactivity timeout forces re-authentication | `renderer:idle-lock` | unchecked | known open: no idle lock |
-| 7.3.2 | Absolute maximum session lifetime | `renderer:idle-lock` | unchecked | |
-| 7.4.1 | A terminated session cannot be used again | `rust:session-termination` | unchecked | |
-| 7.4.2 | Terminating an account terminates its sessions | `rust:profile-switch-lock` | unchecked | known open |
+| 6.1.1 | Rate limiting and anti-automation documented | `manual:document review (auth policy)` | deviated | F-20 — no auth policy document; F-15 has the code gap |
+| 6.2.1 | Minimum password length enforced | `rust:password-policy` | deviated | F-18 — `register_user` accepts any non-empty password |
+| 6.2.4 | New passwords checked against common passwords | `rust:password-policy` | deviated | F-18 — zxcvbn runs only on item passwords in the UI, never at registration |
+| 6.2.6 | Password inputs use `type=password` | `static:source-password-inputs` | met | `RegisterView.vue:54`, `LoginView.vue:102` |
+| 6.2.8 | Passwords verified exactly, no truncation/case change | `rust:password-verbatim` | met | The exact string is fed to the KDF; no trim or case folding in `user_manager.login` |
+| 6.2.10 | No forced periodic credential rotation | `rust:no-rotation` | met | `User` has no expiry or rotation field; no prompt exists |
+| 6.2.11 | Context-specific word list blocks guessable passwords | `rust:password-policy` | deviated | F-18 — `zxcvbn(&password, &[])` passes an empty user-input list, so product names are not penalised |
+| 6.2.12 | Breached-password check | `manual:standing deviation (local-first)` | deviated | `security-level.md` §4 — a breach lookup needs a network call |
+| 6.3.1 | Brute-force/credential-stuffing controls | `rust:login-rate-limit` | deviated | F-15 — no counter, delay or lockout |
+| 6.3.3 | MFA, or a combination of single factors | `manual:standing deviation (single factor)` | deviated | `security-level.md` §4.1 — the secret key is not independent possession |
+| 7.1.1 | Inactivity and absolute lifetimes documented with justification | `manual:document review (session policy)` | deviated | F-20 — no lifetime is defined, documented or implemented |
+| 7.3.1 | Inactivity timeout forces re-authentication | `renderer:idle-lock` | deviated | F-19 — a session lasts until logout or exit |
+| 7.3.2 | Absolute maximum session lifetime | `renderer:idle-lock` | deviated | F-19 — none |
+| 7.4.1 | A terminated session cannot be used again | `rust:session-termination` | met | `logout` flushes, locks every vault and zeroizes the cached password and key; a locked vault is unreachable |
+| 7.4.2 | Terminating an account terminates its sessions | `rust:profile-switch-lock` | met | `delete_user` locks all vaults and zeroizes before removing the profile (profile *switching* is F-13) |
 
 ---
 
