@@ -21,7 +21,7 @@ ASVS/Tauri id on each row preserves the standard mapping.
 5. Findings go to `findings.md` with the citation format in `threat-model.md` §11; the checklist row
    links to the finding id.
 
-**Status vocabulary:** `unchecked` · `met` · `partial` · `deviated` · `n/a` · `fixed`.
+**Status key:** ⬜ unchecked · ✅ met · ⚠️ partial · ❌ deviated · ➖ n/a · 🛠️ fixed.
 Definitions in `evidence-standard.md` §3.
 
 **Verification ids:** `static:<slug>` (scripts over config, source, or built artefact) ·
@@ -37,7 +37,7 @@ The rule: every row has one, and `manual:` states why automation is not possible
 | Runner | OpenCode session |
 | Toolchain | Node 24.19 · Rust stable · Tauri 2.11.4 |
 | Automated checks | not run — harness pending [#74](https://github.com/DylanAlmond/lockr/issues/74) |
-| Rows: met / partial / deviated / n/a | g1 5/7/7/3 · g2 14/3/6/1 · g3 4/1/8/0 · g4 5/0/10/0 · g5 9/3/1/2 · g6 2/2/4/0 · g7 1/1/5/0 — **total 40 met · 17 partial · 41 deviated · 6 n/a · 1 unchecked** |
+| Rows (✅/⚠️/❌/➖) | g1 5/7/7/3 · g2 14/3/6/1 · g3 4/1/8/0 · g4 5/0/10/0 · g5 9/3/1/2 · g6 2/2/4/0 · g7 1/1/5/0 — **total ✅ 40 · ⚠️ 17 · ❌ 41 · ➖ 6 · ⬜ 1** |
 
 ---
 
@@ -45,29 +45,29 @@ The rule: every row has one, and `manual:` states why automation is not possible
 
 | ID | Requirement | Verification | Status | Notes |
 |---|---|---|---|---|
-| T-01 | `app.security.csp` is set; no `unsafe-eval`/`unsafe-inline` for scripts | `static:csp` | deviated | F-01 — `csp: null` |
-| T-02 | `devCsp` set separately; dev relaxations never ship | `static:csp-dev` | deviated | F-01 — unset, so dev inherits the (absent) production policy |
-| T-03 | `dangerousDisableAssetCspModification` absent/false, so Tauri injects nonces | `static:csp-injection` | met | unset → default `false` |
-| T-04 | Capabilities are least privilege; no cross-window merge | `static:capabilities` | partial | F-04 — `core:default` + `core:window:default` over-grant |
-| T-05 | Commands are scoped per window/capability, not all-to-all | `static:command-scope` | deviated | F-05 — plain `tauri_build::build()` |
-| T-06 | IPC args deserialise into concrete types and are validated | `rust:command-validation` | partial | Typed via serde; bounds not enforced (F-01 group 3 will confirm authorisation) |
-| T-07 | Isolation pattern used, or its absence recorded as a decision | `manual:declined in tauri-config-baseline.md §6` | met | Declined, recorded |
-| T-08 | `freezePrototype` is `true` | `static:freeze-prototype` | deviated | F-03 — unset → default `false` |
-| T-09 | Devtools unavailable in release builds | `manual:launch release build, attempt inspector` | partial | No `devtools` Cargo feature; release artefact not inspected |
-| T-10 | No source maps in the release bundle | `static:bundle-sourcemaps` | partial | F-07 — absent by Vite default, not asserted |
-| T-11 | `withGlobalTauri` is `false` | `static:config-global-tauri` | met | unset → default `false` |
-| T-12 | Single-instance plugin first, `argv`/`cwd` treated as untrusted | `manual:not present in 1.2.0` | n/a | No single-instance plugin; row stays for a future addition |
-| T-13 | Deep links statically configured; URL shape validated | `manual:not present in 1.2.0` | n/a | No deep-link plugin |
-| T-14 | Updater artifacts signed, key pinned, HTTPS endpoints | `manual:not present in 1.2.0` | n/a | No updater |
-| T-15 | Installers code-signed per platform | `manual:signtool/codesign on release artifact` | unchecked | No release artefact available in this run |
-| T-16 | Headers supply nosniff and the supported security set | `static:headers` | deviated | F-06 — `headers` unset |
-| T-17 | Opener scope narrower than `opener:default` | `static:capabilities-opener` | deviated | F-02 — `opener:default` granted, unused |
-| 8.2.1 | Function-level access restricted to explicit permission | `static:capabilities` | partial | F-04 |
-| 13.1.1 | All communication needs documented, including destinations | `manual:document review (docs + bundle host list)` | partial | F-08 — no written inventory; bundle hosts are `w3.org` and `vuejs.org` |
-| 13.2.2 | Local interfaces reachable only with least privilege | `static:capabilities` | partial | F-04 |
-| 13.2.4 | Allowlist defines external resources the app may contact | `static:csp` + `static:bundle-external-hosts` | deviated | F-01 — no CSP source list; no egress allowlist |
-| 13.3.1 | Secrets are not in source or build artifacts | `static:bundle-secrets` | met | Token and logo.dev absent from `dist/` |
-| 13.3.2 | Access to secret assets follows least privilege | `static:bundle-secrets` | met | `.env` untracked; token not inlined |
+| T-01 | `app.security.csp` is set; no `unsafe-eval`/`unsafe-inline` for scripts | `static:csp` | ❌ | F-01 — `csp: null` |
+| T-02 | `devCsp` set separately; dev relaxations never ship | `static:csp-dev` | ❌ | F-01 — unset, so dev inherits the (absent) production policy |
+| T-03 | `dangerousDisableAssetCspModification` absent/false, so Tauri injects nonces | `static:csp-injection` | ✅ | unset → default `false` |
+| T-04 | Capabilities are least privilege; no cross-window merge | `static:capabilities` | ⚠️ | F-04 — `core:default` + `core:window:default` over-grant |
+| T-05 | Commands are scoped per window/capability, not all-to-all | `static:command-scope` | ❌ | F-05 — plain `tauri_build::build()` |
+| T-06 | IPC args deserialise into concrete types and are validated | `rust:command-validation` | ⚠️ | Typed via serde; bounds not enforced (F-01 group 3 will confirm authorisation) |
+| T-07 | Isolation pattern used, or its absence recorded as a decision | `manual:declined in tauri-config-baseline.md §6` | ✅ | Declined, recorded |
+| T-08 | `freezePrototype` is `true` | `static:freeze-prototype` | ❌ | F-03 — unset → default `false` |
+| T-09 | Devtools unavailable in release builds | `manual:launch release build, attempt inspector` | ⚠️ | No `devtools` Cargo feature; release artefact not inspected |
+| T-10 | No source maps in the release bundle | `static:bundle-sourcemaps` | ⚠️ | F-07 — absent by Vite default, not asserted |
+| T-11 | `withGlobalTauri` is `false` | `static:config-global-tauri` | ✅ | unset → default `false` |
+| T-12 | Single-instance plugin first, `argv`/`cwd` treated as untrusted | `manual:not present in 1.2.0` | ➖ | No single-instance plugin; row stays for a future addition |
+| T-13 | Deep links statically configured; URL shape validated | `manual:not present in 1.2.0` | ➖ | No deep-link plugin |
+| T-14 | Updater artifacts signed, key pinned, HTTPS endpoints | `manual:not present in 1.2.0` | ➖ | No updater |
+| T-15 | Installers code-signed per platform | `manual:signtool/codesign on release artifact` | ⬜ | No release artefact available in this run |
+| T-16 | Headers supply nosniff and the supported security set | `static:headers` | ❌ | F-06 — `headers` unset |
+| T-17 | Opener scope narrower than `opener:default` | `static:capabilities-opener` | ❌ | F-02 — `opener:default` granted, unused |
+| 8.2.1 | Function-level access restricted to explicit permission | `static:capabilities` | ⚠️ | F-04 |
+| 13.1.1 | All communication needs documented, including destinations | `manual:document review (docs + bundle host list)` | ⚠️ | F-08 — no written inventory; bundle hosts are `w3.org` and `vuejs.org` |
+| 13.2.2 | Local interfaces reachable only with least privilege | `static:capabilities` | ⚠️ | F-04 |
+| 13.2.4 | Allowlist defines external resources the app may contact | `static:csp` + `static:bundle-external-hosts` | ❌ | F-01 — no CSP source list; no egress allowlist |
+| 13.3.1 | Secrets are not in source or build artifacts | `static:bundle-secrets` | ✅ | Token and logo.dev absent from `dist/` |
+| 13.3.2 | Access to secret assets follows least privilege | `static:bundle-secrets` | ✅ | `.env` untracked; token not inlined |
 
 ---
 
@@ -75,30 +75,30 @@ The rule: every row has one, and `manual:` states why automation is not possible
 
 | ID | Requirement | Verification | Status | Notes |
 |---|---|---|---|---|
-| 1.2.1 | Output encoding matches the context written into | `static:source-injection-sinks` | met | 0 hits for `v-html`/`innerHTML`/`outerHTML`/`document.write`/`insertAdjacentHTML`/`srcdoc`/`DOMParser`; text goes through Vue interpolation |
-| 1.2.2 | Dynamically built URLs are encoded and protocol-restricted | `static:source-url-attrs` | partial | F-09 — nine `<img :src>` bindings accept a backend string with no scheme allowlist |
-| 1.2.3 | Dynamically built JS/JSON is injection-safe | `static:source-injection-sinks` | met | No runtime template compilation; 0 hits for `new Function`/`eval(`/`compile(` |
-| 1.3.2 | No `eval` or dynamic code execution | `static:source-eval` | met | 0 hits in `src/` |
-| 1.3.3 | Dangerous-context data is sanitised and length-limited | `rust:command-bounds` | partial | No dangerous context exists; string length is unbounded on IPC (assessed in group 3) |
-| 1.3.4 | User-supplied SVG validated/sanitised | `renderer:upload-rasterisation` | met | Uploads decode via `Image`, draw to canvas, re-encode PNG/WebP; stored as an image `data:` URL |
-| 1.5.2 | Deserialisation uses an allowlist of types | `rust:serde-targets` | met | Backend deserialises into concrete structs; renderer `invoke<T>` is an erased assertion but receives JSON, not code |
-| 3.2.1 | Controls prevent rendering in the wrong context | `static:source-injection-sinks` | met | Same evidence as 1.2.1 |
-| 3.2.2 | Text rendered with text APIs, not HTML sinks | `static:source-injection-sinks` | met | Same evidence as 1.2.1 |
-| 3.4.3 | CSP sets `object-src`, `base-uri`, and an allowlist | `static:csp` | deviated | F-01 — `csp: null` |
-| 3.4.4 | `X-Content-Type-Options: nosniff` on responses | `static:headers` | deviated | F-06 — `headers` unset |
-| 3.4.5 | Referrer policy limits path/query leakage | `manual:not settable via app.security.headers in Tauri 2.11` | partial | No header possible; residual leakage is the app origin only, and F-09 is the one outbound path |
-| 3.5.5 | `postMessage` dropped unless origin trusted and syntax valid | `static:source-postmessage` | met | 0 listeners in `src/`; IPC is `invoke` only |
-| 3.7.2 | Automatic redirects only to allowlisted destinations | `static:source-navigation` | met | 0 `href`/`action`/`formaction`/`window.open`; router targets are constants or encoded params |
-| 14.2.1 | Sensitive data never placed in a URL or query | `static:source-url-secrets` | met | 0 secret tokens in `src/router`, `useSearch`, `useRouterHistory` |
-| 14.2.3 | Defined sensitive data not sent to untrusted parties | `static:csp` + `static:bundle-external-hosts` | deviated | F-09 — a vault-derived icon URL can reach an arbitrary host |
-| 14.3.1 | Authenticated data cleared when the session ends | `renderer:secret-lifetime` | deviated | F-10 — revealed secrets persist until item change |
-| 14.3.2 | Anti-caching headers keep sensitive data out of caches | `manual:custom protocol serves static assets only; no sensitive HTTP response` | n/a | Vault data travels over IPC, which is not an HTTP cache participant |
-| 14.3.3 | Browser storage holds no sensitive data | `static:source-storage` + `renderer:never-hold` | met | 0 hits for `localStorage`/`sessionStorage`/`indexedDB` |
-| P-03 | Reveal re-masks within 10 s and on blur/visibility | `renderer:reveal-timeout` | deviated | F-10 — no timer; the 10 `@blur` handlers are field-level, not window-level |
-| P-04 | Clipboard compare-and-cleared at 30 s, cleared on logout | `renderer:clipboard-expiry` | deviated | F-11 — one `writeText`, no clear anywhere |
-| P-05 | Never-hold list respected | `renderer:never-hold` | met | No store/URL/storage path holds a secret; console calls log history and labels, not values (the `seed.ts` fixture logs a test password but is not bundled) |
-| P-06 | Masking invariant | `renderer:masking` | met | Masks expose nothing of the value except the card number's last four digits, by design (R-S6) |
-| P-07 | No false zeroization of JS strings | `static:source-zeroization` | met | 0 scrub attempts; the policy forbids them (R-S7) |
+| 1.2.1 | Output encoding matches the context written into | `static:source-injection-sinks` | ✅ | 0 hits for `v-html`/`innerHTML`/`outerHTML`/`document.write`/`insertAdjacentHTML`/`srcdoc`/`DOMParser`; text goes through Vue interpolation |
+| 1.2.2 | Dynamically built URLs are encoded and protocol-restricted | `static:source-url-attrs` | ⚠️ | F-09 — nine `<img :src>` bindings accept a backend string with no scheme allowlist |
+| 1.2.3 | Dynamically built JS/JSON is injection-safe | `static:source-injection-sinks` | ✅ | No runtime template compilation; 0 hits for `new Function`/`eval(`/`compile(` |
+| 1.3.2 | No `eval` or dynamic code execution | `static:source-eval` | ✅ | 0 hits in `src/` |
+| 1.3.3 | Dangerous-context data is sanitised and length-limited | `rust:command-bounds` | ⚠️ | No dangerous context exists; string length is unbounded on IPC (assessed in group 3) |
+| 1.3.4 | User-supplied SVG validated/sanitised | `renderer:upload-rasterisation` | ✅ | Uploads decode via `Image`, draw to canvas, re-encode PNG/WebP; stored as an image `data:` URL |
+| 1.5.2 | Deserialisation uses an allowlist of types | `rust:serde-targets` | ✅ | Backend deserialises into concrete structs; renderer `invoke<T>` is an erased assertion but receives JSON, not code |
+| 3.2.1 | Controls prevent rendering in the wrong context | `static:source-injection-sinks` | ✅ | Same evidence as 1.2.1 |
+| 3.2.2 | Text rendered with text APIs, not HTML sinks | `static:source-injection-sinks` | ✅ | Same evidence as 1.2.1 |
+| 3.4.3 | CSP sets `object-src`, `base-uri`, and an allowlist | `static:csp` | ❌ | F-01 — `csp: null` |
+| 3.4.4 | `X-Content-Type-Options: nosniff` on responses | `static:headers` | ❌ | F-06 — `headers` unset |
+| 3.4.5 | Referrer policy limits path/query leakage | `manual:not settable via app.security.headers in Tauri 2.11` | ⚠️ | No header possible; residual leakage is the app origin only, and F-09 is the one outbound path |
+| 3.5.5 | `postMessage` dropped unless origin trusted and syntax valid | `static:source-postmessage` | ✅ | 0 listeners in `src/`; IPC is `invoke` only |
+| 3.7.2 | Automatic redirects only to allowlisted destinations | `static:source-navigation` | ✅ | 0 `href`/`action`/`formaction`/`window.open`; router targets are constants or encoded params |
+| 14.2.1 | Sensitive data never placed in a URL or query | `static:source-url-secrets` | ✅ | 0 secret tokens in `src/router`, `useSearch`, `useRouterHistory` |
+| 14.2.3 | Defined sensitive data not sent to untrusted parties | `static:csp` + `static:bundle-external-hosts` | ❌ | F-09 — a vault-derived icon URL can reach an arbitrary host |
+| 14.3.1 | Authenticated data cleared when the session ends | `renderer:secret-lifetime` | ❌ | F-10 — revealed secrets persist until item change |
+| 14.3.2 | Anti-caching headers keep sensitive data out of caches | `manual:custom protocol serves static assets only; no sensitive HTTP response` | ➖ | Vault data travels over IPC, which is not an HTTP cache participant |
+| 14.3.3 | Browser storage holds no sensitive data | `static:source-storage` + `renderer:never-hold` | ✅ | 0 hits for `localStorage`/`sessionStorage`/`indexedDB` |
+| P-03 | Reveal re-masks within 10 s and on blur/visibility | `renderer:reveal-timeout` | ❌ | F-10 — no timer; the 10 `@blur` handlers are field-level, not window-level |
+| P-04 | Clipboard compare-and-cleared at 30 s, cleared on logout | `renderer:clipboard-expiry` | ❌ | F-11 — one `writeText`, no clear anywhere |
+| P-05 | Never-hold list respected | `renderer:never-hold` | ✅ | No store/URL/storage path holds a secret; console calls log history and labels, not values (the `seed.ts` fixture logs a test password but is not bundled) |
+| P-06 | Masking invariant | `renderer:masking` | ✅ | Masks expose nothing of the value except the card number's last four digits, by design (R-S6) |
+| P-07 | No false zeroization of JS strings | `static:source-zeroization` | ✅ | 0 scrub attempts; the policy forbids them (R-S7) |
 
 ---
 
@@ -106,19 +106,19 @@ The rule: every row has one, and `manual:` states why automation is not possible
 
 | ID | Requirement | Verification | Status | Notes |
 |---|---|---|---|---|
-| 2.1.1 | Input-validation rules documented per data item | `manual:document review (validation rules)` | deviated | F-16 — no validation-rules document exists |
-| 2.2.1 | All input validated against allowlists/patterns/ranges | `rust:command-validation` | partial | UUIDs parsed, kinds and field keys checked; no string length bounds (F-17) |
-| 2.2.2 | Validation enforced at a trusted layer | `rust:command-validation` | met | All checks live in `commands.rs`/`vault_manager.rs`, never only in Vue |
-| 2.3.2 | Documented business-logic limits implemented | `rust:login-limits` | deviated | F-16 — no documented limits, no attempt counter |
-| 2.4.1 | Anti-automation controls on abusable functions | `rust:login-rate-limit` | deviated | F-15 — `login_user` has no counter, delay or lockout |
-| 8.1.1 | Function- and data-authorisation rules documented | `manual:document review (command→caller matrix)` | deviated | F-16 — `vault_ids` is the only ACL and it is undocumented as such |
-| 8.2.2 | Data-specific access requires explicit permission (IDOR/BOLA) | `rust:ownership` | deviated | F-12 — no command checks `vault_id ∈ active_user.vault_ids`; F-14 — deletion needs no ownership |
-| 8.2.3 | Field-level read/write restricted (BOPLA) | `rust:secret-surface` | met | `SafeItem`/`SafeVault` structurally omit secrets; `get_item_secret` is the only egress and validates kind + field key |
-| 8.3.1 | Authorisation enforced at a trusted layer | `rust:ownership` | deviated | F-12 — "vault unlocked" is the whole gate |
-| 15.3.1 | Only required fields returned from data objects | `rust:secret-surface` | met | Safe-view pattern; note bodies and identity PII remain, by product design |
-| 15.3.3 | Mass assignment prevented with per-action allowlists | `rust:update-allowlist` | met | `update_item` takes explicit named fields; ids, timestamps and `vault_ids` are not caller-settable |
-| P-01 | Renderer untrusted for authorisation (R1/R2) | `rust:ownership` | deviated | F-12 — the core trusts the ids the renderer sends |
-| P-02 | Switching the active User ends every prior session | `rust:profile-switch-lock` | deviated | F-13 — `login_user` overwrites credentials without locking |
+| 2.1.1 | Input-validation rules documented per data item | `manual:document review (validation rules)` | ❌ | F-16 — no validation-rules document exists |
+| 2.2.1 | All input validated against allowlists/patterns/ranges | `rust:command-validation` | ⚠️ | UUIDs parsed, kinds and field keys checked; no string length bounds (F-17) |
+| 2.2.2 | Validation enforced at a trusted layer | `rust:command-validation` | ✅ | All checks live in `commands.rs`/`vault_manager.rs`, never only in Vue |
+| 2.3.2 | Documented business-logic limits implemented | `rust:login-limits` | ❌ | F-16 — no documented limits, no attempt counter |
+| 2.4.1 | Anti-automation controls on abusable functions | `rust:login-rate-limit` | ❌ | F-15 — `login_user` has no counter, delay or lockout |
+| 8.1.1 | Function- and data-authorisation rules documented | `manual:document review (command→caller matrix)` | ❌ | F-16 — `vault_ids` is the only ACL and it is undocumented as such |
+| 8.2.2 | Data-specific access requires explicit permission (IDOR/BOLA) | `rust:ownership` | ❌ | F-12 — no command checks `vault_id ∈ active_user.vault_ids`; F-14 — deletion needs no ownership |
+| 8.2.3 | Field-level read/write restricted (BOPLA) | `rust:secret-surface` | ✅ | `SafeItem`/`SafeVault` structurally omit secrets; `get_item_secret` is the only egress and validates kind + field key |
+| 8.3.1 | Authorisation enforced at a trusted layer | `rust:ownership` | ❌ | F-12 — "vault unlocked" is the whole gate |
+| 15.3.1 | Only required fields returned from data objects | `rust:secret-surface` | ✅ | Safe-view pattern; note bodies and identity PII remain, by product design |
+| 15.3.3 | Mass assignment prevented with per-action allowlists | `rust:update-allowlist` | ✅ | `update_item` takes explicit named fields; ids, timestamps and `vault_ids` are not caller-settable |
+| P-01 | Renderer untrusted for authorisation (R1/R2) | `rust:ownership` | ❌ | F-12 — the core trusts the ids the renderer sends |
+| P-02 | Switching the active User ends every prior session | `rust:profile-switch-lock` | ❌ | F-13 — `login_user` overwrites credentials without locking |
 
 ---
 
@@ -126,21 +126,21 @@ The rule: every row has one, and `manual:` states why automation is not possible
 
 | ID | Requirement | Verification | Status | Notes |
 |---|---|---|---|---|
-| 6.1.1 | Rate limiting and anti-automation documented | `manual:document review (auth policy)` | deviated | F-20 — no auth policy document; F-15 has the code gap |
-| 6.2.1 | Minimum password length enforced | `rust:password-policy` | deviated | F-18 — `register_user` accepts any non-empty password |
-| 6.2.4 | New passwords checked against common passwords | `rust:password-policy` | deviated | F-18 — zxcvbn runs only on item passwords in the UI, never at registration |
-| 6.2.6 | Password inputs use `type=password` | `static:source-password-inputs` | met | `RegisterView.vue:54`, `LoginView.vue:102` |
-| 6.2.8 | Passwords verified exactly, no truncation/case change | `rust:password-verbatim` | met | The exact string is fed to the KDF; no trim or case folding in `user_manager.login` |
-| 6.2.10 | No forced periodic credential rotation | `rust:no-rotation` | met | `User` has no expiry or rotation field; no prompt exists |
-| 6.2.11 | Context-specific word list blocks guessable passwords | `rust:password-policy` | deviated | F-18 — `zxcvbn(&password, &[])` passes an empty user-input list, so product names are not penalised |
-| 6.2.12 | Breached-password check | `manual:standing deviation (local-first)` | deviated | `security-level.md` §4 — a breach lookup needs a network call |
-| 6.3.1 | Brute-force/credential-stuffing controls | `rust:login-rate-limit` | deviated | F-15 — no counter, delay or lockout |
-| 6.3.3 | MFA, or a combination of single factors | `manual:standing deviation (single factor)` | deviated | `security-level.md` §4.1 — the secret key is not independent possession |
-| 7.1.1 | Inactivity and absolute lifetimes documented with justification | `manual:document review (session policy)` | deviated | F-20 — no lifetime is defined, documented or implemented |
-| 7.3.1 | Inactivity timeout forces re-authentication | `renderer:idle-lock` | deviated | F-19 — a session lasts until logout or exit |
-| 7.3.2 | Absolute maximum session lifetime | `renderer:idle-lock` | deviated | F-19 — none |
-| 7.4.1 | A terminated session cannot be used again | `rust:session-termination` | met | `logout` flushes, locks every vault and zeroizes the cached password and key; a locked vault is unreachable |
-| 7.4.2 | Terminating an account terminates its sessions | `rust:profile-switch-lock` | met | `delete_user` locks all vaults and zeroizes before removing the profile (profile *switching* is F-13) |
+| 6.1.1 | Rate limiting and anti-automation documented | `manual:document review (auth policy)` | ❌ | F-20 — no auth policy document; F-15 has the code gap |
+| 6.2.1 | Minimum password length enforced | `rust:password-policy` | ❌ | F-18 — `register_user` accepts any non-empty password |
+| 6.2.4 | New passwords checked against common passwords | `rust:password-policy` | ❌ | F-18 — zxcvbn runs only on item passwords in the UI, never at registration |
+| 6.2.6 | Password inputs use `type=password` | `static:source-password-inputs` | ✅ | `RegisterView.vue:54`, `LoginView.vue:102` |
+| 6.2.8 | Passwords verified exactly, no truncation/case change | `rust:password-verbatim` | ✅ | The exact string is fed to the KDF; no trim or case folding in `user_manager.login` |
+| 6.2.10 | No forced periodic credential rotation | `rust:no-rotation` | ✅ | `User` has no expiry or rotation field; no prompt exists |
+| 6.2.11 | Context-specific word list blocks guessable passwords | `rust:password-policy` | ❌ | F-18 — `zxcvbn(&password, &[])` passes an empty user-input list, so product names are not penalised |
+| 6.2.12 | Breached-password check | `manual:standing deviation (local-first)` | ❌ | `security-level.md` §4 — a breach lookup needs a network call |
+| 6.3.1 | Brute-force/credential-stuffing controls | `rust:login-rate-limit` | ❌ | F-15 — no counter, delay or lockout |
+| 6.3.3 | MFA, or a combination of single factors | `manual:standing deviation (single factor)` | ❌ | `security-level.md` §4.1 — the secret key is not independent possession |
+| 7.1.1 | Inactivity and absolute lifetimes documented with justification | `manual:document review (session policy)` | ❌ | F-20 — no lifetime is defined, documented or implemented |
+| 7.3.1 | Inactivity timeout forces re-authentication | `renderer:idle-lock` | ❌ | F-19 — a session lasts until logout or exit |
+| 7.3.2 | Absolute maximum session lifetime | `renderer:idle-lock` | ❌ | F-19 — none |
+| 7.4.1 | A terminated session cannot be used again | `rust:session-termination` | ✅ | `logout` flushes, locks every vault and zeroizes the cached password and key; a locked vault is unreachable |
+| 7.4.2 | Terminating an account terminates its sessions | `rust:profile-switch-lock` | ✅ | `delete_user` locks all vaults and zeroizes before removing the profile (profile *switching* is F-13) |
 
 ---
 
@@ -148,21 +148,21 @@ The rule: every row has one, and `manual:` states why automation is not possible
 
 | ID | Requirement | Verification | Status | Notes |
 |---|---|---|---|---|
-| 5.1.1 | Permitted file types, extensions and max sizes documented | `manual:document review (upload spec)` | deviated | F-21 — no upload spec; `accept="image/*"` and a client MIME check are the only limits |
-| 5.2.2 | Accepted files checked so content matches extension | `renderer:upload-rasterisation` | met | The file is decoded as an image, drawn to canvas and re-encoded PNG/WebP; a non-image polyglot fails to decode |
-| 5.3.2 | File paths built from trusted/internal data | `rust:uuid-traversal` | met | Every id is parsed to `Uuid` before `vault_path()` formats it; free-text fields never reach a path |
-| 5.4.1 | Download filenames validated or app-generated | `manual:no export/download feature in 1.2.0` | n/a | Import/export are disabled "coming soon" in Settings |
-| 11.1.2 | Cryptographic inventory lists keys, algorithms, uses | `manual:document review (crypto inventory)` | partial | F-22 — primitives are in `crypto.rs`; ADR-0001 covers versioning, not an inventory |
-| 11.2.1 | Industry-validated crypto implementations | `static:deps-crypto` | met | `argon2` 0.5 and `aes-gcm` 0.11, both maintained RustCrypto crates |
-| 11.2.2 | Crypto agility: algorithms/keys can be swapped | `rust:format-version` | partial | `schema_version` enables migration, but the file format carries no algorithm identifier, so a cipher change is a schema migration |
-| 11.3.2 | Approved ciphers and modes (AEAD) | `rust:crypto-attrs` | met | AES-256-GCM, 12-byte nonce |
-| 11.4.1 | Approved hash functions | `rust:crypto-attrs` | met | No MD5/SHA-1 anywhere; Argon2id is the only KDF |
-| 11.4.2 | Passwords stored with a computationally intensive KDF | `rust:crypto-attrs` | met | Argon2id v0x13, m=64 MiB, t=3, p=4 — above the OWASP minimum |
-| 11.5.1 | Non-guessable values from a CSPRNG with ≥128 bits | `rust:crypto-attrs` | met | `OsRng` for the 32-byte salt, 12-byte nonce and 32-byte secret key |
-| 12.2.1 | TLS for all external HTTP, no insecure fallback | `static:bundle-external-hosts` | met | The shipped app makes no external HTTP call; the only `http://` is the dev server |
-| 12.3.2 | TLS clients validate certificates | `manual:no external TLS calls in 1.2.0` | n/a | Nothing to validate; revisit with any updater or network feature |
-| 14.1.1 | Sensitive data identified and classified | `manual:document review (threat-model.md §2)` | met | A1–A6 in three tiers |
-| 14.1.2 | Each protection level has documented requirements | `manual:document review (threat-model.md §2)` | partial | F-23 — tiers are classified, but per-tier handling rules are incomplete |
+| 5.1.1 | Permitted file types, extensions and max sizes documented | `manual:document review (upload spec)` | ❌ | F-21 — no upload spec; `accept="image/*"` and a client MIME check are the only limits |
+| 5.2.2 | Accepted files checked so content matches extension | `renderer:upload-rasterisation` | ✅ | The file is decoded as an image, drawn to canvas and re-encoded PNG/WebP; a non-image polyglot fails to decode |
+| 5.3.2 | File paths built from trusted/internal data | `rust:uuid-traversal` | ✅ | Every id is parsed to `Uuid` before `vault_path()` formats it; free-text fields never reach a path |
+| 5.4.1 | Download filenames validated or app-generated | `manual:no export/download feature in 1.2.0` | ➖ | Import/export are disabled "coming soon" in Settings |
+| 11.1.2 | Cryptographic inventory lists keys, algorithms, uses | `manual:document review (crypto inventory)` | ⚠️ | F-22 — primitives are in `crypto.rs`; ADR-0001 covers versioning, not an inventory |
+| 11.2.1 | Industry-validated crypto implementations | `static:deps-crypto` | ✅ | `argon2` 0.5 and `aes-gcm` 0.11, both maintained RustCrypto crates |
+| 11.2.2 | Crypto agility: algorithms/keys can be swapped | `rust:format-version` | ⚠️ | `schema_version` enables migration, but the file format carries no algorithm identifier, so a cipher change is a schema migration |
+| 11.3.2 | Approved ciphers and modes (AEAD) | `rust:crypto-attrs` | ✅ | AES-256-GCM, 12-byte nonce |
+| 11.4.1 | Approved hash functions | `rust:crypto-attrs` | ✅ | No MD5/SHA-1 anywhere; Argon2id is the only KDF |
+| 11.4.2 | Passwords stored with a computationally intensive KDF | `rust:crypto-attrs` | ✅ | Argon2id v0x13, m=64 MiB, t=3, p=4 — above the OWASP minimum |
+| 11.5.1 | Non-guessable values from a CSPRNG with ≥128 bits | `rust:crypto-attrs` | ✅ | `OsRng` for the 32-byte salt, 12-byte nonce and 32-byte secret key |
+| 12.2.1 | TLS for all external HTTP, no insecure fallback | `static:bundle-external-hosts` | ✅ | The shipped app makes no external HTTP call; the only `http://` is the dev server |
+| 12.3.2 | TLS clients validate certificates | `manual:no external TLS calls in 1.2.0` | ➖ | Nothing to validate; revisit with any updater or network feature |
+| 14.1.1 | Sensitive data identified and classified | `manual:document review (threat-model.md §2)` | ✅ | A1–A6 in three tiers |
+| 14.1.2 | Each protection level has documented requirements | `manual:document review (threat-model.md §2)` | ⚠️ | F-23 — tiers are classified, but per-tier handling rules are incomplete |
 
 **Scope note:** these rows assert configuration and usage facts (primitives, parameters, formats).
 They are not cryptanalysis; correctness of the vault format is ADR-0001's authority (threat model
@@ -174,14 +174,14 @@ AS6).
 
 | ID | Requirement | Verification | Status | Notes |
 |---|---|---|---|---|
-| 13.4.1 | No VCS metadata shipped in the deployment | `manual:inspect installer payload` | partial | `dist/` contains no `.git`/`.svn`; the installer payload was not available to inspect |
-| 13.4.2 | Debug modes disabled in production | `manual:release build, attempt inspector` | partial | No `devtools` Cargo feature; no release artefact to confirm against |
-| 15.1.2 | SBOM/inventory of third-party libraries maintained | `manual:no SBOM tooling in 1.2.0` | deviated | F-24 — no generator, no committed inventory, no audit script |
-| 15.2.1 | No component past its remediation timeframe | `static:deps-audit` | deviated | F-25 — `vite` 6.4.3 carries 5 advisories; no timeframe or gate exists |
-| 15.2.3 | Production contains only required functionality | `static:bundle-dead-code` | met | `dist/` has no seed fixture, no source map, no token, no dev-only module |
-| 15.3.6 | JavaScript resists prototype pollution | `static:freeze-prototype` | deviated | F-03 — `freezePrototype` unset (default `false`) |
-| P-08 | Disabled-feature code and tokens absent from the bundle | `static:bundle-secrets` | met | 0 hits for `logo.dev`, `VITE_LOGO_API_TOKEN`, `Dev seed data`, `test12`; dead source remains (F-26) |
-| P-09 | No network egress from the renderer | `static:csp` + `static:bundle-external-hosts` | deviated | F-09 (icon URLs) and F-01 (no CSP) — the only host literals are `w3.org` and `vuejs.org` |
+| 13.4.1 | No VCS metadata shipped in the deployment | `manual:inspect installer payload` | ⚠️ | `dist/` contains no `.git`/`.svn`; the installer payload was not available to inspect |
+| 13.4.2 | Debug modes disabled in production | `manual:release build, attempt inspector` | ⚠️ | No `devtools` Cargo feature; no release artefact to confirm against |
+| 15.1.2 | SBOM/inventory of third-party libraries maintained | `manual:no SBOM tooling in 1.2.0` | ❌ | F-24 — no generator, no committed inventory, no audit script |
+| 15.2.1 | No component past its remediation timeframe | `static:deps-audit` | ❌ | F-25 — `vite` 6.4.3 carries 5 advisories; no timeframe or gate exists |
+| 15.2.3 | Production contains only required functionality | `static:bundle-dead-code` | ✅ | `dist/` has no seed fixture, no source map, no token, no dev-only module |
+| 15.3.6 | JavaScript resists prototype pollution | `static:freeze-prototype` | ❌ | F-03 — `freezePrototype` unset (default `false`) |
+| P-08 | Disabled-feature code and tokens absent from the bundle | `static:bundle-secrets` | ✅ | 0 hits for `logo.dev`, `VITE_LOGO_API_TOKEN`, `Dev seed data`, `test12`; dead source remains (F-26) |
+| P-09 | No network egress from the renderer | `static:csp` + `static:bundle-external-hosts` | ❌ | F-09 (icon URLs) and F-01 (no CSP) — the only host literals are `w3.org` and `vuejs.org` |
 
 ---
 
@@ -189,13 +189,13 @@ AS6).
 
 | ID | Requirement | Verification | Status | Notes |
 |---|---|---|---|---|
-| 16.1.1 | A log inventory covers events, format, storage, access, retention | `manual:document review (logging policy)` | deviated | F-27 — there is no log sink and no policy |
-| 16.2.5 | Logging of sensitive data follows its protection level | `static:source-logs` | met | Vacuously: no log sink, and no secret is written to stdout, stderr or the console (F-29 covers the identifier/path leaks that do occur) |
-| 16.3.1 | Authentication success and failure are logged | `rust:auth-logging` | deviated | F-27 — neither is recorded |
-| 16.3.2 | Failed authorisation attempts are logged | `rust:auth-logging` | deviated | F-27 — there is no authorisation check to fail |
-| 16.3.4 | Unexpected errors and control failures are logged | `rust:auth-logging` | deviated | F-27 |
-| 16.5.1 | Generic error messages, no stack traces or secrets | `rust:error-messages` | partial | F-29 — raw `io::Error`/serde strings reach the UI and include filesystem paths |
-| 16.5.3 | Application fails closed on exceptions | `rust:atomic-write` + `manual:failure injection` | deviated | F-28 — `std::fs::write` truncates in place; an interrupted save corrupts the vault |
+| 16.1.1 | A log inventory covers events, format, storage, access, retention | `manual:document review (logging policy)` | ❌ | F-27 — there is no log sink and no policy |
+| 16.2.5 | Logging of sensitive data follows its protection level | `static:source-logs` | ✅ | Vacuously: no log sink, and no secret is written to stdout, stderr or the console (F-29 covers the identifier/path leaks that do occur) |
+| 16.3.1 | Authentication success and failure are logged | `rust:auth-logging` | ❌ | F-27 — neither is recorded |
+| 16.3.2 | Failed authorisation attempts are logged | `rust:auth-logging` | ❌ | F-27 — there is no authorisation check to fail |
+| 16.3.4 | Unexpected errors and control failures are logged | `rust:auth-logging` | ❌ | F-27 |
+| 16.5.1 | Generic error messages, no stack traces or secrets | `rust:error-messages` | ⚠️ | F-29 — raw `io::Error`/serde strings reach the UI and include filesystem paths |
+| 16.5.3 | Application fails closed on exceptions | `rust:atomic-write` + `manual:failure injection` | ❌ | F-28 — `std::fs::write` truncates in place; an interrupted save corrupts the vault |
 
 ---
 
