@@ -132,7 +132,9 @@ Rule broken: 15.2.3, T-10
 plugin could reverse it silently.
 
 **Evidence:** `find dist -name '*.map'` → 0; no `sourcemap` key in `vite.config.ts`.
-**Fix:** `tauri-config-baseline.md` §7. **Status:** fix-specified.
+**Fix:** applied in `303b778` — `build.sourcemap` follows `TAURI_ENV_DEBUG`, so a release build cannot
+ship maps. Pinned by `static:sourcemap-config`.
+**Status:** fixed.
 
 ### F-08 — No documented inventory of allowed communication · P3
 
@@ -498,7 +500,8 @@ a reasonable choice; it is recorded here rather than in a document a reviewer ca
 
 **Evidence:** `crypto.rs:43-57,95`; `vault_manager.rs` save/load; `ADR-0001`.
 **Fix:** a crypto inventory section in the security-level document or its own `docs/` file.
-**Status:** open.
+**Status:** open. `static:deps-crypto` now asserts that `argon2` and `aes-gcm` resolve in the lockfile,
+but the inventory document is still missing.
 
 ### F-23 — Per-tier protection requirements are incomplete · P3
 
@@ -566,8 +569,10 @@ stated remediation timeframe, so the next advisory will be found the same way th
 accident.
 
 **Evidence:** dependency audit against the committed lockfile; `package.json` scripts contain no audit
-step. **Fix:** upgrade, then add an audit step and a remediation window.
-**Status:** open.
+step. **Fix:** applied in `303b778` — `vite` 6.4.3 → 6.4.6 and `vitest` 3.2.7 → 4.1.12 clear the
+advisories; `yarn audit` gates high/critical and `dependency-policy.md` records the remediation window.
+Pinned by `static:deps-audit`.
+**Status:** fixed.
 
 ### F-26 — A dead network path and its token remain in source · P3
 
@@ -585,7 +590,9 @@ back in the bundle.
 
 **Evidence:** `imageUpload.ts:263-310`; commented call sites at `AccountEdit.vue:130`,
 `NewAccountForm.vue:8`; bundle scan clean.
-**Fix:** delete the function and the token from `.env`. **Status:** open.
+**Fix:** applied in `303b778` — the function, the logo processor, the token reference and the
+commented call sites are gone; there is no `.env` in the tree. Pinned by `static:dead-logo-path`.
+**Status:** fixed.
 
 ### Controls that held
 

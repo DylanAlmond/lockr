@@ -3,8 +3,9 @@
 Recommendation for [#70](https://github.com/DylanAlmond/lockr/issues/70) (parent [#63](https://github.com/DylanAlmond/lockr/issues/63)).
 This is the diff-ready configuration and the reasoning for every non-default line.
 
-**Applied:** §1 in `1b0b571` (CSP) and `bcce2f5` (`freezePrototype`, `headers`), and §4/§5 in
-`bcce2f5`. §6 is the recorded decline; §7 (source maps) is still a recommendation (F-07).
+**Applied:** §1 in `1b0b571` (CSP) and `bcce2f5` (`freezePrototype`, `headers`), §4/§5 in
+`bcce2f5`, and §7 in `303b778` (source maps follow the Tauri debug flag). §6 is the recorded
+decline.
 
 Sources: Tauri 2 CSP docs (<https://v2.tauri.app/security/csp/>), the installed config schema
 (`node_modules/@tauri-apps/cli/config.schema.json`, Tauri CLI for `tauri` 2.11.4), and the

@@ -44,9 +44,10 @@ A test must print the checklist id it satisfies on failure, so a red run maps st
 One module per area, each exporting `{ id, run }`. `run.mjs` executes them all, prints every result,
 and exits non-zero if any check failed.
 
-**Implemented in `bcce2f5`:** `csp.mjs`, `capabilities.mjs` and `run.mjs`, wired as
-`yarn test:compliance`. `static:command-scope` is deferred until F-05; `source.mjs`, `bundle.mjs` and
-`deps.mjs` are still pending.
+**Implemented:** `csp.mjs`, `capabilities.mjs`, `hygiene.mjs` and `run.mjs`, wired as
+`yarn test:compliance`. `hygiene.mjs` covers `static:sourcemap-config`, `static:devtools-absent`,
+`static:dead-logo-path`, `static:deps-audit` and `static:deps-crypto`. `static:command-scope` is
+deferred until F-05; `source.mjs`, `bundle.mjs` and `deps.mjs` are still pending.
 
 ### `csp.mjs`
 
