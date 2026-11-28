@@ -3,7 +3,7 @@ use std::sync::Mutex;
 
 use tauri::State;
 use uuid::Uuid;
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 use zxcvbn::{zxcvbn, Entropy};
 
 use crate::user_manager::UserManager;
@@ -29,6 +29,14 @@ type AppState<'a> = State<'a, Mutex<ManagerState>>;
 /// Defaults for the vault created with a new profile.
 const DEFAULT_VAULT_NAME: &str = "Personal";
 const DEFAULT_VAULT_COLOUR: &str = "#6240BF";
+
+/// Parse the vault/item id pair shared by the item commands.
+fn parse_vault_item(vault_id: &str, item_id: &str) -> Result<(VaultId, ItemId), String> {
+    Ok((
+        Uuid::parse_str(vault_id).map_err(|e| e.to_string())?,
+        Uuid::parse_str(item_id).map_err(|e| e.to_string())?,
+    ))
+}
 
 impl ManagerState {
     /// Delete a vault the active user owns, after re-checking the master
@@ -66,6 +74,8 @@ impl ManagerState {
         self.vault_manager.flush_all()?;
         self.vault_manager.lock_vault(None);
         self.clear_credentials();
+        // Do not leave a copied secret on the clipboard after logout.
+        crate::clipboard::clear();
         self.user_manager.clear_active_user();
         Ok(())
     }
@@ -198,6 +208,22 @@ impl ManagerState {
     pub fn get_item_by_id(&self, item_id: ItemId) -> Result<SafeItem, VaultError> {
         let owned = self.owned_vault_ids()?;
         self.vault_manager.get_item_by_id_in(&owned, item_id)
+    }
+
+    /// The secret value a copy command needs, after ownership and field
+    /// validation. Kept out of the command so the checks are testable without
+    /// touching the OS clipboard.
+    fn item_secret_for_copy(
+        &self,
+        vault_id: VaultId,
+        item_id: ItemId,
+        field_key: &str,
+    ) -> Result<String, VaultError> {
+        self.require_owned_vault(vault_id)?;
+
+        self.vault_manager
+            .get_item_secret(vault_id, item_id, field_key)?
+            .ok_or_else(|| VaultError::Validation("This field has no value".to_string()))
     }
 
     /// Flush unsaved changes for the active user's vaults only.
@@ -437,8 +463,7 @@ pub fn get_item_password_strength(
     item_id: String,
 ) -> Result<Entropy, String> {
     let state = state.lock().map_err(|e| e.to_string())?;
-    let vid = Uuid::parse_str(&vault_id).map_err(|e| e.to_string())?;
-    let iid = Uuid::parse_str(&item_id).map_err(|e| e.to_string())?;
+    let (vid, iid) = parse_vault_item(&vault_id, &item_id)?;
 
     state.require_owned_vault(vid).map_err(|e| e.to_string())?;
 
@@ -528,8 +553,7 @@ pub fn update_item(
     data: Option<NewItemData>,
 ) -> Result<SafeItem, String> {
     let mut state = state.lock().map_err(|e| e.to_string())?;
-    let vid = Uuid::parse_str(&vault_id).map_err(|e| e.to_string())?;
-    let iid = Uuid::parse_str(&item_id).map_err(|e| e.to_string())?;
+    let (vid, iid) = parse_vault_item(&vault_id, &item_id)?;
 
     state.require_owned_vault(vid).map_err(|e| e.to_string())?;
 
@@ -542,8 +566,7 @@ pub fn update_item(
 #[tauri::command]
 pub fn delete_item(state: AppState, vault_id: String, item_id: String) -> Result<(), String> {
     let mut state = state.lock().map_err(|e| e.to_string())?;
-    let vid = Uuid::parse_str(&vault_id).map_err(|e| e.to_string())?;
-    let iid = Uuid::parse_str(&item_id).map_err(|e| e.to_string())?;
+    let (vid, iid) = parse_vault_item(&vault_id, &item_id)?;
 
     state.require_owned_vault(vid).map_err(|e| e.to_string())?;
 
@@ -603,8 +626,7 @@ pub fn get_item_secret(
     field_key: String,
 ) -> Result<Option<String>, String> {
     let state = state.lock().map_err(|e| e.to_string())?;
-    let vid = Uuid::parse_str(&vault_id).map_err(|e| e.to_string())?;
-    let iid = Uuid::parse_str(&item_id).map_err(|e| e.to_string())?;
+    let (vid, iid) = parse_vault_item(&vault_id, &item_id)?;
 
     state.require_owned_vault(vid).map_err(|e| e.to_string())?;
 
@@ -612,6 +634,31 @@ pub fn get_item_secret(
         .vault_manager
         .get_item_secret(vid, iid, &field_key)
         .map_err(|e| e.to_string())
+}
+
+/// Copy a secret field to the OS clipboard without returning it to the
+/// renderer. The clipboard is cleared after 30 seconds if it still holds the
+/// copied value (secret-lifetime R-S4).
+#[tauri::command]
+pub fn copy_item_secret(
+    state: AppState,
+    vault_id: String,
+    item_id: String,
+    field_key: String,
+) -> Result<(), String> {
+    // Fetch under the state lock, then release it before the clipboard work
+    // so a slow clipboard does not stall every other command.
+    let value = {
+        let state = state.lock().map_err(|e| e.to_string())?;
+        let (vid, iid) = parse_vault_item(&vault_id, &item_id)?;
+        let value = state
+            .item_secret_for_copy(vid, iid, &field_key)
+            .map_err(|e| e.to_string())?;
+
+        Zeroizing::new(value)
+    };
+
+    crate::clipboard::write_secret_and_arm_clear(value.as_str())
 }
 
 #[tauri::command]
@@ -623,8 +670,7 @@ pub fn update_item_secret(
     value: Option<String>,
 ) -> Result<(), String> {
     let mut state = state.lock().map_err(|e| e.to_string())?;
-    let vid = Uuid::parse_str(&vault_id).map_err(|e| e.to_string())?;
-    let iid = Uuid::parse_str(&item_id).map_err(|e| e.to_string())?;
+    let (vid, iid) = parse_vault_item(&vault_id, &item_id)?;
 
     state.require_owned_vault(vid).map_err(|e| e.to_string())?;
 
@@ -799,6 +845,63 @@ mod tests {
         let result = state.require_owned_vault(owned);
         assert!(
             matches!(result, Err(VaultError::UserNotFound(_))),
+            "got {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_item_secret_for_copy_returns_the_value_of_an_owned_field() {
+        let (mut state, owned, _) = setup();
+        let item = add_account(&mut state, owned, "copy-user");
+        state
+            .vault_manager
+            .update_item_secret(
+                owned,
+                item,
+                crate::SECRET_FIELD_PASSWORD,
+                Some("s3cret".to_string()),
+            )
+            .unwrap();
+
+        let value = state
+            .item_secret_for_copy(owned, item, crate::SECRET_FIELD_PASSWORD)
+            .unwrap();
+
+        assert_eq!(value, "s3cret");
+    }
+
+    #[test]
+    fn test_item_secret_for_copy_rejects_an_unowned_vault() {
+        let (mut state, _, _) = setup();
+        let foreign = add_unowned_unlocked_vault(&mut state);
+        let item = add_account(&mut state, foreign, "foreign-user");
+        state
+            .vault_manager
+            .update_item_secret(
+                foreign,
+                item,
+                crate::SECRET_FIELD_PASSWORD,
+                Some("s3cret".to_string()),
+            )
+            .unwrap();
+
+        let result = state.item_secret_for_copy(foreign, item, crate::SECRET_FIELD_PASSWORD);
+
+        assert!(
+            matches!(result, Err(VaultError::Unauthorised)),
+            "got {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_item_secret_for_copy_reports_a_missing_value() {
+        let (mut state, owned, _) = setup();
+        let item = add_account(&mut state, owned, "no-secret");
+
+        let result = state.item_secret_for_copy(owned, item, crate::SECRET_FIELD_PASSWORD);
+
+        assert!(
+            matches!(result, Err(VaultError::Validation(ref msg)) if msg.contains("no value")),
             "got {result:?}"
         );
     }

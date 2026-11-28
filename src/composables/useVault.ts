@@ -153,6 +153,21 @@ export function useVault() {
     }
   }
 
+  /** Copy a secret through the core; the value never returns to the renderer. */
+  async function copyItemSecret(
+    vaultId: string,
+    itemId: string,
+    fieldKey: string
+  ): Promise<boolean> {
+    try {
+      await invoke('copy_item_secret', { vaultId, itemId, fieldKey });
+      return true;
+    } catch (e) {
+      error.value = String(e);
+      return false;
+    }
+  }
+
   async function updateItemSecret(
     vaultId: string,
     itemId: string,
@@ -299,6 +314,7 @@ export function useVault() {
 
     // Per-field secrets
     getItemSecret,
+    copyItemSecret,
     updateItemSecret,
     getItemPasswordStrength,
 

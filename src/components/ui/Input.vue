@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { Eye, EyeOff } from '@lucide/vue';
-import { computed, ref, useAttrs, type Component } from 'vue';
+import { computed, useAttrs, type Component } from 'vue';
+import { useSecretReveal } from '../../composables/useSecretReveal.ts';
 
 interface Props {
   modelValue?: string | null;
@@ -34,7 +35,7 @@ const inputAttrs = computed(() => {
   return rest;
 });
 
-const showPassword = ref(false);
+const { isRevealed: showPassword, toggle: toggleReveal } = useSecretReveal();
 
 const inputType = computed(() => {
   if (props.type !== 'password') {
@@ -51,8 +52,10 @@ const localValue = computed({
 
 const hasPasswordToggle = computed(() => props.type === 'password');
 
-function togglePassword() {
-  showPassword.value = !showPassword.value;
+async function togglePassword() {
+  // The field's own value: reveal it even while empty so the toggle still
+  // tracks the revealed state.
+  await toggleReveal(async () => props.modelValue ?? '');
 }
 </script>
 

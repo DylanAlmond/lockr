@@ -26,6 +26,7 @@ uuid = { version = "1.23.4", features = ["v4"] }
 chrono = { version = "0.4.45", features = ["serde"] }
 argon2 = { version = "0.5.3", features = ["std"] }
 aes-gcm = "0.11.0"
+arboard = { version = "3", default-features = false }
 base64 = "0.22.1"
 rand = "0.10.1"
 zeroize = { version = "1.9.0", features = ["derive"] }

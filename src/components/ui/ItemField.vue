@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { ref, computed, onUnmounted, watch } from 'vue';
-import { Copy, Check } from '@lucide/vue';
+import { computed } from 'vue';
+import { Copy } from '@lucide/vue';
 import Button from './Button.vue';
 import { ACCOUNT_PASSWORD_MASK } from '../../util/secrets.ts';
 
@@ -11,6 +11,8 @@ interface Props {
   label: string;
   displayValue?: string | null;
   copyValue?: CopyableValue;
+  /** Copy through the core (secrets): true on success, false on failure. */
+  copyAction?: () => Promise<boolean>;
   canCopy?: boolean;
   type?: 'text' | 'email' | 'tel' | 'password';
   modelValue?: string | null;
@@ -35,10 +37,8 @@ const emit = defineEmits<{
   (e: 'blur'): void;
 }>();
 
-const copied = ref(false);
-let cooldownTimer: ReturnType<typeof setTimeout> | null = null;
-
 const hasCopyValue = computed(() => {
+  if (props.copyAction) return true;
   if (props.input) return !!props.modelValue;
   if (typeof props.copyValue === 'function') return true;
   if (props.copyValue !== undefined && props.copyValue !== null) return !!props.copyValue;
@@ -46,61 +46,31 @@ const hasCopyValue = computed(() => {
 });
 
 async function handleCopy() {
-  let valueToCopy: string | null = null;
-
-  if (props.input && props.modelValue) {
-    valueToCopy = props.modelValue;
-  } else if (typeof props.copyValue === 'function') {
-    valueToCopy = await props.copyValue();
-  } else if (props.copyValue !== undefined && props.copyValue !== null) {
-    valueToCopy = props.copyValue;
+  if (props.copyAction) {
+    // Secrets are copied by the core; the value never enters this component.
+    if (!(await props.copyAction())) return;
   } else {
-    valueToCopy = props.displayValue;
-  }
+    let valueToCopy: string | null = null;
 
-  if (!valueToCopy || valueToCopy === ACCOUNT_PASSWORD_MASK) return;
-
-  try {
-    await navigator.clipboard.writeText(valueToCopy);
-    copied.value = true;
-
-    if (cooldownTimer) clearTimeout(cooldownTimer);
-
-    cooldownTimer = setTimeout(() => {
-      copied.value = false;
-    }, 2000);
-  } catch (err) {
-    console.error('Failed to copy text:', err);
-  }
-}
-
-watch(
-  () => [
-    props.id,
-    props.label,
-    props.displayValue,
-    props.copyValue,
-    props.canCopy,
-    props.type,
-    props.modelValue,
-    props.input,
-    props.required,
-    props.placeholder
-  ],
-  () => {
-    if (cooldownTimer) {
-      clearTimeout(cooldownTimer);
-      cooldownTimer = null;
+    if (props.input && props.modelValue) {
+      valueToCopy = props.modelValue;
+    } else if (typeof props.copyValue === 'function') {
+      valueToCopy = await props.copyValue();
+    } else if (props.copyValue !== undefined && props.copyValue !== null) {
+      valueToCopy = props.copyValue;
+    } else {
+      valueToCopy = props.displayValue;
     }
 
-    copied.value = false;
-  },
-  { deep: true }
-);
+    if (!valueToCopy || valueToCopy === ACCOUNT_PASSWORD_MASK) return;
 
-onUnmounted(() => {
-  if (cooldownTimer) clearTimeout(cooldownTimer);
-});
+    try {
+      await navigator.clipboard.writeText(valueToCopy);
+    } catch (err) {
+      console.error('Failed to copy text:', err);
+    }
+  }
+}
 </script>
 
 <template>
@@ -123,8 +93,7 @@ onUnmounted(() => {
 
       <!-- Display Mode -->
       <template v-else>
-        <span v-if="copied" class="copied">Copied!</span>
-        <span v-else>{{ displayValue || 'No Value' }}</span>
+        <span>{{ displayValue || 'No Value' }}</span>
       </template>
     </div>
 
@@ -139,7 +108,7 @@ onUnmounted(() => {
         variant="outline"
         size="small"
         :disabled="!hasCopyValue"
-        :icon-component="copied ? Check : Copy"
+        :icon-component="Copy"
         @click="handleCopy"
       />
     </div>
@@ -167,10 +136,6 @@ onUnmounted(() => {
   .item-field {
     corner-shape: squircle;
   }
-}
-
-.copied {
-  color: var(--color-green);
 }
 
 .field-meta {

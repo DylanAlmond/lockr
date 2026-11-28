@@ -114,6 +114,7 @@ control.
 | `rust:session-termination` | `get_item_secret` after `logout` | `VaultLocked` |
 | `rust:uuid-traversal` | ids like `../x`, `..%2f`, non-UUID | rejected before any path use |
 | `rust:atomic-write` | save interrupted between write and rename | original file intact (after F-28) |
+| `rust:clipboard-expiry` | copied secret at the TTL, clipboard unchanged / replaced | cleared only if unchanged; a newer copy keeps its own window |
 | `rust:serde-targets` | malformed vault JSON | rejected with a typed error |
 | `rust:crypto-attrs` | Argon2 params and AEAD mode | Argon2id, m=64 MiB, t=3, p=4; AES-256-GCM |
 | `rust:format-version` | a saved vault | carries `schema_version` |
@@ -129,14 +130,16 @@ control.
 ## 5. Renderer suite
 
 `tests/compliance/*.test.ts`, vitest with jsdom and `@vue/test-utils`. Fake timers for anything
-time-based.
+time-based. **Implemented (F-10):** `tests/compliance/secret-reveal.test.ts` covers
+`renderer:reveal-timeout`.
+
+Clipboard expiry is `rust:clipboard-expiry`, not a renderer row: the copy path lives in the core
+(secret-lifetime §5).
 
 | Id | Subject | Expected |
 |---|---|---|
 | `renderer:reveal-timeout` | reveal a password, advance 10 s | re-masked; value ref is `null` |
 | `renderer:idle-lock` | no interaction for the configured timeout | vault locks (after F-19) |
-| `renderer:clipboard-expiry` | copy, advance 30 s | cleared only if unchanged |
-| `renderer:clipboard-expiry` | copy, replace clipboard, advance 30 s | replacement survives |
 | `renderer:never-hold` | after a reveal | `localStorage`/`sessionStorage` empty; route has no secret |
 | `renderer:masking` | masked card/account fields | no character of the value except the card last four |
 | `renderer:upload-rasterisation` | upload an SVG | stored value is a PNG `data:` URL |

@@ -16,11 +16,12 @@ import { cardSecretMask, type CardSecretKey, SECRET_FIELD_CARD_NUMBER, SECRET_FI
 import { markRaw } from 'vue';
 import useAppStore from '../../stores/appStore.ts';
 import { Vault } from '../../types/index.ts';
+import { useSecretReveal, type SecretReveal } from '../../composables/useSecretReveal.ts';
 
 const route = useRoute();
 const router = useRouter();
 const { state, updateActiveItem, deleteActiveItem } = useAppStore();
-const { getVaultById, getItemSecret } = useVault();
+const { getVaultById, getItemSecret, copyItemSecret } = useVault();
 const { openModal } = useModal();
 
 const parentVault = ref<Vault | null>(null);
@@ -32,38 +33,38 @@ const displayLabel = computed(
 );
 const displayInitial = computed(() => displayLabel.value[0].toUpperCase());
 
+const cardNumberReveal = useSecretReveal();
+const securityCodeReveal = useSecretReveal();
+const pinReveal = useSecretReveal();
+
 interface SecretFieldView {
   key: CardSecretKey;
   label: string;
-  shown: boolean;
-  /** Fetched on demand; never prefetched, never sent elsewhere */
-  value: string | null;
-  /** Stable per-field copy hook (ItemField resets on prop identity change) */
-  copyValue: () => Promise<string | null>;
+  reveal: SecretReveal;
+  /** Copy through the core; the value never enters the renderer. */
+  copyAction: () => Promise<boolean>;
 }
 
-function fetchSecretByKey(key: string): Promise<string | null> {
-  const field = secretFields.value.find((f) => f.key === key);
-  return field ? fetchSecret(field) : Promise.resolve(null);
-}
-
-function makeSecretFields(): SecretFieldView[] {
-  const make = (key: CardSecretKey, label: string): SecretFieldView => ({
-    key,
-    label,
-    shown: false,
-    value: null,
-    copyValue: () => fetchSecretByKey(key)
-  });
-
-  return [
-    make(SECRET_FIELD_CARD_NUMBER, 'card number'),
-    make(SECRET_FIELD_SECURITY_CODE, 'security code'),
-    make(SECRET_FIELD_PIN, 'pin')
-  ];
-}
-
-const secretFields = ref<SecretFieldView[]>(makeSecretFields());
+const secretFields: SecretFieldView[] = [
+  {
+    key: SECRET_FIELD_CARD_NUMBER,
+    label: 'card number',
+    reveal: cardNumberReveal,
+    copyAction: () => copySecret(SECRET_FIELD_CARD_NUMBER)
+  },
+  {
+    key: SECRET_FIELD_SECURITY_CODE,
+    label: 'security code',
+    reveal: securityCodeReveal,
+    copyAction: () => copySecret(SECRET_FIELD_SECURITY_CODE)
+  },
+  {
+    key: SECRET_FIELD_PIN,
+    label: 'pin',
+    reveal: pinReveal,
+    copyAction: () => copySecret(SECRET_FIELD_PIN)
+  }
+];
 
 // Copy/-eye affordances exist only for fields that have a value
 function secretPresent(key: string): boolean {
@@ -74,35 +75,33 @@ function secretPresent(key: string): boolean {
 // (card number keeps the real last 4); absent fields resolve to null →
 // ItemField shows 'No Value'.
 function secretDisplay(field: SecretFieldView): string | null {
-  if (field.shown) return field.value ?? null; // failed fetch → 'No Value'
+  if (field.reveal.isRevealed.value) return field.reveal.secret.value;
   return cardSecretMask(field.key, secretPresent(field.key), card.value?.card_number_last4 ?? null);
 }
 
-async function fetchSecret(field: SecretFieldView): Promise<string | null> {
+async function copySecret(key: string): Promise<boolean> {
+  if (!card.value) return false;
+
+  return copyItemSecret(card.value.vault_id, card.value.id, key);
+}
+
+async function fetchSecret(key: string): Promise<string | null> {
   if (!card.value) return null;
-  if (field.value === null) {
-    try {
-      field.value = await getItemSecret(card.value.vault_id, card.value.id, field.key);
-    } catch {
-      // Fetch failed: keep the value unset so the field stays masked /
-      // 'No Value' — same soft behaviour as the pre-throwing lookup
-    }
+
+  try {
+    return await getItemSecret(card.value.vault_id, card.value.id, key);
+  } catch {
+    // Fetch failed: keep the field masked / 'No Value' — same soft
+    // behaviour as the pre-throwing lookup
+    return null;
   }
-  return field.value;
 }
 
 async function toggleSecret(field: SecretFieldView) {
-  if (field.shown) {
-    field.shown = false;
-    return;
-  }
   // Only fetch if the key is known to have a value
   if (!secretPresent(field.key)) return;
 
-  await fetchSecret(field);
-  if (field.value !== null) {
-    field.shown = true;
-  }
+  await field.reveal.toggle(() => fetchSecret(field.key));
 }
 
 async function toggleFavourite() {
@@ -178,7 +177,7 @@ watch(
     } else {
       parentVault.value = null;
     }
-    secretFields.value = makeSecretFields();
+    for (const field of secretFields) field.reveal.hide();
   },
   { immediate: true }
 );
@@ -265,7 +264,7 @@ watch(
             :key="field.key"
             :label="field.label"
             :display-value="secretDisplay(field)"
-            :copy-value="field.copyValue"
+            :copy-action="field.copyAction"
             :can-copy="secretPresent(field.key)"
           >
             <template #actions>
@@ -275,7 +274,7 @@ watch(
                 icon-only
                 variant="outline"
                 size="small"
-                :icon-component="field.shown ? EyeOff : Eye"
+                :icon-component="field.reveal.isRevealed.value ? EyeOff : Eye"
                 @click="toggleSecret(field)"
               />
             </template>

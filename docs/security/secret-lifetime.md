@@ -4,6 +4,10 @@ Decision for [#71](https://github.com/DylanAlmond/lockr/issues/71) (parent [#63]
 This is a policy, not a fix: it states the rule, compares it with current behaviour, and names the
 gap in each component. Implementation becomes fix tickets after the map closes.
 
+**Applied:** R-S2 and R-S4, including the backend copy path in §5, for the detail views, the Input
+password toggle and the copier (F-10, F-11). §3 describes the pre-fix behaviour. R-S3 (editor draft
+teardown) and the idle-lock follow-up remain open.
+
 Scope: **T1 field-key secrets** from the threat model — account `password`; card `card_number`,
 `security_code`, `pin`. Master-password reveal toggles on the auth screens are included because
 they expose A1 by the same mechanism. Note bodies and identity PII are T2 and are not covered here

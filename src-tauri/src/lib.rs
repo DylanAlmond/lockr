@@ -1,3 +1,4 @@
+mod clipboard;
 mod commands;
 mod crypto;
 mod error;
@@ -69,6 +70,7 @@ pub fn run() {
             commands::get_item_by_id,
             commands::get_all_items,
             commands::get_item_secret,
+            commands::copy_item_secret,
             commands::update_item_secret,
             commands::get_item_password_strength,
             // Util
@@ -78,6 +80,12 @@ pub fn run() {
             commands::set_autosave,
             commands::is_vault_dirty
         ])
+        .on_window_event(|_window, event| {
+            // Best-effort: do not leave a copied secret behind on exit.
+            if let tauri::WindowEvent::CloseRequested { .. } = event {
+                clipboard::clear();
+            }
+        })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
