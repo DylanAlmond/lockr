@@ -10,6 +10,7 @@
     "test": "vitest run",
     "test:compliance": "node scripts/compliance/run.mjs",
     "audit": "yarn npm audit --severity high",
+    "sbom": "node scripts/sbom.mjs",
     "tauri": "tauri"
   },
   "dependencies": {

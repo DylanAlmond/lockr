@@ -68,4 +68,13 @@ export const checks = [
       assert.match(lock, /name = "aes-gcm"/);
     },
   },
+  {
+    id: 'static:deps-inventory',
+    run() {
+      execSync('node scripts/sbom.mjs --check', {
+        cwd: root,
+        stdio: 'ignore',
+      });
+    },
+  },
 ];

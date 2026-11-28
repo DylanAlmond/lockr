@@ -1,3 +1,12 @@
+/** Upload limits (docs/security/uploads.md). */
+export const MAX_UPLOAD_BYTES = 8 * 1024 * 1024;
+export const ACCEPTED_IMAGE_TYPES = [
+  'image/png',
+  'image/jpeg',
+  'image/webp',
+  'image/gif'
+] as const;
+
 /**
  * Process a standard uploaded image into a 128x128 base64 image.
  *
@@ -5,8 +14,13 @@
  */
 export async function processImageToBase64(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
-    if (!file.type.startsWith('image/')) {
-      reject(new Error('File must be an image'));
+    if (!ACCEPTED_IMAGE_TYPES.includes(file.type as (typeof ACCEPTED_IMAGE_TYPES)[number])) {
+      reject(new Error('Unsupported image type'));
+      return;
+    }
+
+    if (file.size > MAX_UPLOAD_BYTES) {
+      reject(new Error('Image is too large'));
       return;
     }
 
@@ -75,7 +89,7 @@ export function selectImageFile(): Promise<File | null> {
     const input = document.createElement('input');
 
     input.type = 'file';
-    input.accept = 'image/*';
+    input.accept = ACCEPTED_IMAGE_TYPES.join(',');
 
     input.onchange = (e) => {
       const file = (e.target as HTMLInputElement).files?.[0];
