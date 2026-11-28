@@ -21,6 +21,8 @@ leaves the current session intact.
 
 There is no forced rotation, no expiry, and no breach-list lookup: a breach
 lookup needs a network call, which contradicts the local-first premise.
+Existing profiles keep their password; the policy applies when a profile is
+created.
 
 ## 2. Login throttling
 
@@ -99,6 +101,8 @@ state.
   but not the absolute clock.
 - **The throttle is in memory.** A process restart clears the counter; the
   Argon2 cost is what remains.
+- **Lockout is a denial-of-service vector.** An attacker can delay a known
+  user's login by failing repeatedly; the delay is capped at 15 minutes.
 - **Core plaintext is bounded, not erased.** The Rust core holds decrypted
   vaults for the whole session; the timeout closes the window, it does not
   scrub memory.
