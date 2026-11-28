@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref, computed, watch } from 'vue';
+import { onMounted, onUnmounted, ref, computed, watch } from 'vue';
 import { Entropy, Vault } from '../../types/index.ts';
 import Button from './Button.vue';
 import ItemField from './ItemField.vue';
@@ -35,6 +35,13 @@ const passwordEntropy = ref<Entropy | null>(null);
 // Secret fields reveal their value only while the field is focused;
 // on blur they re-mask as password dots.
 const focusedSecret = ref<string | null>(null);
+
+// R-S3: a new-item draft does not outlive the form.
+onUnmounted(() => {
+  form.value.password = '';
+  passwordEntropy.value = null;
+  focusedSecret.value = null;
+});
 
 function secretType(key: string): 'text' | 'password' {
   return focusedSecret.value === key ? 'text' : 'password';

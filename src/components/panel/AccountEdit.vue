@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watch, computed } from 'vue';
+import { ref, watch, computed, onUnmounted } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { Account, Entropy } from '../../types';
 import { ChevronRight } from '@lucide/vue';
@@ -42,6 +42,15 @@ const passwordFocused = ref(false);
 /** In-flight prefetch promise; awaited by handleSave so a fast save
  * cannot silently skip the password push while original is still null. */
 let passwordFetch: Promise<void> | null = null;
+
+// R-S3: the draft and its original do not outlive the form. Route changes
+// unmount the editor.
+onUnmounted(() => {
+  passwordInput.value = null;
+  passwordOriginal.value = null;
+  passwordEntropy.value = null;
+  passwordFocused.value = false;
+});
 
 const passwordPlaceholder = computed(() => {
   // Once the stored state is known: an empty-or-emptied field (the user

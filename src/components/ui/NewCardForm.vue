@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue';
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { CreateItemProps, useVault } from '../../composables/useVault.ts';
 import {
   SECRET_FIELD_CARD_NUMBER,
@@ -53,6 +53,14 @@ const form = ref<CardForm>({
 // their real last 4 digits, derived live from the typed content. An empty
 // field shows the 'No Value' placeholder like any other empty field.
 const focusedSecret = ref<string | null>(null);
+
+// R-S3: a new-item draft does not outlive the form.
+onUnmounted(() => {
+  form.value.card_number = '';
+  form.value.security_code = '';
+  form.value.pin = '';
+  focusedSecret.value = null;
+});
 
 /** Input content: real typed value while focused, otherwise the mask
  * derived from whatever has been typed (nothing → nothing, so the

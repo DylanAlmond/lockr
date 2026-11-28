@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue';
+import { computed, onUnmounted, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { ChevronRight } from '@lucide/vue';
 import Button from '../ui/Button.vue';
@@ -66,6 +66,12 @@ function freshSecretStates(): Record<SecretKey, SecretState> {
 
 const secretStates = ref<Record<SecretKey, SecretState>>(freshSecretStates());
 const focusedSecret = ref<SecretKey | null>(null);
+
+// R-S3: card drafts do not outlive the form.
+onUnmounted(() => {
+  secretStates.value = freshSecretStates();
+  focusedSecret.value = null;
+});
 
 async function onSecretFocus(key: SecretKey) {
   focusedSecret.value = key;
