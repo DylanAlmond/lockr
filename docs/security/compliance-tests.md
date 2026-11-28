@@ -2,8 +2,8 @@
 
 Specification for the automated half of the audit checklist. Decision record for
 [#74](https://github.com/DylanAlmond/lockr/issues/74) (parent
-[#63](https://github.com/DylanAlmond/lockr/issues/63)). Nothing here is implemented; this is the plan
-that turns `audit-checklist.md` rows into runnable checks.
+[#63](https://github.com/DylanAlmond/lockr/issues/63)). The static suite and the checks marked **Implemented** below are in the tree; the remaining ids are
+the plan that turns `audit-checklist.md` rows into runnable checks.
 
 The rule it serves, from `evidence-standard.md` §4.3: **every checklist row names a test id or a
 manual reason.** This document defines what each id actually runs.

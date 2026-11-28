@@ -703,8 +703,11 @@ data path and profile ids — useful reconnaissance for the filesystem-facing fi
 
 ## Complete
 
-All seven sweep groups are recorded. Totals across 105 rows: **40 met, 17 partial, 41 deviated,
-6 n/a, 1 unchecked**. The full set is 29 findings: one P0 (F-14), two P1 (F-09, F-12), and the rest
-P2/P3.
+All seven sweep groups are recorded. The re-run at `a41cde1` (2026-11-28) totals across 105 rows:
+**89 met, 2 partial, 4 deviated, 6 n/a, 4 unchecked**. The full set is 29 findings: one P0 (F-14),
+two P1 (F-09, F-12), and the rest P2/P3. All 29 are fixed.
 
-The remaining unchecked row is T-15 (installer code signing), which needs a signed release artefact.
+The four unchecked rows (T-09, T-15, 13.4.1, 13.4.2) need a signed release artefact or an OS
+inspection; the checklist does not claim them. The four deviated rows are the two standing
+deviations (6.2.12, 6.3.3) and the two deliberate logging omissions (16.3.2, 16.3.4); the two
+partial rows are 3.4.5 and 11.2.2. See `security-level.md` §4 for their reasons.

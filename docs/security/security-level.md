@@ -18,7 +18,7 @@ Decision record for [#72](https://github.com/DylanAlmond/lockr/issues/72) (paren
 | **Assessed surface** | The Vue renderer and the renderer↔Rust seam: `invoke`, Tauri configuration, capabilities, and the shipped bundle |
 | **Not assessed** | Rust cryptography and vault-format correctness (ADR-0001), the OS, the webview engine, and anything requiring memory forensics |
 | **Not present** | No sync, no Device pairing, no network listener, no updater, no deep links |
-| **Pinned to** | commit `<sha>` — a claim is valid only for the commit it names |
+| **Pinned to** | commit `a41cde1` (full `a41cde1cc794de4ab3cf6f52349a823ad9a90d52`) — a claim is valid only for the commit it names |
 | **Method** | OWASP ASVS 5.0 Level 2, client tier, plus a Tauri 2 hardening supplement |
 
 "Level 2" means **all applicable L1 and L2 requirements**, not a subset. That is why the claim is
@@ -46,14 +46,17 @@ installed. The bundle's only external string literals are `http://www.w3.org`
 **Target:** ASVS 5.0 Level 2, client tier, plus the Tauri supplement recorded in
 `docs/security/research/audit-baseline.md`.
 
-**Status:** *assessed against L2.* The conformance sweep is complete against `f3d5c82` on 2026-11-27.
-**No ASVS level is claimed** — a compliance claim needs zero open deviations, and the sweep found one
-P0, two P1 and a long P2/P3 tail.
+**Status:** *assessed against L2.* The conformance sweep was re-run against `a41cde1` on 2026-11-28.
+**No ASVS level is claimed** — a compliance claim needs zero open deviations, and residual
+deviations and unverified release/OS rows remain.
 
 **Remediation status (2026-11-28):** all 29 findings are fixed; every finding in `findings.md` now
-names its commit and tests. This does **not** move the rung: the checklist has not been re-run against
-the remediated tree, and the manual rows (installer signing, release devtools, OS facts) have not been
-re-verified. Re-running `audit-checklist.md` and re-pinning this document is the release task.
+names its commit and tests. The re-run marks **89 rows met, 2 partial, 4 deviated, 6 n/a and 4
+unchecked**. This does **not** move the rung: the four unchecked rows need a signed release artefact
+or an OS inspection (T-09, T-15, 13.4.1, 13.4.2), the two partial rows are mitigated-but-not-configured
+controls (3.4.5, 11.2.2), and the four deviated rows are standing policy choices (6.2.12, 6.3.3) or
+accepted logging omissions (16.3.2, 16.3.4). The rung moves only when every applicable row is met or
+n/a and the residual is genuinely out of scope.
 
 | Rung | Meaning |
 |---|---|
@@ -79,10 +82,12 @@ re-pinned on every release.
 
 ## 4. Findings
 
-Across **105 checklist rows**: 40 met, 17 partial, 41 deviated, 6 not applicable, 1 unobservable
-(installer signing, which needs a signed release artefact).
+Across **105 checklist rows at `a41cde1`**: 89 met, 2 partial, 4 deviated, 6 not applicable,
+4 unchecked (release/installer facts that need an artefact). The original sweep against `f3d5c82`
+was 40 met, 17 partial, 41 deviated, 6 not applicable, 1 unchecked.
 
-The 41 deviated rows resolve into **29 findings**, in the project's severity scheme, not CVSS:
+The original 41 deviated rows resolved into **29 findings**, in the project's severity scheme, not
+CVSS; all 29 are now fixed. The severity table below describes that original sweep:
 
 | Severity | Count | Findings |
 |---|---|---|
@@ -101,8 +106,27 @@ The three that matter most:
 - **F-12 (P1) — no command checks `vault_id ∈ active_user.vault_ids`.** Latent while only one User's
   vaults are unlocked, and a cross-User read path in combination with F-13.
 
-**Post-remediation:** each of these is fixed in `findings.md` with its commit and tests. The counts
-and examples above describe the pinned `f3d5c82` sweep, not the current tree.
+**Post-remediation:** each of these is fixed in `findings.md` with its commit and tests. The severity
+table and examples above describe the original `f3d5c82` sweep; the current row status is in
+`audit-checklist.md` at `a41cde1`.
+
+### Residual rows at the re-run
+
+These are the rows that are **not** met at `a41cde1`. The unchecked rows need a release artefact or
+OS inspection and were not claimed; the partial and deviated rows are recorded, not hidden.
+
+| Row | Status | Why |
+|---|---|---|
+| T-09 | unchecked | Release-build devtools absence needs a signed release artefact; the `devtools` Cargo feature is absent (`static:devtools-absent`) |
+| T-15 | unchecked | Installer code signing needs `signtool`/`codesign` on the artefact |
+| 13.4.1 | unchecked | Installer payload contents cannot be inspected without the artefact; `dist/` contains no VCS metadata |
+| 13.4.2 | unchecked | Debug-mode absence in production needs a release build; source checks only |
+| 3.4.5 | partial | Tauri 2.11 cannot set `Referrer-Policy`; no outbound path remains to leak a referrer (`tauri-config-baseline.md` §3) |
+| 11.2.2 | partial | No per-file algorithm identifier; a cipher swap is a schema migration (`crypto-inventory.md` §3) |
+| 6.2.12 | deviated | Standing deviation: a breached-password lookup needs a network call, contrary to local-first |
+| 6.3.3 | deviated | Standing deviation: one factor (the master password); the secret key is not independent possession |
+| 16.3.2 | deviated | Authorisation denials are deliberately not logged (`logging-policy.md` §2) — accepted omission |
+| 16.3.4 | deviated | Unexpected errors are deliberately not logged (`logging-policy.md` §2) — accepted omission |
 
 **Notable absence:** there is no HTML, script, navigation or `postMessage` sink in the renderer. The
 audit found no live cross-site-scripting path, which is why the missing CSP is P2 rather than P0.
@@ -144,3 +168,4 @@ does not lead to a row, the claim is wrong and should be removed.
 | 2026-11-27 | `f3d5c82` | Document created; target set |
 | 2026-11-27 | `f3d5c82` | Conformance sweep complete; status = assessed against L2; 29 findings recorded |
 | 2026-11-28 | remediation branches | All 29 findings fixed; assessment not re-pinned; checklist re-run is the release task |
+| 2026-11-28 | `a41cde1` | Re-ran the checklist against the remediated tree; re-pinned; 89 met / 2 partial / 4 deviated / 6 n/a / 4 unchecked; status remains assessed against L2 |
