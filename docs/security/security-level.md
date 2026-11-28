@@ -119,16 +119,21 @@ OS inspection and were not claimed; the partial and deviated rows are recorded, 
 
 | Row | Status | Why |
 |---|---|---|
-| T-09 | unchecked | Release-build devtools absence needs a signed release artefact; the `devtools` Cargo feature is absent (`static:devtools-absent`) |
-| T-15 | unchecked | Installer code signing needs `signtool`/`codesign` on the artefact |
-| 13.4.1 | unchecked | Installer payload contents cannot be inspected without the artefact; `dist/` contains no VCS metadata |
-| 13.4.2 | unchecked | Debug-mode absence in production needs a release build; source checks only |
+| T-09 | unchecked | An unsigned release was built at `bdea025`; confirming no inspector opens still needs a launch test. The `devtools` Cargo feature is absent (`static:devtools-absent`) |
+| T-15 | unchecked | `yarn tauri build` produced MSI and NSIS installers, both `NotSigned`; a certificate and signed build are required (`release-verification.md`) |
+| 13.4.1 | unchecked | The installer artefacts exist, but the payload could not be enumerated (`lessmsi`/`7z` unavailable); `dist/` contains no VCS metadata or maps |
+| 13.4.2 | unchecked | The release build succeeded and has no source maps; a launch check of the installed release is still needed |
 | 3.4.5 | partial | Tauri 2.11 cannot set `Referrer-Policy`; no outbound path remains to leak a referrer (`tauri-config-baseline.md` §3) |
 | 11.2.2 | partial | No per-file algorithm identifier; a cipher swap is a schema migration (`crypto-inventory.md` §3) |
 | 6.2.12 | deviated | Standing deviation: a breached-password lookup needs a network call, contrary to local-first |
 | 6.3.3 | deviated | Standing deviation: one factor (the master password); the secret key is not independent possession |
 | 16.3.2 | deviated | Authorisation denials are deliberately not logged (`logging-policy.md` §2) — accepted omission |
 | 16.3.4 | deviated | Unexpected errors are deliberately not logged (`logging-policy.md` §2) — accepted omission |
+
+**Release artefacts (2026-11-28):** an unsigned release build at `bdea025` produced MSI and NSIS
+installers; both are `NotSigned`. The build verifies the build-side sourcemap and devtools-feature
+controls, but T-15 and the launch/payload checks remain. See `release-verification.md` for hashes and
+the exact commands.
 
 **Notable absence:** there is no HTML, script, navigation or `postMessage` sink in the renderer. The
 audit found no live cross-site-scripting path, which is why the missing CSP is P2 rather than P0.
@@ -171,3 +176,4 @@ does not lead to a row, the claim is wrong and should be removed.
 | 2026-11-27 | `f3d5c82` | Conformance sweep complete; status = assessed against L2; 29 findings recorded |
 | 2026-11-28 | remediation branches | 28 findings fixed, F-27 accepted for its logging omissions; assessment not re-pinned; checklist re-run is the release task |
 | 2026-11-28 | `a41cde1` | Re-ran the checklist against the remediated tree; re-pinned; 89 met / 2 partial / 4 deviated / 6 n/a / 4 unchecked; status remains assessed against L2 |
+| 2026-11-28 | `bdea025` | Built unsigned MSI/NSIS installers; both NotSigned; build-side sourcemap/devtools controls verified, launch/payload checks remain |

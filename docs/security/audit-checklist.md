@@ -38,6 +38,7 @@ The rule: every row has one, and `manual:` states why automation is not possible
 | Runner | OpenCode subagent |
 | Toolchain | Node 24.7.0 · Rust 1.99.1 stable · Tauri 2.11.4 |
 | Automated checks | `yarn test:compliance` 31/31 static passed (after `yarn build`) · `cargo test` 104 passed (101 unit + 3 integration) · `yarn test` 13 passed (3 files) · `yarn build` succeeded |
+| Release artefacts | Unsigned MSI + NSIS at `bdea025`; both `NotSigned` (`release-verification.md`). T-15 not met; T-09/13.4.1/13.4.2 still need a launch/payload check |
 | Rows (✅/⚠️/❌/➖/⬜) | g1 18/0/0/3/2 · g2 22/1/0/1/0 · g3 13/0/0/0/0 · g4 13/0/2/0/0 · g5 12/1/0/2/0 · g6 6/0/0/0/2 · g7 5/0/2/0/0 — **total ✅ 89 · ⚠️ 2 · ❌ 4 · ➖ 6 · ⬜ 4** |
 
 ---
