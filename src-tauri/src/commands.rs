@@ -403,6 +403,16 @@ pub fn login_user(
         .map_err(|e| e.to_string())
 }
 
+/// Seconds until a blocked user may try again. The renderer uses this to run
+/// a live countdown; the core enforces the same timestamp.
+#[tauri::command]
+pub fn login_cooldown(state: AppState, id: String) -> Result<Option<u64>, String> {
+    let state = state.lock().map_err(|e| e.to_string())?;
+    let user_id = Uuid::parse_str(&id).map_err(|e| e.to_string())?;
+
+    Ok(state.user_manager.cooldown_remaining(&user_id))
+}
+
 #[tauri::command]
 pub fn logout(state: AppState) -> Result<(), String> {
     let mut state = state.lock().map_err(|e| e.to_string())?;

@@ -1,10 +1,11 @@
 use argon2::password_hash::rand_core::{OsRng, RngCore};
+use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     io::Write,
-    path::PathBuf,
+    path::{Path, PathBuf},
     println,
-    time::{Duration, Instant},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use uuid::Uuid;
 use zeroize::Zeroize;
@@ -26,7 +27,15 @@ const LOGIN_BACKOFF_MAX: Duration = Duration::from_secs(15 * 60);
 
 struct LoginThrottle {
     failures: u32,
-    blocked_until: Option<Instant>,
+    blocked_until: Option<SystemTime>,
+}
+
+/// On-disk form. `SystemTime` is not serializable, so the block is stored as a
+/// Unix timestamp.
+#[derive(Serialize, Deserialize)]
+struct StoredThrottle {
+    failures: u32,
+    blocked_until_unix: Option<u64>,
 }
 
 pub struct UserManager {
@@ -34,8 +43,41 @@ pub struct UserManager {
     pub active_user_id: Option<UserId>,
     active_path: Option<PathBuf>,
 
-    /// Consecutive failed logins per user. In memory only: a restart clears it.
+    /// Consecutive failed logins per user, persisted so restarting the app
+    /// cannot clear an active lockout. The file is not a user profile and has
+    /// a non-`.json` name so `get_users` never scans it.
     throttle: HashMap<UserId, LoginThrottle>,
+}
+
+/// The throttle state file. It is a `.dat` file holding JSON so `get_users`
+/// (which scans `*.json` profiles) never reads it as a profile.
+fn throttle_path(app_data_dir: &Path) -> PathBuf {
+    app_data_dir.join("login-throttle.dat")
+}
+
+fn load_throttle(app_data_dir: &Path) -> HashMap<UserId, LoginThrottle> {
+    let Ok(json) = std::fs::read_to_string(throttle_path(app_data_dir)) else {
+        return HashMap::new();
+    };
+    let Ok(stored) = serde_json::from_str::<HashMap<String, StoredThrottle>>(&json) else {
+        return HashMap::new();
+    };
+
+    stored
+        .into_iter()
+        .filter_map(|(id, entry)| {
+            let id = Uuid::parse_str(&id).ok()?;
+            Some((
+                id,
+                LoginThrottle {
+                    failures: entry.failures,
+                    blocked_until: entry
+                        .blocked_until_unix
+                        .map(|secs| UNIX_EPOCH + Duration::from_secs(secs)),
+                },
+            ))
+        })
+        .collect()
 }
 
 /// Reject a master password that does not meet the documented policy. Context
@@ -119,11 +161,13 @@ impl UserManager {
             }
         }
 
+        let throttle = load_throttle(&app_data_dir);
+
         Ok(Self {
             app_data_dir,
             active_user_id: None,
             active_path: None,
-            throttle: HashMap::new(),
+            throttle,
         })
     }
 
@@ -187,29 +231,75 @@ impl UserManager {
             return Ok(());
         };
 
-        let now = Instant::now();
+        let now = SystemTime::now();
         if blocked_until > now {
-            let remaining = blocked_until.saturating_duration_since(now);
+            let remaining = blocked_until.duration_since(now).unwrap_or_default();
             return Err(VaultError::TooManyAttempts(format_retry_delay(remaining)));
         }
 
         Ok(())
     }
 
-    fn record_failed_login(&mut self, id: &UserId) {
-        let throttle = self.throttle.entry(*id).or_insert(LoginThrottle {
-            failures: 0,
-            blocked_until: None,
-        });
-        throttle.failures = throttle.failures.saturating_add(1);
+    /// Seconds until the next login is allowed, if a block is active.
+    pub fn cooldown_remaining(&self, id: &UserId) -> Option<u64> {
+        let blocked_until = self.throttle.get(id)?.blocked_until?;
+        let remaining = blocked_until.duration_since(SystemTime::now()).ok()?;
 
-        if let Some(delay) = login_backoff(throttle.failures) {
-            throttle.blocked_until = Some(Instant::now() + delay);
+        if remaining.is_zero() {
+            None
+        } else {
+            Some(remaining.as_secs().max(1))
         }
+    }
+
+    fn record_failed_login(&mut self, id: &UserId) {
+        {
+            let throttle = self.throttle.entry(*id).or_insert(LoginThrottle {
+                failures: 0,
+                blocked_until: None,
+            });
+            throttle.failures = throttle.failures.saturating_add(1);
+
+            if let Some(delay) = login_backoff(throttle.failures) {
+                throttle.blocked_until = Some(SystemTime::now() + delay);
+            }
+        }
+
+        self.save_throttle();
     }
 
     fn record_successful_login(&mut self, id: &UserId) {
         self.throttle.remove(id);
+        self.save_throttle();
+    }
+
+    fn save_throttle(&self) {
+        let stored: HashMap<String, StoredThrottle> = self
+            .throttle
+            .iter()
+            .map(|(id, entry)| {
+                (
+                    id.to_string(),
+                    StoredThrottle {
+                        failures: entry.failures,
+                        blocked_until_unix: entry.blocked_until.and_then(|until| {
+                            until
+                                .duration_since(UNIX_EPOCH)
+                                .ok()
+                                .map(|duration| duration.as_secs())
+                        }),
+                    },
+                )
+            })
+            .collect();
+
+        let Ok(json) = serde_json::to_vec(&stored) else {
+            return;
+        };
+
+        let path = throttle_path(&self.app_data_dir);
+        let temp = path.with_extension("tmp");
+        let _ = std::fs::write(&temp, json).and_then(|_| std::fs::rename(&temp, &path));
     }
 
     /// Create a brand new user profile.
@@ -520,9 +610,41 @@ mod tests {
             manager.check_login_allowed(&id),
             Err(VaultError::TooManyAttempts(_))
         ));
+        assert!(manager.cooldown_remaining(&id).is_some());
 
         manager.record_successful_login(&id);
         manager.check_login_allowed(&id).unwrap();
+        assert!(manager.cooldown_remaining(&id).is_none());
+
+        std::fs::remove_dir_all(temp_dir).ok();
+    }
+
+    #[test]
+    fn test_login_throttle_survives_restart() {
+        let temp_dir = setup();
+        let id = Uuid::new_v4();
+
+        {
+            let mut manager = UserManager::new(temp_dir.clone()).unwrap();
+            for _ in 0..5 {
+                manager.record_failed_login(&id);
+            }
+        }
+
+        let manager = UserManager::new(temp_dir.clone()).unwrap();
+        assert!(
+            manager.cooldown_remaining(&id).is_some(),
+            "a restart must not clear an active lockout"
+        );
+        assert!(matches!(
+            manager.check_login_allowed(&id),
+            Err(VaultError::TooManyAttempts(_))
+        ));
+        assert_eq!(
+            manager.get_users().unwrap().len(),
+            0,
+            "the throttle file must not be read as a profile"
+        );
 
         std::fs::remove_dir_all(temp_dir).ok();
     }

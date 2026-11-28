@@ -334,9 +334,12 @@ expensive, which is the only brake; a local attacker can retry indefinitely and 
 
 **Evidence:** `commands.rs` `login_user`; `user_manager.rs:110-132`.
 **Fix:** applied in `7e6b85e`. Five consecutive failures block the next attempt for 5 minutes,
-doubling to a 15-minute cap; success clears the counter. Attempts append `login_success`, `login_failed` and
+doubling to a 15-minute cap; success clears the counter. The counter and block are persisted in
+`login-throttle.dat`, so a restart does not reset an active lockout, and the login screen counts down
+per second from the core's remaining time. Attempts append `login_success`, `login_failed` and
 `login_blocked` lines to `auth.log` (identifiers only). Pinned by `test_login_backoff_grows_and_caps`,
-`test_login_throttle_blocks_and_clears` and `test_audit_log_records_events_without_secrets`.
+`test_login_throttle_blocks_and_clears`, `test_login_throttle_survives_restart` and
+`rust:login-rate-limit`.
 **Status:** fixed.
 
 ### F-16 — Validation and authorisation rules are undocumented · P3

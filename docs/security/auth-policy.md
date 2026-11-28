@@ -35,10 +35,13 @@ Failed logins are counted per user, in memory:
 | 6 | 10 minutes |
 | 7, 8, … | doubles, capped at **15 minutes** |
 
-A successful login clears the counter. The counter lives in `UserManager` and
-resets on process restart; Argon2id's cost remains the per-guess brake across
-restarts. The same counter and backoff cover the re-authentication check before
-deleting a vault, so that path is not an unthrottled password oracle.
+A successful login clears the counter. The counter is persisted in
+`login-throttle.dat` (JSON, identifiers and timestamps only) so restarting the
+app does not clear an active block. It uses wall-clock time, so changing the
+system clock can shorten or extend a block. The same counter and backoff cover
+the re-authentication check before deleting a vault, so that path is not an
+unthrottled password oracle. The login screen runs a live `m:ss` countdown from
+the core's remaining time and disables the submit button while blocked.
 
 Each attempt is appended to `auth.log` in the app data directory:
 
@@ -101,8 +104,9 @@ state.
 
 - **Activity is advisory.** A compromised renderer can extend the idle clock,
   but not the absolute clock.
-- **The throttle is in memory.** A process restart clears the counter; the
-  Argon2 cost is what remains.
+- **The throttle is a local file.** Deleting `login-throttle.dat` or moving the
+  system clock can clear or shorten a block; a local actor with that access
+  already has the vault files.
 - **Lockout is a denial-of-service vector.** An attacker can delay a known
   user's login by failing repeatedly; the delay is capped at 15 minutes.
 - **Core plaintext is bounded, not erased.** The Rust core holds decrypted

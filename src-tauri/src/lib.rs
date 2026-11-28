@@ -45,6 +45,7 @@ pub fn run() {
             commands::get_user,
             commands::get_user_by_id,
             commands::update_profile,
+            commands::login_cooldown,
             commands::logout,
             commands::session_activity,
             commands::delete_user,
