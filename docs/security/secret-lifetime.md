@@ -4,9 +4,9 @@ Decision for [#71](https://github.com/DylanAlmond/lockr/issues/71) (parent [#63]
 This is a policy, not a fix: it states the rule, compares it with current behaviour, and names the
 gap in each component. Implementation becomes fix tickets after the map closes.
 
-**Applied:** R-S2 and R-S4, including the backend copy path in §5, for the detail views, the Input
-password toggle and the copier (F-10, F-11), and the idle/absolute session timeout (F-19,
-`auth-policy.md`). §3 describes the pre-fix behaviour. R-S3 (editor draft teardown) remains open.
+**Applied:** R-S2, R-S3 and R-S4, including the backend copy path in §5, for the detail views, the
+Input password toggle, the editors and the copier (F-10, F-11), and the idle/absolute session timeout
+(F-19, `auth-policy.md`). §3 describes the pre-fix behaviour.
 
 Scope: **T1 field-key secrets** from the threat model — account `password`; card `card_number`,
 `security_code`, `pin`. Master-password reveal toggles on the auth screens are included because
@@ -161,8 +161,8 @@ Fix tickets after the map closes, in priority order:
    removes the copy path from the renderer (§5).
 2. **Shared reveal primitive** — one 10 s timer plus blur/visibility handling, used by both detail
    views and `Input`'s password toggle.
-3. **Editor draft teardown** — drop `passwordOriginal`/`passwordInput` and card drafts on unmount and
-   route change.
+3. **Editor draft teardown** — applied in `8fbe5b8`: `AccountEdit`, `CardEdit`, `NewAccountForm` and
+   `NewCardForm` clear their secret drafts on unmount (route change).
 4. **Copy feedback is icon-only** — `ItemField` shows a 2 s tick when a copy succeeds. It is feedback,
    not a clipboard-expiry signal; the 30 s clear is enforced in the core.
 5. **Idle auto-lock** — decided and implemented: a 15-minute idle and 12-hour absolute timeout end

@@ -103,7 +103,13 @@ with no command-level allowlist. Any renderer compromise reaches the whole surfa
 structural gap, but its blast radius is the same as F-01/F-04 until an injection sink exists.
 
 **Evidence:** `src-tauri/build.rs`; `src-tauri/src/lib.rs:45-80`.
-**Fix:** decide whether to adopt `AppManifest::commands` scoping. **Status:** open.
+**Decision:** accepted (owner: DylanAlmond). `AppManifest::commands` is not adopted now: there is one
+window, the commands are the app's own surface, and a window-level ACL cannot distinguish a
+compromised renderer from the UI — the renderer needs every command to work. The controls that bound
+a compromised renderer are the ownership check, the session rules and secret lifetime, not a
+command-level list. Revisit if a second window/webview, a plugin command surface, or an embedding
+feature is added, or if the renderer ever hosts third-party content.
+**Status:** accepted.
 
 ### F-06 — No security headers on protocol responses · P3
 
