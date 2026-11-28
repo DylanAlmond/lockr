@@ -148,7 +148,9 @@ The README claims "no network requests"; the bundle's only external string liter
 inventory of permitted destinations, so the claim cannot be checked against a document.
 
 **Evidence:** `README.md:23`; bundle host scan (`research/bundle-and-dependencies.md` §1).
-**Fix:** add the egress allowlist to the security-level document. **Status:** open.
+**Fix:** applied in `9732f62` — `security-level.md` §1 now lists the complete egress allowlist
+(IPC in production, HMR in development, `data:` images, bundled assets, and nothing else).
+**Status:** fixed.
 
 ### Controls that held
 
@@ -483,8 +485,10 @@ output (128×128, PNG/WebP), but the decode step accepts whatever the platform i
 and nothing records what that is.
 
 **Evidence:** `imageUpload.ts:8,322`; `IconUpload.vue`; no upload spec in `docs/`.
-**Fix:** document the accepted formats and a maximum input size, and enforce the size before decode.
-**Status:** open.
+**Fix:** applied in `2139ad7` (code) and `9732f62` (spec) — `uploads.md` documents PNG/JPEG/WebP/GIF, the 8 MiB input limit, the
+128 × 128 PNG output and the backend icon check; the picker and decoder enforce the same list and
+size before decode.
+**Status:** fixed.
 
 ### F-22 — No cryptographic inventory · P3
 
@@ -503,9 +507,10 @@ identifier**. Changing the cipher therefore requires a schema migration, not a p
 a reasonable choice; it is recorded here rather than in a document a reviewer can find.
 
 **Evidence:** `crypto.rs:43-57,95`; `vault_manager.rs` save/load; `ADR-0001`.
-**Fix:** a crypto inventory section in the security-level document or its own `docs/` file.
-**Status:** open. `static:deps-crypto` now asserts that `argon2` and `aes-gcm` resolve in the lockfile,
-but the inventory document is still missing.
+**Fix:** applied in `9732f62` — `crypto-inventory.md` lists every primitive, parameter, key use, the
+key hierarchy, the file format and the no-algorithm-id choice. `static:deps-crypto` asserts that
+`argon2` and `aes-gcm` resolve in the lockfile.
+**Status:** fixed.
 
 ### F-23 — Per-tier protection requirements are incomplete · P3
 
@@ -520,8 +525,9 @@ masked in the UI, never logged, retention and retention on lock — so a future 
 to follow.
 
 **Evidence:** `threat-model.md` §2; `secret-lifetime.md` §1.
-**Fix:** a per-tier requirements table alongside the asset classification.
-**Status:** open.
+**Fix:** applied in `9732f62` — `asset-tiers.md` gives the per-tier requirements (at rest, safe views,
+masking, clipboard, logging, retention, network) and the deliberate T2 choices.
+**Status:** fixed.
 
 ### Controls that held
 
@@ -556,7 +562,10 @@ build" from a document, only by resolving the lockfile themselves.
 
 **Evidence:** no `cyclonedx`/`syft`/SBOM tooling in the tree; `package.json` has no audit or inventory
 script.
-**Fix:** generate an SBOM in the build, or commit one per release. **Status:** open.
+**Fix:** applied in `2139ad7` — `scripts/sbom.mjs` generates a CycloneDX 1.5 inventory from both
+lockfiles into `docs/security/sbom.json` (783 components); `yarn sbom` regenerates it and
+`static:deps-inventory` fails when it is stale.
+**Status:** fixed.
 
 ### F-25 — A known-vulnerable dev dependency with no remediation path · P3
 
@@ -648,10 +657,11 @@ policy saying so, and no way for a User to see that someone tried their master p
 
 **Evidence:** no `log`/`tracing` dependency; only two ad-hoc prints (`commands.rs:84`,
 `user_manager.rs:59`).
-**Fix:** a minimal local audit log, or a written decision that logging is deliberately absent plus
-the consequence. **Status:** open. Authentication events are now recorded in `auth.log`
-(`auth-policy.md` §2, F-15); authorisation denials and unexpected errors still are not, and there is
-no logging policy.
+**Fix:** applied in `9732f62` — `logging-policy.md` records the auth log (registration, login
+success/failure/blocked, re-auth; identifiers only) and the deliberate decision not to log item
+operations, authorisation denials or unexpected errors, with the consequences. The ad-hoc prints are
+gone (F-29).
+**Status:** fixed.
 
 ### F-29 — Error strings and debug prints leak paths and identifiers · P3
 
