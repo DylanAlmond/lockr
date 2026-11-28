@@ -164,5 +164,5 @@ Fix tickets after the map closes, in priority order:
    route change.
 4. **Copy feedback is icon-only** — `ItemField` shows a 2 s tick when a copy succeeds. It is feedback,
    not a clipboard-expiry signal; the 30 s clear is enforced in the core.
-5. **Idle auto-lock decision** — close the ASVS 7.3.1 finding by deciding lock semantics, or record
-   the acceptance.
+5. **Idle auto-lock** — decided and implemented: a 15-minute idle and 12-hour absolute timeout end
+   the session in the core (`session-policy.md`).

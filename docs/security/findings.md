@@ -413,7 +413,10 @@ unlocked and every secret one reveal away.
 
 **Evidence:** `commands.rs` `login_user` / `logout`; `lock_vault` registered at `lib.rs:61` with no
 call site; no timer or inactivity listener anywhere in `src/`.
-**Fix:** an idle lock with a documented timeout, plus an absolute lifetime. **Status:** open.
+**Fix:** applied in `28d9c77` and recorded in `session-policy.md`. The core enforces a 15-minute idle
+timeout and a 12-hour absolute lifetime, tears the session down and emits `session-expired`; the
+renderer reports activity and returns to auth.
+**Status:** fixed.
 
 ### F-20 — No documented authentication or session policy · P3
 
