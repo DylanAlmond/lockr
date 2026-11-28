@@ -1,17 +1,146 @@
 use argon2::password_hash::rand_core::{OsRng, RngCore};
-use std::{path::PathBuf, println};
+use serde::{Deserialize, Serialize};
+use std::{
+    collections::HashMap,
+    io::Write,
+    path::{Path, PathBuf},
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 use uuid::Uuid;
 use zeroize::Zeroize;
+use zxcvbn::zxcvbn;
 
 use crate::{
     crypto::{decrypt, encrypt},
-    User, UserId, VaultError, VaultId,
+    icons::{safe_icon, validate_icon},
+    validation, User, UserId, VaultError, VaultId,
 };
+
+/// Master-password policy and login throttle (docs/security/auth-policy.md).
+pub const MASTER_PASSWORD_MIN_LEN: usize = 12;
+pub const MASTER_PASSWORD_MIN_SCORE: u8 = 3;
+const MASTER_PASSWORD_CONTEXT: &[&str] = &["lockr", "vault", "password"];
+const LOGIN_MAX_FAILURES: u32 = 5;
+const LOGIN_BACKOFF_BASE: Duration = Duration::from_secs(5 * 60);
+const LOGIN_BACKOFF_MAX: Duration = Duration::from_secs(15 * 60);
+
+struct LoginThrottle {
+    failures: u32,
+    blocked_until: Option<SystemTime>,
+}
+
+/// On-disk form. `SystemTime` is not serializable, so the block is stored as a
+/// Unix timestamp.
+#[derive(Serialize, Deserialize)]
+struct StoredThrottle {
+    failures: u32,
+    blocked_until_unix: Option<u64>,
+}
 
 pub struct UserManager {
     app_data_dir: PathBuf,
     pub active_user_id: Option<UserId>,
     active_path: Option<PathBuf>,
+
+    /// Consecutive failed logins per user, persisted so restarting the app
+    /// cannot clear an active lockout. The file is not a user profile and has
+    /// a non-`.json` name so `get_users` never scans it.
+    throttle: HashMap<UserId, LoginThrottle>,
+}
+
+/// The throttle state file. It is a `.dat` file holding JSON so `get_users`
+/// (which scans `*.json` profiles) never reads it as a profile.
+fn throttle_path(app_data_dir: &Path) -> PathBuf {
+    app_data_dir.join("login-throttle.dat")
+}
+
+fn load_throttle(app_data_dir: &Path) -> HashMap<UserId, LoginThrottle> {
+    let Ok(json) = std::fs::read_to_string(throttle_path(app_data_dir)) else {
+        return HashMap::new();
+    };
+    let Ok(stored) = serde_json::from_str::<HashMap<String, StoredThrottle>>(&json) else {
+        return HashMap::new();
+    };
+
+    stored
+        .into_iter()
+        .filter_map(|(id, entry)| {
+            let id = Uuid::parse_str(&id).ok()?;
+            Some((
+                id,
+                LoginThrottle {
+                    failures: entry.failures,
+                    blocked_until: entry
+                        .blocked_until_unix
+                        .map(|secs| UNIX_EPOCH + Duration::from_secs(secs)),
+                },
+            ))
+        })
+        .collect()
+}
+
+/// Reject a master password that does not meet the documented policy. Context
+/// words include the user's name and the product, so predictable passwords
+/// built from them score low.
+pub fn validate_master_password(name: &str, master_password: &str) -> Result<(), VaultError> {
+    if master_password.chars().count() < MASTER_PASSWORD_MIN_LEN {
+        return Err(VaultError::Validation(format!(
+            "Master password must be at least {MASTER_PASSWORD_MIN_LEN} characters"
+        )));
+    }
+
+    let mut inputs: Vec<&str> = MASTER_PASSWORD_CONTEXT.to_vec();
+    inputs.extend(name.split_whitespace());
+
+    let entropy = zxcvbn(master_password, &inputs);
+    let score = u8::from(entropy.score());
+    if score < MASTER_PASSWORD_MIN_SCORE {
+        return Err(VaultError::Validation(format!(
+            "Master password is too weak (score {score}/4); use a longer, less predictable password"
+        )));
+    }
+
+    Ok(())
+}
+
+/// Human-readable retry delay for the throttle message.
+fn format_retry_delay(remaining: Duration) -> String {
+    let seconds = remaining.as_secs().max(1);
+    let minutes = seconds / 60;
+    let secs = seconds % 60;
+
+    match (minutes, secs) {
+        (0, secs) => format!("{secs} second{}", plural(secs)),
+        (minutes, 0) => format!("{minutes} minute{}", plural(minutes)),
+        (minutes, secs) => format!(
+            "{minutes} minute{} {secs} second{}",
+            plural(minutes),
+            plural(secs)
+        ),
+    }
+}
+
+fn plural(value: u64) -> &'static str {
+    if value == 1 {
+        ""
+    } else {
+        "s"
+    }
+}
+
+/// Blocking delay after `failures` consecutive failures, capped. `None` means
+/// the next attempt is still allowed immediately.
+fn login_backoff(failures: u32) -> Option<Duration> {
+    if failures < LOGIN_MAX_FAILURES {
+        return None;
+    }
+
+    let exponent = (failures - LOGIN_MAX_FAILURES).min(10);
+    Some(
+        LOGIN_BACKOFF_BASE
+            .saturating_mul(1u32 << exponent)
+            .min(LOGIN_BACKOFF_MAX),
+    )
 }
 
 impl UserManager {
@@ -31,10 +160,13 @@ impl UserManager {
             }
         }
 
+        let throttle = load_throttle(&app_data_dir);
+
         Ok(Self {
             app_data_dir,
             active_user_id: None,
             active_path: None,
+            throttle,
         })
     }
 
@@ -52,11 +184,13 @@ impl UserManager {
             let json = std::fs::read_to_string(&path)?;
 
             match serde_json::from_str::<User>(&json) {
-                Ok(user_data) => {
+                Ok(mut user_data) => {
+                    user_data.icon = safe_icon(user_data.icon.as_deref());
                     available_accounts.push(user_data);
                 }
-                Err(err) => {
-                    eprintln!("Failed to parse user profile {}: {}", path.display(), err);
+                Err(_) => {
+                    // A malformed profile is skipped; the path and parser
+                    // detail are deliberately not printed.
                 }
             }
         }
@@ -76,9 +210,108 @@ impl UserManager {
             .exists()
     }
 
+    /// Append one authentication event to `auth.log`. Best-effort and never
+    /// contains secret material.
+    fn log_auth_event(&self, event: &str, user: &UserId) {
+        let timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let line = format!("{timestamp} {event} user={user}\n");
+
+        let _ = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(self.app_data_dir.join("auth.log"))
+            .and_then(|mut file| file.write_all(line.as_bytes()));
+    }
+
+    fn check_login_allowed(&self, id: &UserId) -> Result<(), VaultError> {
+        let Some(throttle) = self.throttle.get(id) else {
+            return Ok(());
+        };
+        let Some(blocked_until) = throttle.blocked_until else {
+            return Ok(());
+        };
+
+        let now = SystemTime::now();
+        if blocked_until > now {
+            let remaining = blocked_until.duration_since(now).unwrap_or_default();
+            return Err(VaultError::TooManyAttempts(format_retry_delay(remaining)));
+        }
+
+        Ok(())
+    }
+
+    /// Seconds until the next login is allowed, if a block is active.
+    pub fn cooldown_remaining(&self, id: &UserId) -> Option<u64> {
+        let blocked_until = self.throttle.get(id)?.blocked_until?;
+        let remaining = blocked_until.duration_since(SystemTime::now()).ok()?;
+
+        if remaining.is_zero() {
+            None
+        } else {
+            Some(remaining.as_secs().max(1))
+        }
+    }
+
+    fn record_failed_login(&mut self, id: &UserId) {
+        {
+            let throttle = self.throttle.entry(*id).or_insert(LoginThrottle {
+                failures: 0,
+                blocked_until: None,
+            });
+            throttle.failures = throttle.failures.saturating_add(1);
+
+            if let Some(delay) = login_backoff(throttle.failures) {
+                throttle.blocked_until = Some(SystemTime::now() + delay);
+            }
+        }
+
+        self.save_throttle();
+    }
+
+    fn record_successful_login(&mut self, id: &UserId) {
+        self.throttle.remove(id);
+        self.save_throttle();
+    }
+
+    fn save_throttle(&self) {
+        let stored: HashMap<String, StoredThrottle> = self
+            .throttle
+            .iter()
+            .map(|(id, entry)| {
+                (
+                    id.to_string(),
+                    StoredThrottle {
+                        failures: entry.failures,
+                        blocked_until_unix: entry.blocked_until.and_then(|until| {
+                            until
+                                .duration_since(UNIX_EPOCH)
+                                .ok()
+                                .map(|duration| duration.as_secs())
+                        }),
+                    },
+                )
+            })
+            .collect();
+
+        let Ok(json) = serde_json::to_vec(&stored) else {
+            return;
+        };
+
+        let path = throttle_path(&self.app_data_dir);
+        let temp = path.with_extension("tmp");
+        let _ = std::fs::write(&temp, json).and_then(|_| std::fs::rename(&temp, &path));
+    }
+
     /// Create a brand new user profile.
     /// Generates a random Secret Key and encrypts it with the Master Password.
     pub fn register(&mut self, name: String, master_password: &str) -> Result<User, VaultError> {
+        validation::text("name", &name, validation::MAX_NAME)?;
+
+        // The profile-creation layer enforces the policy so no caller can
+        // bypass it; the command layer also checks early to preserve the
+        // current session on rejection.
+        validate_master_password(&name, master_password)?;
+
         let mut secret_key_bytes = [0u8; 32];
         OsRng.fill_bytes(&mut secret_key_bytes);
 
@@ -96,18 +329,27 @@ impl UserManager {
             vault_ids: Vec::new(),
         };
 
+        // Write the profile before making it active: a failed write must not
+        // leave an active user pointing at a missing file.
+        let path = self
+            .app_data_dir
+            .join(format!("{}.json", user.id.to_string()));
+        std::fs::write(&path, serde_json::to_string_pretty(&user)?)?;
+
         self.active_user_id = Some(user.id);
-        self.active_path = Some(
-            self.app_data_dir
-                .join(format!("{}.json", user.id.to_string())),
-        );
-        self.save_user(&user)?;
+        self.active_path = Some(path);
+        self.log_auth_event("registered", &user.id);
 
         Ok(user)
     }
 
     /// Verify the Master Password and decrypt the Secret Key.
     pub fn login(&mut self, id: &UserId, master_password: &str) -> Result<Vec<u8>, VaultError> {
+        if let Err(error) = self.check_login_allowed(id) {
+            self.log_auth_event("login_blocked", id);
+            return Err(error);
+        }
+
         if !self.is_user_registered(id) {
             return Err(VaultError::UserNotFound("User not registered".into()));
         }
@@ -118,12 +360,18 @@ impl UserManager {
 
         let user_file: User = serde_json::from_str(&json)?;
 
-        let decrypted_key = decrypt(&master_password, &user_file.encrypted_secret_key)?;
+        let decrypted_key =
+            match Self::decrypt_secret_key(master_password, &user_file.encrypted_secret_key) {
+                Ok(key) => key,
+                Err(error) => {
+                    self.record_failed_login(id);
+                    self.log_auth_event("login_failed", id);
+                    return Err(error);
+                }
+            };
 
-        // Verify it's exactly 32 bytes (sanity check)
-        if decrypted_key.len() != 32 {
-            return Err(VaultError::Decryption("Invalid secret key length".into()));
-        }
+        self.record_successful_login(id);
+        self.log_auth_event("login_success", id);
 
         self.active_user_id = Some(user_file.id);
         self.active_path = Some(path);
@@ -131,21 +379,69 @@ impl UserManager {
         Ok(decrypted_key)
     }
 
-    // Logout the active user
-    pub fn logout(&mut self) -> Result<(), VaultError> {
+    /// Forget the active user. Session teardown is the caller's job; this only
+    /// clears which profile is current, even if its file has since vanished.
+    pub fn clear_active_user(&mut self) {
+        self.active_user_id = None;
+        self.active_path = None;
+    }
+
+    /// The profile of the user that is currently logged in.
+    pub fn active_user(&self) -> Result<User, VaultError> {
         let user_id = self
             .active_user_id
             .as_ref()
             .ok_or_else(|| VaultError::UserNotFound("No user is active".into()))?;
 
-        if !self.is_user_registered(user_id) {
-            return Err(VaultError::UserNotFound("User not registered".into()));
+        self.get_user(user_id)
+    }
+
+    /// Re-check the master password of the active user without changing the
+    /// session. The decrypted secret key is zeroized before returning, so a
+    /// successful check leaves no new copy of key material behind.
+    pub fn verify_password(&mut self, master_password: &str) -> Result<(), VaultError> {
+        let user = self.active_user()?;
+
+        if let Err(error) = self.check_login_allowed(&user.id) {
+            self.log_auth_event("reauth_blocked", &user.id);
+            return Err(error);
         }
 
-        self.active_user_id = None;
-        self.active_path = None;
+        let mut secret_key =
+            match Self::decrypt_secret_key(master_password, &user.encrypted_secret_key) {
+                Ok(key) => key,
+                Err(error) => {
+                    self.record_failed_login(&user.id);
+                    self.log_auth_event("reauth_failed", &user.id);
+                    return Err(error);
+                }
+            };
+        secret_key.zeroize();
+        self.record_successful_login(&user.id);
 
         Ok(())
+    }
+
+    /// Whether the active user's profile lists this vault. The profile's
+    /// `vault_ids` is the access-control list vault-scoped commands check.
+    pub fn owns_vault(&self, vault_id: VaultId) -> Result<bool, VaultError> {
+        Ok(self.active_user()?.vault_ids.contains(&vault_id))
+    }
+
+    /// Decrypt a user's secret key with a master password and sanity-check
+    /// its length. Callers that only verify the password must zeroize the
+    /// returned key.
+    fn decrypt_secret_key(
+        master_password: &str,
+        encrypted_secret_key: &str,
+    ) -> Result<Vec<u8>, VaultError> {
+        let secret_key = decrypt(master_password, encrypted_secret_key)?;
+
+        if secret_key.len() != 32 {
+            return Err(VaultError::Decryption("Invalid secret key length".into()));
+        }
+
+        Ok(secret_key)
     }
 
     /// Get the user profile metadata (does NOT decrypt the secret key)
@@ -160,7 +456,8 @@ impl UserManager {
             .ok_or(VaultError::UserNotFound("active_path is not set".into()))?;
 
         let json: String = std::fs::read_to_string(path)?;
-        let user_file: User = serde_json::from_str(&json)?;
+        let mut user_file: User = serde_json::from_str(&json)?;
+        user_file.icon = safe_icon(user_file.icon.as_deref());
 
         Ok(user_file)
     }
@@ -172,6 +469,13 @@ impl UserManager {
         color: Option<String>,
         icon: Option<String>,
     ) -> Result<(), VaultError> {
+        if let Some(name) = &name {
+            validation::text("name", name, validation::MAX_NAME)?;
+        }
+        if let Some(color) = &color {
+            validation::color(color)?;
+        }
+
         let user_id = self
             .active_user_id
             .as_ref()
@@ -186,7 +490,7 @@ impl UserManager {
             user.color = c;
         }
         if let Some(i) = icon {
-            user.icon = if i.is_empty() { None } else { Some(i) };
+            user.icon = validate_icon(Some(i))?;
         }
 
         self.save_user(&user)
@@ -270,6 +574,133 @@ mod tests {
     }
 
     #[test]
+    fn test_profile_fields_are_bounded() {
+        let temp_dir = setup();
+        let mut manager = UserManager::new(temp_dir.clone()).unwrap();
+
+        let long_name = "x".repeat(validation::MAX_NAME + 1);
+        let result = manager.register(long_name.clone(), "correct horse battery staple");
+        assert!(
+            matches!(result, Err(VaultError::Validation(_))),
+            "got {result:?}"
+        );
+
+        let user = manager
+            .register("Alice".to_string(), "correct horse battery staple")
+            .unwrap();
+        let result = manager.update_profile(Some(long_name), None, None);
+        assert!(
+            matches!(result, Err(VaultError::Validation(_))),
+            "got {result:?}"
+        );
+        assert_eq!(manager.get_user(&user.id).unwrap().name, "Alice");
+
+        std::fs::remove_dir_all(temp_dir).ok();
+    }
+
+    #[test]
+    fn test_master_password_policy() {
+        assert!(validate_master_password("Alice", "short").is_err());
+        assert!(
+            validate_master_password("Alice", "passwordpassword").is_err(),
+            "a predictable password must not pass the score floor"
+        );
+        assert!(validate_master_password("Alice", "correct horse battery staple").is_ok());
+    }
+
+    #[test]
+    fn test_login_backoff_grows_and_caps() {
+        assert_eq!(login_backoff(4), None);
+        assert_eq!(login_backoff(5), Some(Duration::from_secs(5 * 60)));
+        assert_eq!(login_backoff(6), Some(Duration::from_secs(10 * 60)));
+        assert_eq!(login_backoff(7), Some(LOGIN_BACKOFF_MAX));
+        assert_eq!(login_backoff(20), Some(LOGIN_BACKOFF_MAX));
+    }
+
+    #[test]
+    fn test_retry_delay_is_human_readable() {
+        assert_eq!(format_retry_delay(Duration::from_secs(300)), "5 minutes");
+        assert_eq!(
+            format_retry_delay(Duration::from_secs(150)),
+            "2 minutes 30 seconds"
+        );
+        assert_eq!(format_retry_delay(Duration::from_secs(1)), "1 second");
+        assert_eq!(format_retry_delay(Duration::from_secs(60)), "1 minute");
+    }
+
+    #[test]
+    fn test_login_throttle_blocks_and_clears() {
+        let temp_dir = setup();
+        let mut manager = UserManager::new(temp_dir.clone()).unwrap();
+        let id = Uuid::new_v4();
+
+        for _ in 0..4 {
+            manager.record_failed_login(&id);
+        }
+        manager.check_login_allowed(&id).unwrap();
+
+        manager.record_failed_login(&id);
+        assert!(matches!(
+            manager.check_login_allowed(&id),
+            Err(VaultError::TooManyAttempts(_))
+        ));
+        assert!(manager.cooldown_remaining(&id).is_some());
+
+        manager.record_successful_login(&id);
+        manager.check_login_allowed(&id).unwrap();
+        assert!(manager.cooldown_remaining(&id).is_none());
+
+        std::fs::remove_dir_all(temp_dir).ok();
+    }
+
+    #[test]
+    fn test_login_throttle_survives_restart() {
+        let temp_dir = setup();
+        let id = Uuid::new_v4();
+
+        {
+            let mut manager = UserManager::new(temp_dir.clone()).unwrap();
+            for _ in 0..5 {
+                manager.record_failed_login(&id);
+            }
+        }
+
+        let manager = UserManager::new(temp_dir.clone()).unwrap();
+        assert!(
+            manager.cooldown_remaining(&id).is_some(),
+            "a restart must not clear an active lockout"
+        );
+        assert!(matches!(
+            manager.check_login_allowed(&id),
+            Err(VaultError::TooManyAttempts(_))
+        ));
+        assert_eq!(
+            manager.get_users().unwrap().len(),
+            0,
+            "the throttle file must not be read as a profile"
+        );
+
+        std::fs::remove_dir_all(temp_dir).ok();
+    }
+
+    #[test]
+    fn test_auth_log_records_events_without_secrets() {
+        let temp_dir = setup();
+        let manager = UserManager::new(temp_dir.clone()).unwrap();
+        let id = Uuid::new_v4();
+        let secret = "correct horse battery staple";
+
+        manager.log_auth_event("login_failed", &id);
+
+        let log = std::fs::read_to_string(temp_dir.join("auth.log")).unwrap();
+        assert!(log.contains("login_failed"));
+        assert!(log.contains(&id.to_string()));
+        assert!(!log.contains(secret), "the log must never contain a secret");
+
+        std::fs::remove_dir_all(temp_dir).ok();
+    }
+
+    #[test]
     fn test_is_registered_and_register() {
         let temp_dir = setup();
         let mut manager = UserManager::new(temp_dir.clone()).unwrap();
@@ -303,7 +734,7 @@ mod tests {
 
         // Setup: Register a user
         let user = manager
-            .register("Charlie".to_string(), "RightPassword")
+            .register("Charlie".to_string(), "correct horse battery staple")
             .unwrap();
 
         // Action: Attempt to login with the wrong password
@@ -317,12 +748,88 @@ mod tests {
     }
 
     #[test]
+    fn test_verify_password_checks_the_active_users_master_password() {
+        let temp_dir = setup();
+        let mut manager = UserManager::new(temp_dir.clone()).unwrap();
+        manager.register("Frank".to_string(), "correct horse battery staple").unwrap();
+
+        manager.verify_password("correct horse battery staple").unwrap();
+
+        let wrong = manager.verify_password("WrongHorse");
+        assert!(
+            matches!(wrong, Err(VaultError::AuthenticationFailed)),
+            "got {wrong:?}"
+        );
+
+        std::fs::remove_dir_all(temp_dir).ok();
+    }
+
+    #[test]
+    fn test_owns_vault_reflects_the_active_users_vault_list() {
+        let temp_dir = setup();
+        let mut manager = UserManager::new(temp_dir.clone()).unwrap();
+        manager.register("Grace".to_string(), "correct horse battery staple").unwrap();
+
+        let owned = Uuid::new_v4();
+        let foreign = Uuid::new_v4();
+        manager.add_vault_to_user(owned).unwrap();
+
+        assert!(manager.owns_vault(owned).unwrap());
+        assert!(!manager.owns_vault(foreign).unwrap());
+
+        std::fs::remove_dir_all(temp_dir).ok();
+    }
+
+    #[test]
+    fn test_update_profile_rejects_a_remote_icon() {
+        let temp_dir = setup();
+        let mut manager = UserManager::new(temp_dir.clone()).unwrap();
+        let user = manager.register("Heidi".to_string(), "correct horse battery staple").unwrap();
+
+        let result = manager.update_profile(
+            None,
+            None,
+            Some("https://attacker.example/x.png".to_string()),
+        );
+
+        assert!(
+            matches!(result, Err(VaultError::Validation(_))),
+            "got {result:?}"
+        );
+        assert_eq!(manager.get_user(&user.id).unwrap().icon, None);
+
+        std::fs::remove_dir_all(temp_dir).ok();
+    }
+
+    #[test]
+    fn test_user_reads_withhold_a_tampered_icon() {
+        let temp_dir = setup();
+        let mut manager = UserManager::new(temp_dir.clone()).unwrap();
+        let user = manager.register("Ivan".to_string(), "correct horse battery staple").unwrap();
+
+        // A tampered profile file can carry any stored icon string.
+        let path = temp_dir.join(format!("{}.json", user.id));
+        let mut stored: User = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        stored.icon = Some("https://attacker.example/x.png".to_string());
+        std::fs::write(&path, serde_json::to_string(&stored).unwrap()).unwrap();
+
+        assert_eq!(manager.get_user(&user.id).unwrap().icon, None);
+        assert_eq!(
+            manager.get_users().unwrap()[0].icon,
+            None,
+            "the user list must withhold a disallowed icon too"
+        );
+
+        std::fs::remove_dir_all(temp_dir).ok();
+    }
+
+    #[test]
     fn test_get_user_without_decrypting_key() {
         let temp_dir = setup();
         let mut manager = UserManager::new(temp_dir.clone()).unwrap();
 
         let user = manager
-            .register("Dave".to_string(), "SomePassword")
+            .register("Dave".to_string(), "correct horse battery staple")
             .unwrap();
 
         // Action: Call get_user (should not require a password)
@@ -340,7 +847,7 @@ mod tests {
         let temp_dir = setup();
         let mut manager = UserManager::new(temp_dir.clone()).unwrap();
 
-        let user = manager.register("Eve".to_string(), "Password").unwrap();
+        let user = manager.register("Eve".to_string(), "correct horse battery staple").unwrap();
 
         let vault_id_1 = Uuid::new_v4();
         let vault_id_2 = Uuid::new_v4();

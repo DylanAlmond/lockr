@@ -18,20 +18,46 @@ Decision record for [#72](https://github.com/DylanAlmond/lockr/issues/72) (paren
 | **Assessed surface** | The Vue renderer and the renderer↔Rust seam: `invoke`, Tauri configuration, capabilities, and the shipped bundle |
 | **Not assessed** | Rust cryptography and vault-format correctness (ADR-0001), the OS, the webview engine, and anything requiring memory forensics |
 | **Not present** | No sync, no Device pairing, no network listener, no updater, no deep links |
-| **Pinned to** | commit `<sha>` — a claim is valid only for the commit it names |
+| **Pinned to** | commit `a41cde1` (full `a41cde1cc794de4ab3cf6f52349a823ad9a90d52`) — a claim is valid only for the commit it names |
 | **Method** | OWASP ASVS 5.0 Level 2, client tier, plus a Tauri 2 hardening supplement |
 
 "Level 2" means **all applicable L1 and L2 requirements**, not a subset. That is why the claim is
 split into a target and a status.
+
+### Allowed communication
+
+The complete egress allowlist. Production builds make **no outbound HTTP, DNS or TLS request**;
+the CSP restricts the renderer to the entries below.
+
+| Destination | When | Purpose |
+|---|---|---|
+| `ipc: http://ipc.localhost` | always | renderer ↔ Rust core (`invoke`) |
+| App protocol, `'self'` | always | bundled scripts, styles, font, bundled SVG |
+| `data:` images | always | icon uploads (128 × 128 PNG) |
+| `ws://localhost:1420`, `ws://localhost:1421` | **development only** | Vite HMR, allowed by `devCsp` |
+
+No other destination is permitted: `connect-src` is IPC-only, `img-src` is
+`'self' data:`, and the `opener`, `fs`, `shell` and `http` plugins are not
+installed. The bundle's only external string literals are `http://www.w3.org`
+(the SVG namespace) and `https://vuejs.org` (Vue error text); neither is fetched.
 
 ## 2. The claim
 
 **Target:** ASVS 5.0 Level 2, client tier, plus the Tauri supplement recorded in
 `docs/security/research/audit-baseline.md`.
 
-**Status:** *assessed against L2.* The conformance sweep is complete against `f3d5c82` on 2026-11-27.
-**No ASVS level is claimed** — a compliance claim needs zero open deviations, and the sweep found one
-P0, two P1 and a long P2/P3 tail.
+**Status:** *assessed against L2.* The conformance sweep was re-run against `a41cde1` on 2026-11-28.
+**No ASVS level is claimed** — a compliance claim needs zero open deviations, and residual
+deviations and unverified release/OS rows remain.
+
+**Remediation status (2026-11-28):** 28 findings are fixed and F-27 is accepted for its deliberately
+unlogged authorisation denials and unexpected errors; every finding in `findings.md` names its
+commit, tests, or acceptance reason. The re-run marks **89 rows met, 2 partial, 4 deviated, 6 n/a and 4
+unchecked**. This does **not** move the rung: the four unchecked rows need a signed release artefact
+or an OS inspection (T-09, T-15, 13.4.1, 13.4.2), the two partial rows are mitigated-but-not-configured
+controls (3.4.5, 11.2.2), and the four deviated rows are standing policy choices (6.2.12, 6.3.3) or
+accepted logging omissions (16.3.2, 16.3.4). The rung moves only when every applicable row is met or
+n/a and the residual is genuinely out of scope.
 
 | Rung | Meaning |
 |---|---|
@@ -57,10 +83,13 @@ re-pinned on every release.
 
 ## 4. Findings
 
-Across **105 checklist rows**: 40 met, 17 partial, 41 deviated, 6 not applicable, 1 unobservable
-(installer signing, which needs a signed release artefact).
+Across **105 checklist rows at `a41cde1`**: 89 met, 2 partial, 4 deviated, 6 not applicable,
+4 unchecked (release/installer facts that need an artefact). The original sweep against `f3d5c82`
+was 40 met, 17 partial, 41 deviated, 6 not applicable, 1 unchecked.
 
-The 41 deviated rows resolve into **29 findings**, in the project's severity scheme, not CVSS:
+The original 41 deviated rows resolved into **29 findings**, in the project's severity scheme, not
+CVSS; 28 are fixed and F-27 is accepted for the logging omissions (§4 residual rows). The severity
+table below describes that original sweep:
 
 | Severity | Count | Findings |
 |---|---|---|
@@ -78,6 +107,35 @@ The three that matter most:
   item can send a request to an attacker-chosen host, leaking IP and user agent.
 - **F-12 (P1) — no command checks `vault_id ∈ active_user.vault_ids`.** Latent while only one User's
   vaults are unlocked, and a cross-User read path in combination with F-13.
+
+**Post-remediation:** each of these is fixed in `findings.md` with its commit and tests. The severity
+table and examples above describe the original `f3d5c82` sweep; the current row status is in
+`audit-checklist.md` at `a41cde1`.
+
+### Residual rows at the re-run
+
+These are the rows that are **not** met at `a41cde1`. The unchecked rows need a release artefact or
+OS inspection and were not claimed; the partial and deviated rows are recorded, not hidden.
+
+| Row | Status | Why |
+|---|---|---|
+| T-09 | unchecked | An unsigned release was built at `bdea025`; confirming no inspector opens still needs a launch test. The `devtools` Cargo feature is absent (`static:devtools-absent`) |
+| T-15 | unchecked | Windows-only, intentional (2026-11-28): the workflow accepts the self-signed dev certificate on the runner and enforces the Windows verifier; macOS/Linux signing and verification are commented out. The self-signed dry run at `d001c13` produced Valid, timestamped MSI/NSIS installers and MSI payload, which proves the mechanism but not trust. A CA-issued certificate or Azure Trusted Signing is still required (`release-signing.md` §5) |
+| 13.4.1 | unchecked | The installer artefacts exist, but the payload could not be enumerated (`lessmsi`/`7z` unavailable); `dist/` contains no VCS metadata or maps |
+| 13.4.2 | unchecked | The release build succeeded and has no source maps; a launch check of the installed release is still needed |
+| 3.4.5 | partial | Tauri 2.11 cannot set `Referrer-Policy`; no outbound path remains to leak a referrer (`tauri-config-baseline.md` §3) |
+| 11.2.2 | partial | No per-file algorithm identifier; a cipher swap is a schema migration (`crypto-inventory.md` §3) |
+| 6.2.12 | deviated | Standing deviation: a breached-password lookup needs a network call, contrary to local-first |
+| 6.3.3 | deviated | Standing deviation: one factor (the master password); the secret key is not independent possession |
+| 16.3.2 | deviated | Authorisation denials are deliberately not logged (`logging-policy.md` §2) — accepted omission |
+| 16.3.4 | deviated | Unexpected errors are deliberately not logged (`logging-policy.md` §2) — accepted omission |
+
+**Release artefacts (2026-11-28):** an unsigned release build at `bdea025` produced MSI and NSIS
+installers; both are `NotSigned`. The release workflow now signs Windows (Authenticode + RFC 3161
+timestamp), macOS (Developer ID + notarization + stapling) and Linux (GPG), and runs a verifier per
+platform, but no signing material is configured. T-15 therefore stays unchecked, as do the
+launch/payload checks. See `release-signing.md` and `release-verification.md` for the secrets, hashes
+and exact commands.
 
 **Notable absence:** there is no HTML, script, navigation or `postMessage` sink in the renderer. The
 audit found no live cross-site-scripting path, which is why the missing CSP is P2 rather than P0.
@@ -118,3 +176,7 @@ does not lead to a row, the claim is wrong and should be removed.
 |---|---|---|
 | 2026-11-27 | `f3d5c82` | Document created; target set |
 | 2026-11-27 | `f3d5c82` | Conformance sweep complete; status = assessed against L2; 29 findings recorded |
+| 2026-11-28 | remediation branches | 28 findings fixed, F-27 accepted for its logging omissions; assessment not re-pinned; checklist re-run is the release task |
+| 2026-11-28 | `a41cde1` | Re-ran the checklist against the remediated tree; re-pinned; 89 met / 2 partial / 4 deviated / 6 n/a / 4 unchecked; status remains assessed against L2 |
+| 2026-11-28 | `bdea025` | Built unsigned MSI/NSIS installers; both NotSigned; build-side sourcemap/devtools controls verified, launch/payload checks remain |
+| 2026-11-28 | `d9a4935` | Wired Windows Authenticode, macOS Developer ID/notarization and Linux GPG signing with fail-closed guards and per-platform verifiers; T-15 stays unchecked until a signed release exists |

@@ -7,22 +7,29 @@
     "dev": "vite",
     "build": "vue-tsc --noEmit && vite build",
     "preview": "vite preview",
+    "test": "vitest run",
+    "test:compliance": "node scripts/compliance/run.mjs",
+    "audit": "yarn npm audit --severity high",
+    "sbom": "node scripts/sbom.mjs",
     "tauri": "tauri"
   },
   "dependencies": {
     "@calcom/cal-sans-ui": "^1.3.0",
     "@lucide/vue": "^1.24.0",
     "@tauri-apps/api": "^2",
-    "@tauri-apps/plugin-opener": "^2",
     "vue": "^3.5.13",
     "vue-router": "^5.1.0"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2",
     "@vitejs/plugin-vue": "^5.2.1",
+    "@vue/compiler-dom": "^3.5.13",
+    "@vue/test-utils": "^2.4.6",
+    "jsdom": "^26.1.0",
     "typescript": "~5.6.2",
-    "vite": "^6.0.3",
+    "vite": "^6.4.6",
     "vite-svg-loader": "^5.1.1",
+    "vitest": "^4.1.11",
     "vue-tsc": "^2.1.10"
   },
   "packageManager": "yarn@4.18.1"

@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - release
+  workflow_dispatch:
 
 jobs:
   publish-tauri:
@@ -17,7 +18,7 @@ jobs:
             args: "--target aarch64-apple-darwin"
           - platform: "macos-latest" # for Intel based macs.
             args: "--target x86_64-apple-darwin"
-          - platform: "ubuntu-22.04" # for Tauri v1 you could replace this with ubuntu-20.04.
+          - platform: "ubuntu-22.04"
             args: ""
           - platform: "windows-latest"
             args: ""
@@ -51,13 +52,182 @@ jobs:
       - name: install frontend dependencies
         run: yarn install # change this to npm, pnpm or bun depending on which one you use.
 
-      - uses: tauri-apps/tauri-action@v0
+      # Signing scope — INTENTIONAL, 2026-11-28 --------------------------------
+      # Lockr currently ships on Windows only. Windows signing stays enforced,
+      # but the macOS and Linux signing guards, key imports, signing environment
+      # and verification steps are commented out so a release can run without
+      # Apple Developer ID or Linux GPG credentials. T-15 covers Windows only
+      # until those blocks are restored. The Windows job accepts the self-signed
+      # development certificate on purpose: replace it with a CA-issued
+      # certificate or Azure Trusted Signing before calling T-15 met.
+      # See docs/security/release-signing.md §5.
+
+      - name: require the Windows signing certificate
+        if: matrix.platform == 'windows-latest'
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          if (-not $env:WINDOWS_CERTIFICATE -or -not $env:WINDOWS_CERTIFICATE_PASSWORD) {
+            throw "WINDOWS_CERTIFICATE and WINDOWS_CERTIFICATE_PASSWORD must be set for a release build (T-15)"
+          }
+
+      - name: import the Windows signing certificate
+        if: matrix.platform == 'windows-latest'
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          New-Item -ItemType directory -Path certificate | Out-Null
+          Set-Content -Path certificate/tempCert.txt -Value $env:WINDOWS_CERTIFICATE
+          certutil -decode certificate/tempCert.txt certificate/certificate.pfx
+          Remove-Item -Path certificate/tempCert.txt
+          $certs = Import-PfxCertificate -FilePath certificate/certificate.pfx -CertStoreLocation Cert:\CurrentUser\My -Password (ConvertTo-SecureString -String $env:WINDOWS_CERTIFICATE_PASSWORD -Force -AsPlainText)
+          $cert = $certs | Where-Object { $_.HasPrivateKey } | Select-Object -First 1
+          if (-not $cert) { throw "The certificate import produced no key pair" }
+          if ($cert.Subject -eq $cert.Issuer) {
+            # TEMPORARY (intentional): the Windows release currently uses a
+            # self-signed development certificate. Trust it on this ephemeral
+            # runner so the verifier can validate the chain. A CA-issued
+            # certificate needs no trust step; delete this block with the dev
+            # certificate. See docs/security/release-signing.md §5.
+            $publicCert = Join-Path $env:RUNNER_TEMP 'lockr-signing.cer'
+            Export-Certificate -Cert $cert -FilePath $publicCert | Out-Null
+            Import-Certificate -FilePath $publicCert -CertStoreLocation Cert:\CurrentUser\Root | Out-Null
+            Remove-Item -Path $publicCert
+          }
+          "WINDOWS_CERT_THUMBPRINT=$($cert.Thumbprint)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Remove-Item -Path certificate/certificate.pfx
+
+      - name: write the Windows signing config
+        if: matrix.platform == 'windows-latest'
+        shell: pwsh
+        run: |
+          @{
+            bundle = @{
+              windows = @{
+                certificateThumbprint = $env:WINDOWS_CERT_THUMBPRINT
+                digestAlgorithm = 'sha256'
+                timestampUrl = 'http://timestamp.digicert.com'
+              }
+            }
+          } | ConvertTo-Json -Depth 5 | Set-Content -Path windows-signing.conf.json -Encoding utf8
+
+      # macOS signing is intentionally disabled for the Windows-only release.
+      # Restore this block, the Apple env on the macOS build step and the macOS
+      # verification step together before shipping a macOS build (T-15).
+      #
+      # - name: require the macOS signing identity
+      #   if: matrix.platform == 'macos-latest'
+      #   env:
+      #     APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+      #     APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      #     APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+      #     APPLE_ID: ${{ secrets.APPLE_ID }}
+      #     APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+      #     APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      #   run: |
+      #     : "${APPLE_CERTIFICATE:?APPLE_CERTIFICATE must be set for a release build (T-15)}"
+      #     : "${APPLE_CERTIFICATE_PASSWORD:?APPLE_CERTIFICATE_PASSWORD must be set for a release build (T-15)}"
+      #     : "${APPLE_SIGNING_IDENTITY:?APPLE_SIGNING_IDENTITY must be set for a release build (T-15)}"
+      #     : "${APPLE_ID:?APPLE_ID must be set for notarization (T-15)}"
+      #     : "${APPLE_PASSWORD:?APPLE_PASSWORD must be set for notarization (T-15)}"
+      #     : "${APPLE_TEAM_ID:?APPLE_TEAM_ID must be set for notarization (T-15)}"
+
+      # Linux signing is intentionally disabled for the Windows-only release.
+      # Restore these blocks, the SIGN env on the Linux build step and the Linux
+      # sign/verify step together before shipping a Linux build (T-15).
+      #
+      # - name: require the Linux signing key
+      #   if: matrix.platform == 'ubuntu-22.04'
+      #   env:
+      #     LINUX_GPG_PRIVATE_KEY: ${{ secrets.LINUX_GPG_PRIVATE_KEY }}
+      #     LINUX_GPG_KEY_ID: ${{ secrets.LINUX_GPG_KEY_ID }}
+      #     LINUX_GPG_PASSPHRASE: ${{ secrets.LINUX_GPG_PASSPHRASE }}
+      #   run: |
+      #     : "${LINUX_GPG_PRIVATE_KEY:?LINUX_GPG_PRIVATE_KEY must be set for a release build (T-15)}"
+      #     : "${LINUX_GPG_KEY_ID:?LINUX_GPG_KEY_ID must be set for a release build (T-15)}"
+      #     : "${LINUX_GPG_PASSPHRASE:?LINUX_GPG_PASSPHRASE must be set for a release build (T-15)}"
+      #
+      # - name: import the Linux signing key
+      #   if: matrix.platform == 'ubuntu-22.04'
+      #   env:
+      #     LINUX_GPG_PRIVATE_KEY: ${{ secrets.LINUX_GPG_PRIVATE_KEY }}
+      #   run: |
+      #     key="$RUNNER_TEMP/release-signing-key.asc"
+      #     printf '%s' "$LINUX_GPG_PRIVATE_KEY" | base64 --decode > "$key"
+      #     gpg --batch --import "$key"
+      #     rm -f "$key"
+
+      # Build and publish -----------------------------------------------------
+
+      - name: build and publish (macOS)
+        if: matrix.platform == 'macos-latest'
+        uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Apple signing/notarization variables are intentionally omitted:
+          # macOS signing is disabled for the Windows-only release.
         with:
-          tagName: lockr-v__VERSION__ # the action automatically replaces \_\_VERSION\_\_ with the app version.
+          tagName: lockr-v__VERSION__ # the action automatically replaces __VERSION__ with the app version.
           releaseName: "Lockr v__VERSION__"
           releaseBody: "See the assets to download this version and install."
           releaseDraft: true
           prerelease: false
           args: ${{ matrix.args }}
+
+      - name: build and publish (Linux)
+        if: matrix.platform == 'ubuntu-22.04'
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # SIGN / SIGN_KEY / APPIMAGETOOL_* are intentionally omitted: Linux
+          # signing is disabled for the Windows-only release.
+        with:
+          tagName: lockr-v__VERSION__
+          releaseName: "Lockr v__VERSION__"
+          releaseBody: "See the assets to download this version and install."
+          releaseDraft: true
+          prerelease: false
+          args: ${{ matrix.args }}
+
+      - name: build and publish (Windows)
+        if: matrix.platform == 'windows-latest'
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: lockr-v__VERSION__
+          releaseName: "Lockr v__VERSION__"
+          releaseBody: "See the assets to download this version and install."
+          releaseDraft: true
+          prerelease: false
+          args: ${{ matrix.args }} --config windows-signing.conf.json
+
+      # Verification ----------------------------------------------------------
+      # Windows signatures are enforced. A failure here fails the job, leaving
+      # the draft release unshipped.
+
+      - name: verify the Windows signatures
+        if: matrix.platform == 'windows-latest'
+        shell: pwsh
+        run: ./scripts/verify-windows-signatures.ps1
+
+      # macOS and Linux verification is intentionally disabled for the
+      # Windows-only release. Restore the steps with their signing blocks.
+      #
+      # - name: verify the macOS signatures
+      #   if: matrix.platform == 'macos-latest'
+      #   run: bash scripts/verify-macos-signatures.sh
+      #
+      # - name: sign and verify the Linux assets
+      #   if: matrix.platform == 'ubuntu-22.04'
+      #   env:
+      #     GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      #     GPG_KEY_ID: ${{ secrets.LINUX_GPG_KEY_ID }}
+      #     GPG_PASSPHRASE: ${{ secrets.LINUX_GPG_PASSPHRASE }}
+      #   run: |
+      #     bash scripts/sign-linux-assets.sh
+      #     bash scripts/verify-linux-signatures.sh

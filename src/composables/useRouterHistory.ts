@@ -11,8 +11,7 @@ export function useRouterHistory(router: Router) {
 
   const state = computed(() => {
     // Depend on version so this recomputes after each navigation
-    version.value;
-    console.log(window.history);
+    void version.value;
 
     return window.history.state ?? {};
   });

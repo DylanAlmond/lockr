@@ -4,6 +4,10 @@ Decision for [#71](https://github.com/DylanAlmond/lockr/issues/71) (parent [#63]
 This is a policy, not a fix: it states the rule, compares it with current behaviour, and names the
 gap in each component. Implementation becomes fix tickets after the map closes.
 
+**Applied:** R-S2, R-S3 and R-S4, including the backend copy path in §5, for the detail views, the
+Input password toggle, the editors and the copier (F-10, F-11), and the idle/absolute session timeout
+(F-19, `auth-policy.md`). §3 describes the pre-fix behaviour.
+
 Scope: **T1 field-key secrets** from the threat model — account `password`; card `card_number`,
 `security_code`, `pin`. Master-password reveal toggles on the auth screens are included because
 they expose A1 by the same mechanism. Note bodies and identity PII are T2 and are not covered here
@@ -122,8 +126,9 @@ land. Stated plainly: lifetime policy is exposure minimisation, not access contr
 - **Core-side plaintext.** The Rust core holds decrypted vaults for the whole session, and
   `set_autosave(false)` can extend that indefinitely. Renderer copies are bounded here; core
   plaintext is bounded by the threat model's session rule.
-- **Idle auto-lock.** The app has no inactivity timeout. That is a finding under ASVS 7.3.1, not a
-  parameter of this policy, and it needs its own decision about lock semantics.
+- **Idle auto-lock.** Decided separately and implemented in `auth-policy.md`: a 15-minute idle and
+  12-hour absolute timeout end the session in the core. That is what bounds core plaintext; this
+  policy continues to bound renderer reachability.
 - **T2 content.** Note bodies, identity PII, usernames and URLs stay visible and copyable. The audit
   should record that "a note body is not a secret" is a product choice a User may not share.
 - **OS clipboard history.** Clipboard managers may retain the value; outside app control, and stated
@@ -144,9 +149,9 @@ land. Stated plainly: lifetime policy is exposure minimisation, not access contr
 
 Discharges or partly discharges: ASVS **14.3.1** (authenticated data cleared when the session ends),
 **14.2.1** (no sensitive data in URLs), **16.2.5** (no secrets in logs), **7.4.1** (a terminated
-session cannot be used again — with the session rule). Leaves **7.3.1** (inactivity timeout) open as
-a finding, and adds the project-specific rows: reveal bound, clipboard expiry, never-hold list,
-masking invariant, and no-false-zeroization.
+session cannot be used again — with the session rule). **7.3.1** (inactivity timeout) is discharged
+by `auth-policy.md`. The project-specific rows are: reveal bound, clipboard expiry, never-hold
+list, masking invariant, and no-false-zeroization.
 
 ## 10. Named follow-ups
 
@@ -156,9 +161,9 @@ Fix tickets after the map closes, in priority order:
    removes the copy path from the renderer (§5).
 2. **Shared reveal primitive** — one 10 s timer plus blur/visibility handling, used by both detail
    views and `Input`'s password toggle.
-3. **Editor draft teardown** — drop `passwordOriginal`/`passwordInput` and card drafts on unmount and
-   route change.
-4. **Remove the cosmetic cooldown** — `ItemField`'s 2 s timer should not be mistaken for clipboard
-   expiry once the real policy exists.
-5. **Idle auto-lock decision** — close the ASVS 7.3.1 finding by deciding lock semantics, or record
-   the acceptance.
+3. **Editor draft teardown** — applied in `8fbe5b8`: `AccountEdit`, `CardEdit`, `NewAccountForm` and
+   `NewCardForm` clear their secret drafts on unmount (route change).
+4. **Copy feedback is icon-only** — `ItemField` shows a 2 s tick when a copy succeeds. It is feedback,
+   not a clipboard-expiry signal; the 30 s clear is enforced in the core.
+5. **Idle auto-lock** — decided and implemented: a 15-minute idle and 12-hour absolute timeout end
+   the session in the core (`auth-policy.md`).

@@ -109,6 +109,23 @@ export function useUser() {
     }
   }
 
+  /** Seconds until the core will allow another login attempt (0 = none). */
+  async function getLoginCooldown(id: string): Promise<number> {
+    try {
+      const remaining = await invoke<number | null>('login_cooldown', { id });
+      return remaining ?? 0;
+    } catch (e) {
+      error.value = String(e);
+      return 0;
+    }
+  }
+
+  /** The core ended the session: clear local state and return to auth. */
+  function handleSessionExpired() {
+    user.value = null;
+    router.replace('/auth');
+  }
+
   async function deleteUser(): Promise<Boolean> {
     try {
       await invoke<User>('delete_user');
@@ -129,6 +146,8 @@ export function useUser() {
     register,
     login,
     logout,
+    getLoginCooldown,
+    handleSessionExpired,
     fetchUser,
     updateProfile,
     deleteUser

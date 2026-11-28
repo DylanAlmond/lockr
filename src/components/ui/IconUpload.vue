@@ -20,12 +20,14 @@ const emit = defineEmits<{
 }>();
 
 const isUploading = ref(false);
+const uploadError = ref('');
 
 async function handleUpload() {
   if (isUploading.value) return;
 
   try {
     isUploading.value = true;
+    uploadError.value = '';
     const file = await selectImageFile();
 
     if (!file) {
@@ -35,7 +37,7 @@ async function handleUpload() {
     const base64 = await processImageToBase64(file);
     emit('update:modelValue', base64);
   } catch (error) {
-    console.error('Icon upload failed:', error);
+    uploadError.value = error instanceof Error ? error.message : 'Upload failed';
   } finally {
     isUploading.value = false;
   }
@@ -60,6 +62,7 @@ async function handleUpload() {
       <Image class="upload-overlay" :size="28" />
     </div>
     <p v-if="hint" class="icon-hint">{{ hint }}</p>
+    <p v-if="uploadError" class="icon-error">{{ uploadError }}</p>
   </div>
 </template>
 
@@ -132,5 +135,12 @@ async function handleUpload() {
   font-size: 0.75rem;
   color: var(--color-text-muted);
   margin: 0;
+}
+
+.icon-error {
+  font-size: 0.75rem;
+  color: var(--color-danger, #ef4444);
+  margin: 0;
+  text-align: center;
 }
 </style>

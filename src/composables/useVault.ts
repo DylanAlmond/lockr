@@ -89,13 +89,15 @@ export function useVault() {
     }
   }
 
-  async function deleteVault(vaultId: string): Promise<boolean> {
+  /** Returns the failure message, or null when the vault was deleted. */
+  async function deleteVault(vaultId: string, masterPassword: string): Promise<string | null> {
+    error.value = null;
     try {
-      await invoke('delete_vault', { vaultId });
-      return true;
+      await invoke('delete_vault', { vaultId, masterPassword });
+      return null;
     } catch (e) {
       error.value = String(e);
-      return false;
+      return error.value;
     }
   }
 
@@ -148,6 +150,21 @@ export function useVault() {
       // Errors propagate: null must mean 'no value exists' only, so
       // callers can never mistake a failed fetch for an empty secret
       throw e;
+    }
+  }
+
+  /** Copy a secret through the core; the value never returns to the renderer. */
+  async function copyItemSecret(
+    vaultId: string,
+    itemId: string,
+    fieldKey: string
+  ): Promise<boolean> {
+    try {
+      await invoke('copy_item_secret', { vaultId, itemId, fieldKey });
+      return true;
+    } catch (e) {
+      error.value = String(e);
+      return false;
     }
   }
 
@@ -297,6 +314,7 @@ export function useVault() {
 
     // Per-field secrets
     getItemSecret,
+    copyItemSecret,
     updateItemSecret,
     getItemPasswordStrength,
 

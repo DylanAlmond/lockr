@@ -1,8 +1,11 @@
+mod clipboard;
 mod commands;
 mod crypto;
 mod error;
+mod icons;
 mod models;
-mod user_manager;
+pub mod user_manager;
+mod validation;
 mod vault_manager;
 
 use std::sync::Mutex;
@@ -30,18 +33,11 @@ pub fn run() {
                 UserManager::new(app_data_dir).expect("Failed to initialize UserManager");
 
             // Bundle them into our shared state
-            let app_state = ManagerState {
-                vault_manager,
-                user_manager,
-                master_password: None,
-                secret_key: None,
-            };
-
-            app.manage(Mutex::new(app_state));
+            app.manage(Mutex::new(ManagerState::new(vault_manager, user_manager)));
+            commands::spawn_session_monitor(app.handle().clone());
 
             Ok(())
         })
-        .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             // User
             commands::get_users,
@@ -50,7 +46,9 @@ pub fn run() {
             commands::get_user,
             commands::get_user_by_id,
             commands::update_profile,
+            commands::login_cooldown,
             commands::logout,
+            commands::session_activity,
             commands::delete_user,
             // Vaults
             commands::list_vault_ids,
@@ -69,6 +67,7 @@ pub fn run() {
             commands::get_item_by_id,
             commands::get_all_items,
             commands::get_item_secret,
+            commands::copy_item_secret,
             commands::update_item_secret,
             commands::get_item_password_strength,
             // Util
@@ -78,6 +77,12 @@ pub fn run() {
             commands::set_autosave,
             commands::is_vault_dirty
         ])
+        .on_window_event(|_window, event| {
+            // Best-effort: do not leave a copied secret behind on exit.
+            if let tauri::WindowEvent::CloseRequested { .. } = event {
+                clipboard::clear();
+            }
+        })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

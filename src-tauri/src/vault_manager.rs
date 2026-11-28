@@ -1,4 +1,9 @@
-use std::{collections::HashMap, fs::read_dir, path::PathBuf};
+use std::{
+    collections::HashMap,
+    fs::read_dir,
+    io::Write,
+    path::{Path, PathBuf},
+};
 
 use chrono::Utc;
 use uuid::Uuid;
@@ -7,6 +12,8 @@ use zxcvbn::{zxcvbn, Entropy};
 use crate::crypto::{
     decrypt_with_key, derive_master_key, encrypt_with_key, generate_salt, MasterKey, SALT_LEN,
 };
+use crate::icons::validate_icon;
+use crate::validation;
 use crate::{
     ItemFilter, CURRENT_SCHEMA_VERSION, IntoSafe, ItemId, ItemKind, ItemSecrets,
     LegacyVault, NewItemData, SecretInput, SECRET_FIELD_PASSWORD, SafeItem, SafeVault, Vault,
@@ -74,6 +81,41 @@ impl VaultManager {
         self.vaults_dir.join(format!("{}.vault.OLD", vault_id))
     }
 
+    /// Sibling temp file used while writing a vault. A crash can leave one
+    /// behind; its `.tmp` extension keeps it out of `list_vault_ids`, and the
+    /// next save truncates it rather than reading it.
+    fn vault_temp_path(&self, vault_id: VaultId) -> PathBuf {
+        self.vaults_dir.join(format!("{}.vault.tmp", vault_id))
+    }
+
+    /// Get path to the tombstone a deleted vault is moved to. Deletion never
+    /// unlinks vault data: the file is renamed out of the enumerable `.vault`
+    /// set, so it can still be recovered from disk out of band.
+    fn vault_tombstone_path(&self, vault_id: VaultId) -> PathBuf {
+        self.vaults_dir.join(format!("{}.vault.deleted", vault_id))
+    }
+
+    /// A tombstone path that does not exist yet. A repeated delete of the same
+    /// vault gets a numbered suffix rather than overwriting the earlier copy,
+    /// so every deletion stays recoverable.
+    fn next_tombstone_path(&self, vault_id: VaultId) -> PathBuf {
+        let base = self.vault_tombstone_path(vault_id);
+        if !base.exists() {
+            return base;
+        }
+
+        let mut generation = 1u32;
+        loop {
+            let candidate = self
+                .vaults_dir
+                .join(format!("{}.{}.vault.deleted", vault_id, generation));
+            if !candidate.exists() {
+                return candidate;
+            }
+            generation += 1;
+        }
+    }
+
     /// Check if a SPECIFIC vault is unlocked
     fn is_vault_unlocked(&self, vault_id: VaultId) -> bool {
         self.unlocked_vaults.contains_key(&vault_id)
@@ -98,8 +140,9 @@ impl VaultManager {
         Ok(&mut uv.vault)
     }
 
-    /// Returns a list of existing vault IDs (filenames) without unlocking them
-    pub fn list_vault_ids(&self) -> Result<Vec<String>, VaultError> {
+    /// Returns a list of existing vault IDs without unlocking them. Files
+    /// whose stem is not a UUID are not vaults and are skipped.
+    pub fn list_vault_ids(&self) -> Result<Vec<VaultId>, VaultError> {
         let mut ids = Vec::new();
 
         if !self.vaults_dir.exists() {
@@ -114,7 +157,9 @@ impl VaultManager {
                 if extension == "vault" {
                     if let Some(stem) = path.file_stem() {
                         if let Some(id_str) = stem.to_str() {
-                            ids.push(id_str.to_string());
+                            if let Ok(id) = Uuid::parse_str(id_str) {
+                                ids.push(id);
+                            }
                         }
                     }
                 }
@@ -141,6 +186,9 @@ impl VaultManager {
         master_password: &str,
         secret_key: &[u8],
     ) -> Result<Vault, VaultError> {
+        validation::text("vault name", &name, validation::MAX_NAME)?;
+        validation::color(&color)?;
+
         // Getting some weird issue in Win 10 where suddenly it wouldn't make the vaults dir on init
         if !self.vaults_dir.exists() {
             std::fs::create_dir_all(&self.vaults_dir)?;
@@ -288,12 +336,43 @@ impl VaultManager {
         };
         // Immutable borrow ends here — NLL allows mutable borrow below
 
-        let path = self.vault_path(vault_id);
-        std::fs::write(path, encrypted)?;
+        self.write_vault_file(vault_id, &encrypted)?;
 
         // Clear dirty flag
         if let Some(uv) = self.unlocked_vaults.get_mut(&vault_id) {
             uv.dirty = false;
+        }
+
+        Ok(())
+    }
+
+    /// Write the encrypted vault to a sibling temp file, fsync it, then rename
+    /// over the live file. A crash between those steps leaves either the old
+    /// vault or the complete new one, never a truncated file.
+    fn write_vault_file(&self, vault_id: VaultId, encrypted: &str) -> Result<(), VaultError> {
+        let path = self.vault_path(vault_id);
+        let temp = self.vault_temp_path(vault_id);
+
+        let write_result = (|| -> std::io::Result<()> {
+            let mut file = std::fs::File::create(&temp)?;
+            file.write_all(encrypted.as_bytes())?;
+            file.sync_all()?;
+            // Windows blocks renaming over a file with an open handle.
+            drop(file);
+            std::fs::rename(&temp, &path)
+        })();
+
+        if let Err(error) = write_result {
+            let _ = std::fs::remove_file(&temp);
+            return Err(error.into());
+        }
+
+        // Persist the rename itself on Unix; Windows has no directory fsync.
+        #[cfg(unix)]
+        {
+            if let Ok(dir) = std::fs::File::open(&self.vaults_dir) {
+                let _ = dir.sync_all();
+            }
         }
 
         Ok(())
@@ -346,6 +425,13 @@ impl VaultManager {
         name: Option<String>,
         color: Option<String>,
     ) -> Result<(), VaultError> {
+        if let Some(name) = &name {
+            validation::text("vault name", name, validation::MAX_NAME)?;
+        }
+        if let Some(color) = &color {
+            validation::color(color)?;
+        }
+
         {
             let vault = self.get_vault_mut(vault_id)?;
             if let Some(n) = name {
@@ -360,16 +446,32 @@ impl VaultManager {
         Ok(())
     }
 
-    /// Delete a given vault file and remove from RAM.
-    pub fn delete_vault(&mut self, vault_id: VaultId) -> Result<(), VaultError> {
+    /// Move a vault file to a fresh tombstone and remove it from RAM.
+    ///
+    /// The file is renamed rather than unlinked, and the `.deleted` suffix
+    /// keeps it out of `list_vault_ids`. Returns the tombstone path so the
+    /// caller can undo the move if a later step fails.
+    pub fn delete_vault(&mut self, vault_id: VaultId) -> Result<PathBuf, VaultError> {
+        let path = self.vault_path(vault_id);
+        if !path.exists() {
+            return Err(VaultError::NotFound(vault_id.to_string()));
+        }
+
         if self.is_vault_unlocked(vault_id) {
             self.lock_vault(Some(vault_id));
         }
 
-        let path = self.vault_path(vault_id);
+        let tombstone = self.next_tombstone_path(vault_id);
+        std::fs::rename(path, &tombstone)?;
 
-        std::fs::remove_file(path).map_err(VaultError::Io)?;
+        Ok(tombstone)
+    }
 
+    /// Undo a tombstone move, putting the vault file back in its live place.
+    /// Used to keep the file and the user's vault list consistent when
+    /// recording a deletion fails.
+    pub fn restore_vault(&self, vault_id: VaultId, tombstone: &Path) -> Result<(), VaultError> {
+        std::fs::rename(tombstone, self.vault_path(vault_id))?;
         Ok(())
     }
 
@@ -401,6 +503,15 @@ impl VaultManager {
         data: NewItemData,
         secrets: Option<Vec<SecretInput>>,
     ) -> Result<SafeItem, VaultError> {
+        let icon = validate_icon(icon)?;
+        validation::optional("display name", &display_name, validation::MAX_DISPLAY_NAME)?;
+        validation::item_data(&data)?;
+        if let Some(inputs) = &secrets {
+            for input in inputs {
+                validation::secret_value("secret value", &input.value)?;
+            }
+        }
+
         let kind = match data {
             NewItemData::Account(mut account) => {
                 // Account email follows the shared text-field rule:
@@ -507,6 +618,20 @@ impl VaultManager {
         color: Option<String>,
         data: Option<NewItemData>,
     ) -> Result<SafeItem, VaultError> {
+        // Validate before mutating: a rejected field must not leave the other
+        // fields half-applied in memory.
+        let icon = validate_icon(icon)?;
+        validation::optional("display name", &display_name, validation::MAX_DISPLAY_NAME)?;
+        if let Some(tags) = &tags {
+            validation::tags(tags)?;
+        }
+        if let Some(color) = &color {
+            validation::color(color)?;
+        }
+        if let Some(data) = &data {
+            validation::item_data(data)?;
+        }
+
         {
             let vault = self.get_vault_mut(vault_id)?;
 
@@ -529,7 +654,7 @@ impl VaultManager {
                 item.display_name = normalize(Some(name));
             }
             if let Some(icon) = icon {
-                item.icon = normalize(Some(icon));
+                item.icon = Some(icon);
             }
 
             if let Some(data) = data {
@@ -565,8 +690,27 @@ impl VaultManager {
     }
 
     /// Retrieve a specific item of any sendable kind by id (all unlocked vaults).
+    /// Commands use the scoped `_in` variant; this is the unscoped manager
+    /// form used by tests.
+    #[allow(dead_code)]
     pub fn get_item_by_id(&self, item_id: ItemId) -> Result<SafeItem, VaultError> {
+        let unlocked: Vec<VaultId> = self.unlocked_vaults.keys().copied().collect();
+        self.get_item_by_id_in(&unlocked, item_id)
+    }
+
+    /// Retrieve an item by id from one of the `allowed` vaults only. The
+    /// check is against the containing vault, not the item's own `vault_id`
+    /// field, which a tampered vault could mislabel.
+    pub fn get_item_by_id_in(
+        &self,
+        allowed: &[VaultId],
+        item_id: ItemId,
+    ) -> Result<SafeItem, VaultError> {
         for uv in self.unlocked_vaults.values() {
+            if !allowed.contains(&uv.vault.id) {
+                continue;
+            }
+
             if let Some(item) = uv.vault.items.iter().find(|i| i.id == item_id) {
                 return Ok(item_to_safe(item, &uv.vault.secrets));
             }
@@ -634,13 +778,35 @@ impl VaultManager {
     }
 
     /// Retrieves items of all kinds across one or all vaults, applying filters.
+    /// Commands use the scoped `_in` variant; this is the unscoped manager
+    /// form used by tests.
+    #[allow(dead_code)]
     pub fn get_all_items(&self, filter: ItemFilter) -> Result<Vec<SafeItem>, VaultError> {
+        let unlocked: Vec<VaultId> = self.unlocked_vaults.keys().copied().collect();
+        self.get_all_items_in(&unlocked, filter)
+    }
+
+    /// Retrieves items from the `allowed` vaults only. A filter naming a
+    /// vault outside that set is rejected, and an unfiltered scan iterates
+    /// the allowed vaults rather than every unlocked one.
+    pub fn get_all_items_in(
+        &self,
+        allowed: &[VaultId],
+        filter: ItemFilter,
+    ) -> Result<Vec<SafeItem>, VaultError> {
         let mut results: Vec<SafeItem> = Vec::new();
 
         let vaults_to_scan: Vec<&Vault> = if let Some(id) = filter.vault_id {
+            if !allowed.contains(&id) {
+                return Err(VaultError::Unauthorised);
+            }
             vec![self.get_vault(id)?]
         } else {
-            self.unlocked_vaults.values().map(|uv| &uv.vault).collect()
+            allowed
+                .iter()
+                .filter_map(|id| self.unlocked_vaults.get(id))
+                .map(|uv| &uv.vault)
+                .collect()
         };
 
         let query = filter.search_query.map(|q| q.to_lowercase());
@@ -734,6 +900,10 @@ impl VaultManager {
         field_key: &str,
         value: Option<String>,
     ) -> Result<(), VaultError> {
+        if let Some(value) = &value {
+            validation::secret_value("secret value", value)?;
+        }
+
         // Validate the item's kind and field key before touching the store
         let is_noop = {
             let vault = self.get_vault_mut(vault_id)?;
@@ -1360,6 +1530,222 @@ mod tests {
         assert_eq!(re_unlocked.items.len(), 1);
     }
 
+    // ============ Field bounds ============
+
+    #[test]
+    fn test_item_fields_are_bounded() {
+        let temp_dir = setup();
+        let mut manager = VaultManager::new(temp_dir).unwrap();
+        let vault = manager
+            .create_vault("Test".to_string(), "#6240BF".to_string(), MASTER_PW, &KEY)
+            .unwrap();
+
+        let long_name = "x".repeat(validation::MAX_DISPLAY_NAME + 1);
+        let result = manager.add_item(
+            vault.id,
+            Some(long_name),
+            None,
+            crate::NewItemData::Note(crate::NoteData {
+                title: None,
+                body: "body".to_string(),
+            }),
+            None,
+        );
+        assert!(
+            matches!(result, Err(VaultError::Validation(_))),
+            "got {result:?}"
+        );
+
+        let long_body = "x".repeat(validation::MAX_BODY + 1);
+        let result = manager.add_item(
+            vault.id,
+            None,
+            None,
+            crate::NewItemData::Note(crate::NoteData {
+                title: None,
+                body: long_body,
+            }),
+            None,
+        );
+        assert!(
+            matches!(result, Err(VaultError::Validation(_))),
+            "got {result:?}"
+        );
+
+        let note = add_test_note_id(&mut manager, vault.id);
+        let too_many_tags = vec!["tag".to_string(); validation::MAX_TAGS + 1];
+        let result = manager.update_item(
+            vault.id,
+            note,
+            None,
+            None,
+            None,
+            Some(too_many_tags),
+            None,
+            None,
+        );
+        assert!(
+            matches!(result, Err(VaultError::Validation(_))),
+            "got {result:?}"
+        );
+
+        let account = match manager
+            .add_item(
+                vault.id,
+                None,
+                None,
+                crate::NewItemData::Account(crate::AccountData {
+                    username: "user".to_string(),
+                    email: None,
+                }),
+                None,
+            )
+            .unwrap()
+        {
+            SafeItem::Account(account) => account.id,
+            other => panic!("expected account item, got {other:?}"),
+        };
+        let long_secret = "x".repeat(validation::MAX_SECRET + 1);
+        let result = manager.update_item_secret(
+            vault.id,
+            account,
+            crate::SECRET_FIELD_PASSWORD,
+            Some(long_secret),
+        );
+        assert!(
+            matches!(result, Err(VaultError::Validation(_))),
+            "got {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_vault_metadata_is_bounded() {
+        let temp_dir = setup();
+        let mut manager = VaultManager::new(temp_dir).unwrap();
+
+        let result = manager.create_vault(
+            "x".repeat(validation::MAX_NAME + 1),
+            "#6240BF".to_string(),
+            MASTER_PW,
+            &KEY,
+        );
+        assert!(
+            matches!(result, Err(VaultError::Validation(_))),
+            "got {result:?}"
+        );
+
+        let vault = manager
+            .create_vault("Test".to_string(), "#6240BF".to_string(), MASTER_PW, &KEY)
+            .unwrap();
+        let result = manager.update_vault(
+            vault.id,
+            None,
+            Some("x".repeat(validation::MAX_COLOR + 1)),
+        );
+        assert!(
+            matches!(result, Err(VaultError::Validation(_))),
+            "got {result:?}"
+        );
+    }
+
+    // ============ Atomic saves ============
+
+    #[test]
+    fn test_failed_save_leaves_the_existing_vault_intact() {
+        let temp_dir = setup();
+        let mut manager = VaultManager::new(temp_dir.clone()).unwrap();
+        let vault = manager
+            .create_vault("Test".to_string(), "#6240BF".to_string(), MASTER_PW, &KEY)
+            .unwrap();
+
+        let vault_path = manager.vault_path(vault.id);
+        let temp_path = manager.vault_temp_path(vault.id);
+        let original = std::fs::read(&vault_path).unwrap();
+
+        // A directory where the sibling temp file belongs makes the write
+        // fail before it can touch the live vault.
+        std::fs::create_dir(&temp_path).unwrap();
+
+        let result = manager.update_vault(vault.id, Some("Renamed".to_string()), None);
+
+        assert!(
+            matches!(result, Err(VaultError::Io(_))),
+            "the save must fail with an I/O error, got {result:?}"
+        );
+        assert_eq!(
+            std::fs::read(&vault_path).unwrap(),
+            original,
+            "a failed save must leave the existing vault untouched"
+        );
+    }
+
+    /// Windows refuses to replace a read-only file, so this injects a rename
+    /// failure *after* the temp file has been written and synced.
+    #[cfg(windows)]
+    #[test]
+    fn test_failed_rename_keeps_the_existing_vault_and_cleans_up() {
+        let temp_dir = setup();
+        let mut manager = VaultManager::new(temp_dir.clone()).unwrap();
+        let vault = manager
+            .create_vault("Test".to_string(), "#6240BF".to_string(), MASTER_PW, &KEY)
+            .unwrap();
+
+        let vault_path = manager.vault_path(vault.id);
+        let temp_path = manager.vault_temp_path(vault.id);
+        let original = std::fs::read(&vault_path).unwrap();
+
+        let mut permissions = std::fs::metadata(&vault_path).unwrap().permissions();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(&vault_path, permissions).unwrap();
+
+        let result = manager.update_vault(vault.id, Some("Renamed".to_string()), None);
+
+        let mut permissions = std::fs::metadata(&vault_path).unwrap().permissions();
+        permissions.set_readonly(false);
+        std::fs::set_permissions(&vault_path, permissions).unwrap();
+
+        assert!(
+            matches!(result, Err(VaultError::Io(_))),
+            "the rename must fail with an I/O error, got {result:?}"
+        );
+        assert_eq!(
+            std::fs::read(&vault_path).unwrap(),
+            original,
+            "a failed rename must leave the existing vault untouched"
+        );
+        assert!(
+            !temp_path.exists(),
+            "a failed rename must remove the temp file"
+        );
+    }
+
+    #[test]
+    fn test_save_leaves_no_temp_file_and_persists_the_new_content() {
+        let temp_dir = setup();
+        let mut manager = VaultManager::new(temp_dir.clone()).unwrap();
+        let vault = manager
+            .create_vault("Test".to_string(), "#6240BF".to_string(), MASTER_PW, &KEY)
+            .unwrap();
+
+        manager
+            .update_vault(vault.id, Some("Renamed".to_string()), None)
+            .unwrap();
+
+        let leftovers: Vec<String> = std::fs::read_dir(temp_dir.join("vaults"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".tmp"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "a completed save must not leave temp files: {leftovers:?}"
+        );
+
+        manager.lock_vault(Some(vault.id));
+        let reloaded = manager.unlock_vault(vault.id, MASTER_PW, &KEY).unwrap();
+        assert_eq!(reloaded.name, "Renamed");
+    }
+
     // ============ Item command surface (notes first) ============
 
     fn add_test_note(manager: &mut VaultManager, vault_id: VaultId, title: &str, body: &str) -> SafeItem {
@@ -1375,6 +1761,13 @@ mod tests {
                 None,
             )
             .unwrap()
+    }
+
+    fn add_test_note_id(manager: &mut VaultManager, vault_id: VaultId) -> ItemId {
+        match add_test_note(manager, vault_id, "Title", "body") {
+            SafeItem::Note(note) => note.id,
+            other => panic!("expected note item, got {other:?}"),
+        }
     }
 
     #[test]
@@ -2305,5 +2698,223 @@ mod tests {
         );
 
         assert_eq!(manager.get_vault(vault.id).unwrap().items.len(), 0);
+    }
+
+    // ============ Deletion ============
+
+    #[test]
+    fn test_delete_vault_moves_file_to_tombstone() {
+        let temp_dir = setup();
+        let mut manager = VaultManager::new(temp_dir.clone()).unwrap();
+        let vault = manager
+            .create_vault("Test".to_string(), "#6240BF".to_string(), MASTER_PW, &KEY)
+            .unwrap();
+
+        let vaults_dir = temp_dir.join("vaults");
+        let live = vaults_dir.join(format!("{}.vault", vault.id));
+        let tombstone = vaults_dir.join(format!("{}.vault.deleted", vault.id));
+        let original = std::fs::read(&live).unwrap();
+
+        manager.delete_vault(vault.id).unwrap();
+
+        assert!(!live.exists(), "the live vault file must be moved aside");
+        assert!(tombstone.exists(), "the deleted vault must be recoverable");
+        assert_eq!(
+            std::fs::read(&tombstone).unwrap(),
+            original,
+            "the tombstone must preserve the vault bytes"
+        );
+        assert!(
+            !manager.is_vault_unlocked(vault.id),
+            "deletion must drop the unlocked vault from RAM"
+        );
+    }
+
+    #[test]
+    fn test_delete_vault_never_overwrites_an_existing_tombstone() {
+        let temp_dir = setup();
+        let mut manager = VaultManager::new(temp_dir.clone()).unwrap();
+        let vault = manager
+            .create_vault("Test".to_string(), "#6240BF".to_string(), MASTER_PW, &KEY)
+            .unwrap();
+
+        let first = manager.delete_vault(vault.id).unwrap();
+
+        // Put a live copy back beside the existing tombstone (an operator
+        // restoring from disk, or a file sync) and delete it again: the first
+        // tombstone must survive.
+        std::fs::copy(
+            &first,
+            temp_dir
+                .join("vaults")
+                .join(format!("{}.vault", vault.id)),
+        )
+        .unwrap();
+        let second = manager.delete_vault(vault.id).unwrap();
+
+        assert_ne!(
+            first, second,
+            "the second tombstone must not reuse the first path"
+        );
+        assert!(
+            first.exists() && second.exists(),
+            "both deletions must stay recoverable"
+        );
+    }
+
+    // ============ Icon values ============
+
+    #[test]
+    fn test_add_item_rejects_a_remote_icon() {
+        let temp_dir = setup();
+        let mut manager = VaultManager::new(temp_dir).unwrap();
+        let vault = manager
+            .create_vault("Test".to_string(), "#6240BF".to_string(), MASTER_PW, &KEY)
+            .unwrap();
+
+        let result = manager.add_item(
+            vault.id,
+            None,
+            Some("https://attacker.example/x.png".to_string()),
+            crate::NewItemData::Note(crate::NoteData {
+                title: None,
+                body: "body".to_string(),
+            }),
+            None,
+        );
+
+        assert!(
+            matches!(result, Err(VaultError::Validation(_))),
+            "got {result:?}"
+        );
+        assert!(
+            manager.get_vault(vault.id).unwrap().items.is_empty(),
+            "a rejected icon must not create the item"
+        );
+    }
+
+    #[test]
+    fn test_update_item_rejects_a_remote_icon() {
+        let temp_dir = setup();
+        let mut manager = VaultManager::new(temp_dir).unwrap();
+        let vault = manager
+            .create_vault("Test".to_string(), "#6240BF".to_string(), MASTER_PW, &KEY)
+            .unwrap();
+        let item_id = add_test_note_id(&mut manager, vault.id);
+
+        let result = manager.update_item(
+            vault.id,
+            item_id,
+            Some("Renamed".to_string()),
+            Some("https://attacker.example/x.png".to_string()),
+            None,
+            None,
+            None,
+            None,
+        );
+
+        assert!(
+            matches!(result, Err(VaultError::Validation(_))),
+            "got {result:?}"
+        );
+        let stored = &manager.get_vault(vault.id).unwrap().items[0];
+        assert_eq!(
+            stored.icon, None,
+            "a rejected icon must leave the stored icon unchanged"
+        );
+        assert_eq!(
+            stored.display_name,
+            Some("Notebook".to_string()),
+            "a rejected update must not half-apply the other fields"
+        );
+    }
+
+    #[test]
+    fn test_safe_view_withholds_a_tampered_icon() {
+        let temp_dir = setup();
+        let mut manager = VaultManager::new(temp_dir).unwrap();
+        let vault = manager
+            .create_vault("Test".to_string(), "#6240BF".to_string(), MASTER_PW, &KEY)
+            .unwrap();
+        let item_id = add_test_note_id(&mut manager, vault.id);
+
+        // A tampered vault file can carry any stored icon string.
+        manager
+            .get_vault_mut(vault.id)
+            .unwrap()
+            .items
+            .iter_mut()
+            .find(|i| i.id == item_id)
+            .unwrap()
+            .icon = Some("https://attacker.example/x.png".to_string());
+
+        let view = manager.get_item_by_id(item_id).unwrap();
+        let icon = match view {
+            SafeItem::Note(note) => note.icon,
+            other => panic!("expected note safe view, got {other:?}"),
+        };
+
+        assert_eq!(icon, None, "a disallowed icon must not reach the UI");
+    }
+
+    #[test]
+    fn test_scoped_reads_check_the_containing_vault_not_the_item_label() {
+        let temp_dir = setup();
+        let mut manager = VaultManager::new(temp_dir.clone()).unwrap();
+        let owned = manager
+            .create_vault("Owned".to_string(), "#6240BF".to_string(), MASTER_PW, &KEY)
+            .unwrap();
+        let foreign = manager
+            .create_vault("Foreign".to_string(), "#000000".to_string(), MASTER_PW, &KEY)
+            .unwrap();
+
+        let item_id = add_test_note_id(&mut manager, foreign.id);
+
+        // A tampered vault can label its item with an owned vault id; the
+        // scoped reads must still go by the vault that contains it.
+        manager
+            .get_vault_mut(foreign.id)
+            .unwrap()
+            .items
+            .iter_mut()
+            .find(|i| i.id == item_id)
+            .unwrap()
+            .vault_id = owned.id;
+
+        let listed = manager
+            .get_all_items_in(&[owned.id], ItemFilter::default())
+            .unwrap();
+        assert!(
+            listed.is_empty(),
+            "an item in an unowned vault must not be listed"
+        );
+
+        assert!(matches!(
+            manager.get_item_by_id_in(&[owned.id], item_id),
+            Err(VaultError::ItemNotFound(_))
+        ));
+    }
+
+    #[test]
+    fn test_restore_vault_puts_the_file_back() {
+        let temp_dir = setup();
+        let mut manager = VaultManager::new(temp_dir.clone()).unwrap();
+        let vault = manager
+            .create_vault("Test".to_string(), "#6240BF".to_string(), MASTER_PW, &KEY)
+            .unwrap();
+
+        let live = temp_dir
+            .join("vaults")
+            .join(format!("{}.vault", vault.id));
+        let tombstone = manager.delete_vault(vault.id).unwrap();
+        assert!(!live.exists());
+
+        manager.restore_vault(vault.id, &tombstone).unwrap();
+
+        assert!(
+            live.exists(),
+            "restore must put the vault back in its live place"
+        );
+        assert!(!tombstone.exists(), "restore must consume the tombstone");
     }
 }

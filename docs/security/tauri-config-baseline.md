@@ -1,8 +1,11 @@
 # Tauri security configuration baseline
 
 Recommendation for [#70](https://github.com/DylanAlmond/lockr/issues/70) (parent [#63](https://github.com/DylanAlmond/lockr/issues/63)).
-This is the diff-ready configuration and the reasoning for every non-default line. **Nothing here is
-applied**; fixes are out of scope for the audit map, and each line below becomes a fix ticket.
+This is the diff-ready configuration and the reasoning for every non-default line.
+
+**Applied:** §1 in `1b0b571` (CSP) and `bcce2f5` (`freezePrototype`, `headers`), §4/§5 in
+`bcce2f5`, and §7 in `303b778` (source maps follow the Tauri debug flag). §6 is the recorded
+decline.
 
 Sources: Tauri 2 CSP docs (<https://v2.tauri.app/security/csp/>), the installed config schema
 (`node_modules/@tauri-apps/cli/config.schema.json`, Tauri CLI for `tauri` 2.11.4), and the
@@ -32,7 +35,7 @@ Replace the whole `app.security` object with:
     "style-src": "'self' 'unsafe-inline'",
     "img-src": "'self' data:",
     "font-src": "'self'",
-    "connect-src": "ipc: http://ipc.localhost ws://localhost:1421 ws://127.0.0.1:1421",
+    "connect-src": "ipc: http://ipc.localhost ws://localhost:1420 ws://127.0.0.1:1420 ws://localhost:1421 ws://127.0.0.1:1421",
     "object-src": "'none'",
     "base-uri": "'none'",
     "frame-ancestors": "'none'",
@@ -52,6 +55,9 @@ Replace the whole `app.security` object with:
 `dangerousDisableAssetCspModification` is **omitted on purpose**: its default `false` lets Tauri
 inject the nonces and hashes for bundled scripts and styles, which is what makes `script-src 'self'`
 sufficient.
+
+`devCsp` allows HMR on the Vite dev-server port (`1420`) and on Tauri's host-override port (`1421`);
+production's `connect-src` allows nothing but IPC.
 
 ## 2. Why each line
 
@@ -123,15 +129,22 @@ URL" feature should arrive as a scoped permission with an explicit host allowlis
     "core:window:allow-minimize",
     "core:window:allow-toggle-maximize",
     "core:window:allow-is-maximized",
-    "core:window:allow-start-dragging"
+    "core:window:allow-start-dragging",
+    "core:window:allow-internal-toggle-maximize"
   ]
 }
 ```
 
 Each entry has a call site: `core:event` for `onResized`; `app:allow-version` for `AboutAppModal`'s
-`getVersion`; the window permissions for `Titlebar.vue` and `data-tauri-drag-region`. `core:default`
-is dropped because it also bundles menu, tray, image, resources and path permissions the app never
-uses. `invoke` of app-defined commands needs no entry.
+`getVersion`; the window permissions for `Titlebar.vue` and `data-tauri-drag-region`. Tauri's drag
+script invokes `internal_toggle_maximize` on a drag-region double-click, so that permission is
+required too. `core:default` is dropped because it also bundles menu, tray, image, resources and path
+permissions the app never uses.
+
+The capability also carries one `allow-<command>` per app command (33 at the time of writing). Those
+identifiers are generated from `build.rs`'s `AppManifest::commands`; with an app manifest present,
+Tauri denies any app command the capability does not grant. `static:command-scope` pins the
+commands.rs ↔ build.rs ↔ capability match; see `ipc-validation.md`.
 
 ## 6. Isolation pattern: declined, recorded
 

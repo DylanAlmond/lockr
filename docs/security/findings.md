@@ -15,7 +15,9 @@ Severity follows the map's scheme, not CVSS:
 Each finding follows `threat-model.md` §11: asset (`A#`), entry point (`E#`), adversary (`ADV#`),
 rule broken, evidence, fix reference, status. Status vocabulary is in `evidence-standard.md` §3.
 
-**State: partial.** Group 1 is complete; the remaining groups' findings are pending their sweeps.
+**State: complete.** All seven sweep groups are recorded, and every finding is dispositioned:
+**28 fixed, 1 accepted (F-27), 0 open.** Each finding's `Status` names the commit, the tests that pin
+it, or the reason the residual is accepted.
 
 ---
 
@@ -35,7 +37,9 @@ property is absent, not merely untested.
 
 **Evidence:** `src-tauri/tauri.conf.json` (`"csp": null`); config schema defaults `devCsp` to the
 production value, so dev mode is equally unprotected.
-**Fix:** `tauri-config-baseline.md` §1. **Status:** fix-specified.
+**Fix:** applied in `1b0b571`. `csp` and `devCsp` now carry the config-baseline policy, including
+`img-src 'self' data:`, `object-src 'none'` and an IPC-only `connect-src`.
+**Status:** fixed.
 
 ### F-02 — Dormant `opener` capability grants an unscoped filesystem surface · P2
 
@@ -51,8 +55,9 @@ authentication on Windows.
 
 **Evidence:** `src-tauri/capabilities/default.json`; `src-tauri/Cargo.toml:22`;
 `src-tauri/src/lib.rs:44`; `research/opener-scope.md`.
-**Fix:** remove the capability, plugin and package (`tauri-config-baseline.md` §4). **Status:**
-fix-specified.
+**Fix:** applied in `bcce2f5`: the capability entry, Cargo dependency, plugin registration and npm
+package are gone. Pinned by `static:capabilities-opener`.
+**Status:** fixed.
 
 ### F-03 — `Object.prototype` is mutable in the webview · P2
 
@@ -66,7 +71,8 @@ plain objects; a polluted prototype is a persistence and logic-confusion vector 
 introduced.
 
 **Evidence:** config shows no `freezePrototype`; schema default is `false`.
-**Fix:** `tauri-config-baseline.md` §1. **Status:** fix-specified.
+**Fix:** applied in `bcce2f5` — `freezePrototype: true`. Pinned by `static:freeze-prototype`.
+**Status:** fixed.
 
 ### F-04 — `core:default` and `core:window:default` over-grant the window · P2
 
@@ -82,7 +88,10 @@ included in that default. The app uses a handful: window controls, `isMaximized`
 
 **Evidence:** `src-tauri/capabilities/default.json`; call sites in `src/components/layout/Titlebar.vue`
 and `src/components/ui/AboutAppModal.vue`.
-**Fix:** the seven-permission file in `tauri-config-baseline.md` §5. **Status:** fix-specified.
+**Fix:** applied in `bcce2f5` — the eight-permission file from `tauri-config-baseline.md` §5, one per
+call site (including `internal_toggle_maximize` for drag-region double-click). Pinned by
+`static:capabilities`.
+**Status:** fixed.
 
 ### F-05 — Commands are not scoped to a capability · P3
 
@@ -96,7 +105,14 @@ with no command-level allowlist. Any renderer compromise reaches the whole surfa
 structural gap, but its blast radius is the same as F-01/F-04 until an injection sink exists.
 
 **Evidence:** `src-tauri/build.rs`; `src-tauri/src/lib.rs:45-80`.
-**Fix:** decide whether to adopt `AppManifest::commands` scoping. **Status:** open.
+**Fix:** applied in `a29b13f`. `build.rs` declares all 33 commands through
+`AppManifest::commands`, and the main-window capability grants one `allow-<command>` per command.
+When an app manifest exists, Tauri denies any app command the capability does not grant — so a new
+command that is not declared and granted fails closed, and a future window/webview without the
+capability cannot call the surface at all. The current single window still needs every command, so
+this is deny-by-default and an explicit inventory rather than a smaller surface for the UI. Pinned by
+`static:command-scope` (commands.rs ↔ build.rs ↔ capability, three-way match).
+**Status:** fixed.
 
 ### F-06 — No security headers on protocol responses · P3
 
@@ -109,7 +125,9 @@ Rule broken: 3.4.4, T-16
 `Cross-Origin-Resource-Policy`, `Cross-Origin-Opener-Policy` or `Permissions-Policy`.
 
 **Evidence:** config shows no `headers`.
-**Fix:** `tauri-config-baseline.md` §1. **Status:** fix-specified.
+**Fix:** applied in `bcce2f5` — `nosniff`, CORP/COOP `same-origin` and a `Permissions-Policy`
+denying device APIs. Pinned by `static:headers`.
+**Status:** fixed.
 
 ### F-07 — Source maps are absent by accident, not by assertion · P3
 
@@ -123,7 +141,9 @@ Rule broken: 15.2.3, T-10
 plugin could reverse it silently.
 
 **Evidence:** `find dist -name '*.map'` → 0; no `sourcemap` key in `vite.config.ts`.
-**Fix:** `tauri-config-baseline.md` §7. **Status:** fix-specified.
+**Fix:** applied in `303b778` — `build.sourcemap` follows `TAURI_ENV_DEBUG`, so a release build cannot
+ship maps. Pinned by `static:sourcemap-config`.
+**Status:** fixed.
 
 ### F-08 — No documented inventory of allowed communication · P3
 
@@ -137,7 +157,9 @@ The README claims "no network requests"; the bundle's only external string liter
 inventory of permitted destinations, so the claim cannot be checked against a document.
 
 **Evidence:** `README.md:23`; bundle host scan (`research/bundle-and-dependencies.md` §1).
-**Fix:** add the egress allowlist to the security-level document. **Status:** open.
+**Fix:** applied in `9732f62` — `security-level.md` §1 now lists the complete egress allowlist
+(IPC in production, HMR in development, `data:` images, bundled assets, and nothing else).
+**Status:** fixed.
 
 ### Controls that held
 
@@ -173,8 +195,10 @@ script execution. It is egress.
 `IdentityDetails.vue:167`, `NoteDetails.vue:168`, `Sidebar.vue:131`, `LoginView.vue:91,131`,
 `IconUpload.vue:58`; `vault_manager.rs:16-19,459-463` (only empty-string normalisation);
 `csp: null` (F-01).
-**Fix:** `img-src 'self' data:` (config baseline §2) plus backend scheme validation.
-**Status:** fix-specified.
+**Fix:** applied in `1b0b571`. The CSP's `img-src 'self' data:` blocks a remote icon fetch, and
+`icons::is_allowed_icon` / `validate_icon` / `safe_icon` reject or withhold anything that is not a
+raster `data:` image or a relative name, on both the write and the read path.
+**Status:** fixed.
 
 ### F-10 — Revealed secrets never expire · P2
 
@@ -192,7 +216,10 @@ or edits something.
 **Evidence:** `AccountDetails.vue:125-140`; `CardDetails.vue:167`; zero
 `addEventListener('blur'|'visibilitychange')` in `src/`; the only timer in the secret path is
 `ItemField`'s two-second label cooldown.
-**Fix:** `secret-lifetime.md` R-S2. **Status:** fix-specified.
+**Fix:** applied in `97a6599`. `useSecretReveal` enforces a 10 s bound and hides every reveal on
+window blur or document visibility, dropping the reference on hide and on unmount. Pinned by
+`renderer:reveal-timeout` (`tests/compliance/secret-reveal.test.ts`).
+**Status:** fixed.
 
 ### F-11 — Clipboard retains secrets indefinitely · P2
 
@@ -206,7 +233,12 @@ The only clipboard interaction is `navigator.clipboard.writeText`. The two-secon
 process in the User's session can read the password long after the copy.
 
 **Evidence:** `ItemField.vue:64-70`; no `clipboard.readText` or clear anywhere in `src/`.
-**Fix:** `secret-lifetime.md` R-S4, plus the backend copy path in §5. **Status:** fix-specified.
+**Fix:** applied in `97a6599`. `copy_item_secret` writes the secret in the core and never returns it
+over IPC; the clipboard is cleared after 30 s only if it still holds that value, a newer copy keeps
+its own window, and logout/window close compare-and-clear. Pinned by `rust:clipboard-expiry`. The
+copier no longer fetches plaintext into the renderer, and the copy button now shows a 2 s tick as
+feedback only.
+**Status:** fixed.
 
 ### A rule refinement this sweep forced
 
@@ -247,9 +279,13 @@ precondition beyond the IPC surface itself.
 
 **Evidence:** `commands.rs` `delete_vault`; `user_manager.rs:211-221`; `vault_manager.rs:364-374`;
 `vault_manager.rs:102-125` (`list_vault_ids`).
-**Fix:** add the ownership check and a re-authentication step; move the file aside (the `.deleted`
-pattern ADR-0002 once proposed does not exist) instead of unlinking.
-**Status:** open.
+**Fix:** applied in `98a35d1`. `delete_vault` now requires the vault in the active user's
+`vault_ids`, re-verifies the master password against the profile, and moves the file to an
+`<id>.vault.deleted` tombstone (ADR-0002) instead of unlinking it. Pinned by
+`test_delete_vault_requires_the_master_password`,
+`test_delete_vault_rejects_a_vault_the_active_user_does_not_own` and
+`test_delete_vault_tombstones_an_owned_vault`.
+**Status:** fixed.
 
 ### F-12 — No command checks vault ownership · P1
 
@@ -270,8 +306,11 @@ condition; F-14 does not.
 
 **Evidence:** `commands.rs:148` (only `vault_ids` use); `vault_manager.rs:83-99`;
 `commands.rs` `get_item_secret`.
-**Fix:** assert `vault_id ∈ active_user.vault_ids` in every vault/item command.
-**Status:** open.
+**Fix:** applied in `0a9fb7d`. Every vault/item command calls
+`ManagerState::require_owned_vault`; scan commands are scoped to the active user's vaults by
+containing-vault id (`get_all_items`, `get_item_by_id`, `get_unlocked_vaults`, `list_vault_ids`), and
+`flush_all`, `lock_vault`, `login_user` and `register_user` no longer reach across sessions.
+**Status:** fixed.
 
 ### F-13 — Switching the active User does not end prior sessions · P2
 
@@ -290,8 +329,11 @@ and it is the precondition that turns F-12 into a cross-User path.
 
 **Evidence:** `commands.rs` `login_user` (credentials overwritten before any lock);
 `vault_manager.rs:128-133`; `commands.rs` `logout` (the only path that locks).
-**Fix:** end every session at the start of `login_user`/`register_user`.
-**Status:** open.
+**Fix:** applied in `ed0afaf`, with failed-login ordering and the registration rollback pinned in
+`6b4f297`. `ManagerState::end_session` flushes and locks every unlocked vault, zeroizes the cached
+password and key, and clears the active user; `login_user` and `register_user` call it before setting
+any credential. `logout` reuses the same path.
+**Status:** fixed.
 
 ### F-15 — No anti-automation on login · P2
 
@@ -304,8 +346,14 @@ Rule broken: 2.4.1, 6.3.1
 expensive, which is the only brake; a local attacker can retry indefinitely and nothing records it.
 
 **Evidence:** `commands.rs` `login_user`; `user_manager.rs:110-132`.
-**Fix:** a counter with backoff, plus an auth log (group 7).
-**Status:** open.
+**Fix:** applied in `7e6b85e`. Five consecutive failures block the next attempt for 5 minutes,
+doubling to a 15-minute cap; success clears the counter. The counter and block are persisted in
+`login-throttle.dat`, so a restart does not reset an active lockout, and the login screen counts down
+per second from the core's remaining time. Attempts append `login_success`, `login_failed` and
+`login_blocked` lines to `auth.log` (identifiers only). Pinned by `test_login_backoff_grows_and_caps`,
+`test_login_throttle_blocks_and_clears`, `test_login_throttle_survives_restart` and
+`rust:login-rate-limit`.
+**Status:** fixed.
 
 ### F-16 — Validation and authorisation rules are undocumented · P3
 
@@ -319,8 +367,9 @@ There is no written record of which command validates what, which fields a calle
 F-14 were not obvious.
 
 **Evidence:** no validation or authorisation document in `docs/`.
-**Fix:** command→caller matrix and per-command validation rules.
-**Status:** open.
+**Fix:** applied in `fbb309b` — `ipc-validation.md` records the authorisation rule, the command
+categories and the per-field bounds.
+**Status:** fixed.
 
 ### F-17 — No length bounds on strings crossing IPC · P3
 
@@ -334,8 +383,11 @@ does not send dangerous lengths today, but the backend is the trusted layer and 
 arrives.
 
 **Evidence:** no length checks in `validation` paths of `vault_manager.rs`; `models.rs` uses `String`.
-**Fix:** per-field maximum lengths, rejected with a validation error.
-**Status:** open.
+**Fix:** applied in `fbb309b` — `validation.rs` bounds every free-text field (names, note title/body,
+account/card/identity fields, tags, colours, secrets) before mutation; the bounds are listed in
+`ipc-validation.md` §3. Pinned by the `validation` unit tests and
+`test_item_fields_are_bounded` / `test_vault_metadata_is_bounded` / `test_profile_fields_are_bounded`.
+**Status:** fixed.
 
 ### Controls that held
 
@@ -368,8 +420,12 @@ of Argon2id. The KDF raises the cost per guess; it does not make a guessable pas
 
 **Evidence:** `commands.rs` `register_user`; `commands.rs:330`;
 `RegisterView.vue:27`; no strength call on the registration path.
-**Fix:** enforce a minimum length and a strength floor at registration, pass product/context words to
-zxcvbn. **Status:** open.
+**Fix:** applied in `7e6b85e`. `validate_master_password` requires 12 characters and a zxcvbn score
+of 3+/4, with the user's name and product context words as inputs, and runs before the session
+changes. The registration form shows the rule and disables submit below the length floor. Pinned by
+`test_master_password_policy` and
+`test_register_rejects_a_weak_password_without_ending_the_session`.
+**Status:** fixed.
 
 ### F-19 — No idle or absolute session timeout · P2
 
@@ -384,7 +440,10 @@ unlocked and every secret one reveal away.
 
 **Evidence:** `commands.rs` `login_user` / `logout`; `lock_vault` registered at `lib.rs:61` with no
 call site; no timer or inactivity listener anywhere in `src/`.
-**Fix:** an idle lock with a documented timeout, plus an absolute lifetime. **Status:** open.
+**Fix:** applied in `28d9c77` and recorded in `auth-policy.md`. The core enforces a 15-minute idle
+timeout and a 12-hour absolute lifetime, tears the session down and emits `session-expired`; the
+renderer reports activity and returns to auth.
+**Status:** fixed.
 
 ### F-20 — No documented authentication or session policy · P3
 
@@ -396,9 +455,10 @@ Rule broken: 6.1.1, 7.1.1
 There is no written statement of the master-password rules, the lock semantics, or the intended
 session lifetime. Without it, F-18 and F-19 cannot be judged as defects rather than choices.
 
-**Evidence:** no auth or session document in `docs/`.
-**Fix:** a short auth policy covering password rules, lock triggers and session lifetime.
-**Status:** open.
+**Evidence:** no auth or session document in `docs/` at audit time.
+**Fix:** applied in `7e6b85e` — `auth-policy.md` covers the master-password rules, login throttling
+and lock triggers, and session lifetime.
+**Status:** fixed.
 
 ### Two standing deviations, not new findings
 
@@ -434,8 +494,10 @@ output (128×128, PNG/WebP), but the decode step accepts whatever the platform i
 and nothing records what that is.
 
 **Evidence:** `imageUpload.ts:8,322`; `IconUpload.vue`; no upload spec in `docs/`.
-**Fix:** document the accepted formats and a maximum input size, and enforce the size before decode.
-**Status:** open.
+**Fix:** applied in `2139ad7` (code) and `9732f62` (spec) — `uploads.md` documents PNG/JPEG/WebP/GIF, the 8 MiB input limit, the
+128 × 128 PNG output and the backend icon check; the picker and decoder enforce the same list and
+size before decode.
+**Status:** fixed.
 
 ### F-22 — No cryptographic inventory · P3
 
@@ -454,8 +516,10 @@ identifier**. Changing the cipher therefore requires a schema migration, not a p
 a reasonable choice; it is recorded here rather than in a document a reviewer can find.
 
 **Evidence:** `crypto.rs:43-57,95`; `vault_manager.rs` save/load; `ADR-0001`.
-**Fix:** a crypto inventory section in the security-level document or its own `docs/` file.
-**Status:** open.
+**Fix:** applied in `9732f62` — `crypto-inventory.md` lists every primitive, parameter, key use, the
+key hierarchy, the file format and the no-algorithm-id choice. `static:deps-crypto` asserts that
+`argon2` and `aes-gcm` resolve in the lockfile.
+**Status:** fixed.
 
 ### F-23 — Per-tier protection requirements are incomplete · P3
 
@@ -470,8 +534,9 @@ masked in the UI, never logged, retention and retention on lock — so a future 
 to follow.
 
 **Evidence:** `threat-model.md` §2; `secret-lifetime.md` §1.
-**Fix:** a per-tier requirements table alongside the asset classification.
-**Status:** open.
+**Fix:** applied in `9732f62` — `asset-tiers.md` gives the per-tier requirements (at rest, safe views,
+masking, clipboard, logging, retention, network) and the deliberate T2 choices.
+**Status:** fixed.
 
 ### Controls that held
 
@@ -506,7 +571,10 @@ build" from a document, only by resolving the lockfile themselves.
 
 **Evidence:** no `cyclonedx`/`syft`/SBOM tooling in the tree; `package.json` has no audit or inventory
 script.
-**Fix:** generate an SBOM in the build, or commit one per release. **Status:** open.
+**Fix:** applied in `2139ad7` — `scripts/sbom.mjs` generates a CycloneDX 1.5 inventory from both
+lockfiles into `docs/security/sbom.json` (783 components); `yarn sbom` regenerates it and
+`static:deps-inventory` fails when it is stale.
+**Status:** fixed.
 
 ### F-25 — A known-vulnerable dev dependency with no remediation path · P3
 
@@ -523,8 +591,10 @@ stated remediation timeframe, so the next advisory will be found the same way th
 accident.
 
 **Evidence:** dependency audit against the committed lockfile; `package.json` scripts contain no audit
-step. **Fix:** upgrade, then add an audit step and a remediation window.
-**Status:** open.
+step. **Fix:** applied in `303b778` — `vite` 6.4.3 → 6.4.6 and `vitest` 3.2.7 → 4.1.12 clear the
+advisories; `yarn audit` gates high/critical and `dependency-policy.md` records the remediation window.
+Pinned by `static:deps-audit`.
+**Status:** fixed.
 
 ### F-26 — A dead network path and its token remain in source · P3
 
@@ -542,7 +612,9 @@ back in the bundle.
 
 **Evidence:** `imageUpload.ts:263-310`; commented call sites at `AccountEdit.vue:130`,
 `NewAccountForm.vue:8`; bundle scan clean.
-**Fix:** delete the function and the token from `.env`. **Status:** open.
+**Fix:** applied in `303b778` — the function, the logo processor, the token reference and the
+commented call sites are gone; there is no `.env` in the tree. Pinned by `static:dead-logo-path`.
+**Status:** fixed.
 
 ### Controls that held
 
@@ -573,7 +645,12 @@ The fix is the standard one: write to a sibling temp file, fsync, then rename ov
 
 **Evidence:** `vault_manager.rs:292`; the only `fs::copy` is `backup_vault_file`, called from the
 migration path at `:248`.
-**Fix:** atomic replace (temp + rename). **Status:** open.
+**Fix:** applied in `da46178`, recorded in ADR-0003: write `<id>.vault.tmp`, sync it, rename over the
+live file. Pinned by `test_failed_save_leaves_the_existing_vault_intact`,
+`test_failed_rename_keeps_the_existing_vault_and_cleans_up` (Windows) and
+`test_save_leaves_no_temp_file_and_persists_the_new_content`. The Rust compliance suite
+(`compliance-tests.md` §4) remains the planned home for the re-runnable assertion.
+**Status:** fixed.
 
 ### F-27 — No logging of authentication, authorisation or errors · P3
 
@@ -589,8 +666,15 @@ policy saying so, and no way for a User to see that someone tried their master p
 
 **Evidence:** no `log`/`tracing` dependency; only two ad-hoc prints (`commands.rs:84`,
 `user_manager.rs:59`).
-**Fix:** a minimal local audit log, or a written decision that logging is deliberately absent plus
-the consequence. **Status:** open.
+**Fix:** applied in `9732f62` — `logging-policy.md` records the auth log (registration, login
+success/failure/blocked, re-auth; identifiers only) and the deliberate decision not to log item
+operations, authorisation denials or unexpected errors, with the consequences. The ad-hoc prints are
+gone (F-29).
+**Status:** accepted (owner: DylanAlmond). Authentication events are logged, so 16.3.1 is met.
+Authorisation denials (16.3.2) and unexpected errors (16.3.4) are knowingly not logged: the app is
+local-first, and a second identifier store would add risk without a reader who can act on it. The
+consequence — no post-incident forensics beyond authentication attempts — is recorded in
+`logging-policy.md` §3. Revisit if sync, an updater or multi-user support lands.
 
 ### F-29 — Error strings and debug prints leak paths and identifiers · P3
 
@@ -608,8 +692,10 @@ None of these is a secret, but together they hand a renderer (or anyone reading 
 data path and profile ids — useful reconnaissance for the filesystem-facing findings above.
 
 **Evidence:** `error.rs:19-23`; `commands.rs:84`; `user_manager.rs:59`.
-**Fix:** a UI-facing error type that carries a code and a generic message; delete the ad-hoc prints.
-**Status:** open.
+**Fix:** applied in `fbb309b` — I/O, serialization and not-found errors now Display a generic message
+(paths and ids stay in `Debug`/`source`), and the two ad-hoc prints are gone. Pinned by
+`test_io_display_does_not_leak_the_path` and `test_not_found_display_hides_the_identifier`.
+**Status:** fixed.
 
 ### Controls that held
 
@@ -622,8 +708,12 @@ data path and profile ids — useful reconnaissance for the filesystem-facing fi
 
 ## Complete
 
-All seven sweep groups are recorded. Totals across 105 rows: **40 met, 17 partial, 41 deviated,
-6 n/a, 1 unchecked**. The full set is 29 findings: one P0 (F-14), two P1 (F-09, F-12), and the rest
-P2/P3.
+All seven sweep groups are recorded. The re-run at `a41cde1` (2026-11-28) totals across 105 rows:
+**89 met, 2 partial, 4 deviated, 6 n/a, 4 unchecked**. The full set is 29 findings: one P0 (F-14),
+two P1 (F-09, F-12), and the rest P2/P3. 28 are fixed; F-27 is accepted for its deliberately
+unlogged authorisation denials and unexpected errors.
 
-The remaining unchecked row is T-15 (installer code signing), which needs a signed release artefact.
+The four unchecked rows (T-09, T-15, 13.4.1, 13.4.2) need a signed release artefact or an OS
+inspection; the checklist does not claim them. The four deviated rows are the two standing
+deviations (6.2.12, 6.3.3) and the two deliberate logging omissions (16.3.2, 16.3.4); the two
+partial rows are 3.4.5 and 11.2.2. See `security-level.md` §4 for their reasons.

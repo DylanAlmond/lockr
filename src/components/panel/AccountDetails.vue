@@ -16,41 +16,49 @@ import MoveItemModal from '../ui/MoveItemModal.vue';
 import useAppStore from '../../stores/appStore.ts';
 import { Entropy, Vault } from '../../types/index.ts';
 import { SECRET_FIELD_PASSWORD } from '../../util/secrets.ts';
+import { useSecretReveal } from '../../composables/useSecretReveal.ts';
 
 const route = useRoute();
 const router = useRouter();
 const { state, updateActiveItem, deleteActiveItem } = useAppStore();
-const { getItemSecret, getItemPasswordStrength, getVaultById } = useVault();
+const { getItemSecret, getItemPasswordStrength, getVaultById, copyItemSecret } = useVault();
 const { openModal } = useModal();
 
 // Narrowed on the account kind, like the other per-kind views
 const account = computed(() => (state.activeItem?.kind === 'account' ? state.activeItem : null));
 
-const password = ref<string | null>(null);
+const {
+  secret: password,
+  isRevealed: showPassword,
+  toggle: toggleReveal,
+  hide: hidePassword
+} = useSecretReveal();
 const passwordEntropy = ref<Entropy | null>(null);
-const showPassword = ref(false);
 
 const parentVault = ref<Vault | null>(null);
 
-async function fetchPassword() {
+async function fetchPassword(): Promise<string | null> {
   const current = account.value;
   if (!current) return null;
-  if (!password.value) {
-    try {
-      password.value = await getItemSecret(current.vault_id, current.id, SECRET_FIELD_PASSWORD);
-    } catch {
-      // Fetch failed: leave the password unset so the masked field just
-      // shows 'No Value' — same soft behaviour as the pre-throwing lookup
-    }
+
+  try {
+    return await getItemSecret(current.vault_id, current.id, SECRET_FIELD_PASSWORD);
+  } catch {
+    // Fetch failed: leave the password unset so the masked field just
+    // shows 'No Value' — same soft behaviour as the pre-throwing lookup
+    return null;
   }
-  return password.value;
 }
 
 async function togglePassword() {
-  if (!showPassword.value && !password.value) {
-    await fetchPassword();
-  }
-  showPassword.value = !showPassword.value;
+  await toggleReveal(fetchPassword);
+}
+
+async function copyPassword(): Promise<boolean> {
+  const current = account.value;
+  if (!current) return false;
+
+  return copyItemSecret(current.vault_id, current.id, SECRET_FIELD_PASSWORD);
 }
 
 async function toggleFavourite() {
@@ -123,8 +131,7 @@ const miscMenuItems = computed<DropdownItem[]>(() => [
 watch(
   () => [account.value?.id, account.value?.updated_at, state.vaultMutationCount],
   async () => {
-    password.value = null;
-    showPassword.value = false;
+    hidePassword();
 
     if (account.value) {
       const [vault, entropy] = await Promise.all([
@@ -238,7 +245,7 @@ watch(
           :display-value="
             !passwordEntropy?.guesses ? 'No Value' : showPassword ? password : '••••••••••••••••'
           "
-          :copy-value="fetchPassword"
+          :copy-action="copyPassword"
           :can-copy="!!passwordEntropy?.guesses"
         >
           <template #actions>

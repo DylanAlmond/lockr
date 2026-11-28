@@ -119,13 +119,17 @@ function useAppStore() {
     }
   }
 
-  async function deleteVaultById(vaultId: string): Promise<boolean> {
+  /** Returns the failure message, or null when the vault was deleted. */
+  async function deleteVaultById(
+    vaultId: string,
+    masterPassword: string
+  ): Promise<string | null> {
     try {
-      const success = await deleteVault(vaultId);
-      if (success) state.vaultMutationCount++;
-      return success;
-    } catch (error) {
-      return false;
+      const failure = await deleteVault(vaultId, masterPassword);
+      if (!failure) state.vaultMutationCount++;
+      return failure;
+    } catch {
+      return 'Vault deletion failed.';
     }
   }
 

@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
+use crate::icons::safe_icon;
+
 pub type UserId = Uuid;
 pub type VaultId = Uuid;
 pub type ItemId = Uuid;
@@ -539,6 +541,18 @@ pub enum SafeItem {
     Identity(SafeIdentity),
 }
 
+impl SafeItem {
+    /// The vault this item belongs to.
+    pub fn vault_id(&self) -> VaultId {
+        match self {
+            SafeItem::Account(item) => item.vault_id,
+            SafeItem::Card(item) => item.vault_id,
+            SafeItem::Note(item) => item.vault_id,
+            SafeItem::Identity(item) => item.vault_id,
+        }
+    }
+}
+
 /// The Safe View of an item: only account-kind items have an account view.
 /// Returns `None` for every other kind.
 pub fn account_from_item(item: &VaultItem) -> Option<SafeAccount> {
@@ -554,7 +568,7 @@ pub fn account_from_item(item: &VaultItem) -> Option<SafeAccount> {
         email: data.email.clone(),
         favourite: item.favourite,
         tags: item.tags.clone(),
-        icon: item.icon.clone(),
+        icon: safe_icon(item.icon.as_deref()),
         color: item.color.clone(),
         created_at: item.created_at,
         updated_at: item.updated_at,
@@ -586,7 +600,7 @@ pub fn card_from_item(item: &VaultItem, secrets: &[ItemSecrets]) -> SafeCard {
         display_name: item.display_name.clone(),
         favourite: item.favourite,
         tags: item.tags.clone(),
-        icon: item.icon.clone(),
+        icon: safe_icon(item.icon.as_deref()),
         color: item.color.clone(),
         created_at: item.created_at,
         updated_at: item.updated_at,
@@ -614,7 +628,7 @@ pub fn item_to_safe(item: &VaultItem, secrets: &[ItemSecrets]) -> SafeItem {
             display_name: item.display_name.clone(),
             favourite: item.favourite,
             tags: item.tags.clone(),
-            icon: item.icon.clone(),
+            icon: safe_icon(item.icon.as_deref()),
             color: item.color.clone(),
             created_at: item.created_at,
             updated_at: item.updated_at,
@@ -627,7 +641,7 @@ pub fn item_to_safe(item: &VaultItem, secrets: &[ItemSecrets]) -> SafeItem {
             display_name: item.display_name.clone(),
             favourite: item.favourite,
             tags: item.tags.clone(),
-            icon: item.icon.clone(),
+            icon: safe_icon(item.icon.as_deref()),
             color: item.color.clone(),
             created_at: item.created_at,
             updated_at: item.updated_at,

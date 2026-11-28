@@ -2,8 +2,8 @@
 
 Specification for the automated half of the audit checklist. Decision record for
 [#74](https://github.com/DylanAlmond/lockr/issues/74) (parent
-[#63](https://github.com/DylanAlmond/lockr/issues/63)). Nothing here is implemented; this is the plan
-that turns `audit-checklist.md` rows into runnable checks.
+[#63](https://github.com/DylanAlmond/lockr/issues/63)). The static suite and the checks marked **Implemented** below are in the tree; the remaining ids are
+the plan that turns `audit-checklist.md` rows into runnable checks.
 
 The rule it serves, from `evidence-standard.md` §4.3: **every checklist row names a test id or a
 manual reason.** This document defines what each id actually runs.
@@ -41,8 +41,19 @@ A test must print the checklist id it satisfies on failure, so a red run maps st
 
 ## 3. Static suite
 
-One module per area, each exporting `{ id, run }`. `run.mjs` executes them all and exits non-zero on
-the first failure, printing the row id and the observed value.
+One module per area, each exporting `{ id, run }`. `run.mjs` executes them all, prints every result,
+and exits non-zero if any check failed.
+
+**Implemented:** `csp.mjs`, `capabilities.mjs`, `hygiene.mjs`, `source.mjs`, `bundle.mjs` and
+`run.mjs`, wired as `yarn test:compliance`.
+
+- `hygiene.mjs`: `static:sourcemap-config`, `static:devtools-absent`, `static:dead-logo-path`,
+  `static:deps-audit`, `static:deps-crypto`, `static:deps-inventory`,
+  `static:release-signing-config`.
+- `capabilities.mjs`: `static:capabilities`, `static:capabilities-opener`, `static:command-scope`.
+- `source.mjs`: the eleven `static:source-*` rows and `static:command-validation`.
+- `bundle.mjs`: the four `static:bundle-*` rows. They run against `dist/` and **skip when `dist/` is
+  absent**, so run `vite build` first for a complete pass.
 
 ### `csp.mjs`
 
@@ -59,9 +70,9 @@ the first failure, printing the row id and the observed value.
 
 | Id | Assertion |
 |---|---|
-| `static:capabilities` | Permission list equals the expected seven-entry set (config baseline §5) |
+| `static:capabilities` | Permission list equals the expected eight-entry set (config baseline §5) |
 | `static:capabilities-opener` | No permission starts with `opener:`; `tauri-plugin-opener` absent from `Cargo.toml` and `package.json` |
-| `static:command-scope` | `build.rs` references `AppManifest::commands` (currently expected to fail) |
+| `static:command-scope` | `build.rs` `AppManifest::commands`, the `#[tauri::command]` set and the capability's `allow-*` set all match |
 
 ### `source.mjs`
 
@@ -88,6 +99,16 @@ the first failure, printing the row id and the observed value.
 | `static:bundle-dead-code` | No dev-only module name appears |
 | `static:bundle-external-hosts` | Host set ⊆ `{www.w3.org, vuejs.org}` |
 
+### `hygiene.mjs` — release signing
+
+| Id | Assertion |
+|---|---|
+| `static:release-signing-config` | `tauri.conf.json` pins Windows `digestAlgorithm: sha256`, a timestamp URL and no environment-specific thumbprint; the active workflow lines contain the Windows certificate import, the self-signed trust branch, the Windows verifier and the T-15 guard, and do **not** contain the macOS/Linux signing or verification tokens; the workflow records the intentional Windows-only scope and the temporary dev-certificate trust |
+
+The check proves the *pipeline* is wired and that the disabled platforms stay disabled. It cannot
+prove an artefact is signed — that is the manual T-15 row, which needs a release built with the
+secrets.
+
 ### `deps.mjs`
 
 | Id | Assertion |
@@ -110,6 +131,8 @@ control.
 | `rust:session-termination` | `get_item_secret` after `logout` | `VaultLocked` |
 | `rust:uuid-traversal` | ids like `../x`, `..%2f`, non-UUID | rejected before any path use |
 | `rust:atomic-write` | save interrupted between write and rename | original file intact (after F-28) |
+| `rust:clipboard-expiry` | copied secret at the TTL, clipboard unchanged / replaced | cleared only if unchanged; a newer copy keeps its own window |
+| `rust:session-timeout` | idle past 15 min / active past 12 h | session torn down: key and password dropped, vaults locked, clipboard cleared, active user cleared |
 | `rust:serde-targets` | malformed vault JSON | rejected with a typed error |
 | `rust:crypto-attrs` | Argon2 params and AEAD mode | Argon2id, m=64 MiB, t=3, p=4; AES-256-GCM |
 | `rust:format-version` | a saved vault | carries `schema_version` |
@@ -122,17 +145,22 @@ control.
 | `rust:update-allowlist` | `update_item` with an id/timestamp argument | not accepted |
 | `rust:command-bounds` | strings beyond the per-field maximum | rejected (after F-17) |
 
+**Implemented:** `tests/compliance_auth.rs` covers `rust:password-policy`, `rust:login-rate-limit` and
+`rust:auth-logging`. `rust:command-bounds` and `rust:error-messages` are covered by the `validation`
+and `error` unit tests; the managers are not exposed to integration tests.
+
 ## 5. Renderer suite
 
 `tests/compliance/*.test.ts`, vitest with jsdom and `@vue/test-utils`. Fake timers for anything
-time-based.
+time-based. **Implemented (F-10):** `tests/compliance/secret-reveal.test.ts` covers
+`renderer:reveal-timeout`.
+
+Clipboard expiry is `rust:clipboard-expiry` and the idle/absolute timeout is `rust:session-timeout`,
+not renderer rows: the copy path and the session clock live in the core.
 
 | Id | Subject | Expected |
 |---|---|---|
 | `renderer:reveal-timeout` | reveal a password, advance 10 s | re-masked; value ref is `null` |
-| `renderer:idle-lock` | no interaction for the configured timeout | vault locks (after F-19) |
-| `renderer:clipboard-expiry` | copy, advance 30 s | cleared only if unchanged |
-| `renderer:clipboard-expiry` | copy, replace clipboard, advance 30 s | replacement survives |
 | `renderer:never-hold` | after a reveal | `localStorage`/`sessionStorage` empty; route has no secret |
 | `renderer:masking` | masked card/account fields | no character of the value except the card last four |
 | `renderer:upload-rasterisation` | upload an SVG | stored value is a PNG `data:` URL |
@@ -145,7 +173,7 @@ in `security-level.md`.
 
 | Row | Reason |
 |---|---|
-| T-15 | Installer signing needs a signed release artefact |
+| T-15 | A signature can only be checked on a signed artefact. The Windows pipeline and verifier exist and accept the self-signed dev certificate intentionally; macOS/Linux signing and verification are disabled for the Windows-only release (`release-signing.md` §5) |
 | 13.4.1 | Installer payload contents cannot be inspected without the artefact |
 | 13.4.2 / T-09 | Devtools absence is confirmed by launching a release build |
 | 3.4.5 | Tauri 2.11 cannot set `Referrer-Policy`; the residual is argued, not tested |

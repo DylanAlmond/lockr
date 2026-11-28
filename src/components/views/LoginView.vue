@@ -4,10 +4,11 @@ import Button from '../../components/ui/Button.vue';
 import Input from '../../components/ui/Input.vue';
 import { useRoute, useRouter } from 'vue-router';
 import { useUser } from '../../composables/useUser.ts';
+import { useLoginCooldown, formatCountdown } from '../../composables/useLoginCooldown.ts';
 import { LockOpen, Plus } from '@lucide/vue';
 import { User } from '../../types/index.ts';
 
-const { login, getUsers } = useUser();
+const { login, getUsers, getLoginCooldown, error: authError } = useUser();
 const route = useRoute();
 const router = useRouter();
 
@@ -17,6 +18,37 @@ const isLoading = ref(false);
 
 const availableUsers = ref<User[]>([]);
 const selectedUser = ref<User | null>(null);
+
+const {
+  remaining: cooldown,
+  begin: beginCooldown,
+  clear: clearCooldown
+} = useLoginCooldown();
+
+const displayError = computed(() =>
+  cooldown.value > 0
+    ? `Too many failed attempts. Try again in ${formatCountdown(cooldown.value)}.`
+    : error.value
+);
+
+async function refreshCooldown() {
+  if (!selectedUser.value) {
+    clearCooldown();
+    return;
+  }
+
+  const seconds = await getLoginCooldown(selectedUser.value.id);
+
+  if (seconds > 0) {
+    beginCooldown(seconds);
+  } else {
+    clearCooldown();
+  }
+}
+
+// A lockout persists across restarts: start the countdown as soon as a user
+// is selected, including on a fresh launch.
+watch(selectedUser, refreshCooldown, { immediate: true });
 
 const hasUser = computed(() => {
   error.value = '';
@@ -46,6 +78,8 @@ function selectUser(user: User) {
 }
 
 async function handleLogin() {
+  if (cooldown.value > 0) return;
+
   if (!selectedUser.value || !masterPassword.value) {
     error.value = 'Please select a user and enter a master password.';
     return;
@@ -59,11 +93,18 @@ async function handleLogin() {
     if (vaults && vaults.length > 0) {
       router.push('/all-items');
     } else {
-      error.value = 'Failed to unlock vaults. Is the password correct?';
+      // Surface the backend reason (wrong password, throttle delay) rather
+      // than a generic message; useUser stores it on failure.
+      await refreshCooldown();
+      error.value =
+        cooldown.value > 0
+          ? ''
+          : authError.value || 'Failed to unlock vaults. Is the password correct?';
       isLoading.value = false;
     }
   } catch (e) {
-    error.value = String(e);
+    await refreshCooldown();
+    error.value = cooldown.value > 0 ? '' : String(e);
     isLoading.value = false;
   }
 }
@@ -109,7 +150,7 @@ watch(
       type="submit"
       variant="solid"
       :icon-component="LockOpen"
-      :disabled="isLoading || !masterPassword"
+      :disabled="isLoading || !masterPassword || cooldown > 0"
       fill
     >
       <span v-if="isLoading">Loading...</span>
@@ -150,7 +191,7 @@ watch(
     </ul>
   </div>
 
-  <p v-if="error" class="error-text">{{ error }}</p>
+  <p v-if="displayError" class="error-text">{{ displayError }}</p>
 </template>
 
 <style scoped>

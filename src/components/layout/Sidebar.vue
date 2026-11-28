@@ -10,7 +10,7 @@ import { markRaw, onMounted, ref, watch } from 'vue';
 import { Vault } from '../../types/index.ts';
 import { useModal } from '../../composables/useModal.ts';
 import VaultModal from '../ui/VaultModal.vue';
-import AlertModal from '../ui/AlertModal.vue';
+import DeleteVaultModal from '../ui/DeleteVaultModal.vue';
 import useAppStore from '../../stores/appStore.ts';
 import AboutAppModal from '../ui/AboutAppModal.vue';
 
@@ -19,7 +19,7 @@ const router = useRouter();
 const { user, logout } = useUser();
 const { getUnlockedVaults } = useVault();
 const { openModal } = useModal();
-const { state, deleteVaultById } = useAppStore();
+const { state } = useAppStore();
 
 const vaults = ref<Vault[]>([]);
 
@@ -66,10 +66,8 @@ function openCreateVaultModal(event: Event) {
   });
 }
 
-async function handleDeleteVault(vault: Vault) {
-  const success = await deleteVaultById(vault.id);
-
-  if (success && route.params.vaultId === vault.id) {
+function handleVaultDeleted(vaultId: string) {
+  if (route.params.vaultId === vaultId) {
     router.replace({ name: 'all-items' });
   }
 }
@@ -89,14 +87,9 @@ function vaultMenuItems(vault: Vault): DropdownItem[] {
     {
       label: 'Delete Vault',
       onSelect: () => {
-        openModal(markRaw(AlertModal), {
-          title: `Delete "${vault.name}"`,
-          message:
-            "Are you sure you want to continue? All items in this vault will be deleted. This can't be undone.",
-          actionLabel: 'Delete',
-          confirmationValue: vault.name,
-          onClose: () => {},
-          onConfirm: () => handleDeleteVault(vault)
+        openModal(markRaw(DeleteVaultModal), {
+          vault,
+          onDeleted: handleVaultDeleted
         });
       }
     }

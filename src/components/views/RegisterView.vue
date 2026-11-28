@@ -1,22 +1,32 @@
 <script setup lang="ts">
-import { ref } from 'vue';
+import { computed, ref } from 'vue';
 import Button from '../../components/ui/Button.vue';
 import Input from '../../components/ui/Input.vue';
 import { useRouter } from 'vue-router';
 import { useUser } from '../../composables/useUser.ts';
 import { LockOpen } from '@lucide/vue';
 
-const { register } = useUser();
+const { register, error: authError } = useUser();
 const router = useRouter();
+
+/** Mirrors the backend floor; the score check remains backend-only. */
+const MASTER_PASSWORD_MIN_LENGTH = 12;
 
 const name = ref('');
 const masterPassword = ref('');
 const error = ref('');
 const isLoading = ref(false);
 
+// Count code points, matching Rust's `chars().count()` rather than UTF-16 units.
+const passwordLength = computed(() => [...masterPassword.value].length);
+
+const canSubmit = computed(
+  () => !!name.value && passwordLength.value >= MASTER_PASSWORD_MIN_LENGTH
+);
+
 async function handleRegister() {
-  if (!name.value || !masterPassword.value) {
-    error.value = 'Please enter a name and a master password.';
+  if (!canSubmit.value) {
+    error.value = `Enter a name and a master password of at least ${MASTER_PASSWORD_MIN_LENGTH} characters.`;
     return;
   }
 
@@ -28,11 +38,13 @@ async function handleRegister() {
     if (vaults && vaults.length > 0) {
       router.push('/all-items');
     } else {
-      error.value = 'Failed to create a new user.';
+      // Surface the backend reason (password policy) rather than a generic
+      // message; useUser stores it on failure.
+      error.value = authError.value || 'Failed to create a new user.';
       isLoading.value = false;
     }
   } catch (e) {
-    console.error(e);
+    console.error('Registration failed:', e);
     error.value = String(e);
     isLoading.value = false;
   }
@@ -56,11 +68,16 @@ async function handleRegister() {
       name="master_password"
     />
 
+    <p class="password-hint">
+      At least {{ MASTER_PASSWORD_MIN_LENGTH }} characters and not easily guessed. A passphrase of
+      several words is strongest.
+    </p>
+
     <Button
       type="submit"
       variant="solid"
       :icon-component="LockOpen"
-      :disabled="isLoading || !masterPassword"
+      :disabled="isLoading || !canSubmit"
       fill
     >
       <span v-if="isLoading">Creating...</span>
@@ -71,4 +88,12 @@ async function handleRegister() {
   <p v-if="error" class="error-text">{{ error }}</p>
 </template>
 
-<style scoped></style>
+<style scoped>
+.password-hint {
+  margin: 0;
+  font-size: 0.8125rem;
+  line-height: 1.4;
+  color: var(--color-text-secondary);
+  text-align: center;
+}
+</style>

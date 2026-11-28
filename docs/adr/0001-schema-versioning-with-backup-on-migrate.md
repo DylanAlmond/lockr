@@ -37,7 +37,7 @@ The convention:
 
 - **Written** only at migration time — plain unlocks of an already-current vault never touch the backup (pinned by `test_migrates_legacy_vault_on_unlock`, which asserts a v2 re-unlock leaves the backup byte-identical).
 - **Overwritten** by any later migration of the same vault; there is exactly one backup per vault, holding the last pre-migration state.
-- **Never deleted by the app.** Not on unlock, lock, save, or vault deletion — `delete_vault` removes only the `.vault` file. The backup lives until the user deletes it.
+- **Never deleted by the app.** Not on unlock, lock, save, or vault deletion — `delete_vault` moves only the live `.vault` file aside (ADR-0002) and never touches `.OLD`. The backup lives until the user deletes it.
 - **Unread by the app.** Restoring it — replacing the `.vault` file — is a manual, user-driven rollback.
 
 A file that parses as neither format is corrupt: unlock fails with the serialization error, the original file is untouched, and no backup is written.
