@@ -17,6 +17,9 @@ of the executable that it packages into each installer, so the verifier checks t
 and extracts the MSI payload to prove the shipped `lockr.exe` is signed too. Checking the
 intermediate would fail even on a correct release.
 
+macOS and Linux signing are implemented but **intentionally disabled** while Lockr ships on Windows
+only; see §5.
+
 Linux has no OS-enforced installer signing. The AppImage signature is the platform's native
 mechanism but is **not checked by the OS**; the detached `SHA256SUMS.asc` is what covers the `.deb`
 and `.rpm`, and both require the user to verify against the published key. That limitation is why
@@ -41,6 +44,9 @@ secret is missing**, so an unsigned build never reaches a release draft.
 | `LINUX_GPG_PRIVATE_KEY` | Linux | Base64 of the ASCII-armored private key |
 | `LINUX_GPG_KEY_ID` | Linux | Full fingerprint of the signing key |
 | `LINUX_GPG_PASSPHRASE` | Linux | Passphrase for the signing key |
+
+While the Windows-only scope holds, only the two Windows secrets are required. The macOS and Linux
+rows document the mechanism for when those blocks are restored.
 
 Notarization can use an App Store Connect API key instead of `APPLE_ID`/`APPLE_PASSWORD`; if that is
 chosen, replace those three secrets with `APPLE_API_ISSUER`, `APPLE_API_KEY` and
@@ -73,6 +79,10 @@ script prints the commands that remove the certificate and the local config.
 5. **Verify.** The workflow then runs the platform verifier. A non-zero exit fails the job and the
    draft is not published.
 
+Steps 3 and 4 are currently commented out for the Windows-only release, and step 5 runs for Windows
+only. The Windows trust block runs only when the imported certificate is self-signed
+(`$cert.Subject -eq $cert.Issuer`), so a CA-issued certificate needs no special handling.
+
 ## 4. Verifying a release by hand
 
 ```powershell
@@ -101,6 +111,14 @@ to the release) and confirm its fingerprint against the one published in the rep
 trusting the signature.
 
 ## 5. Status and what is still missing
+
+**Current scope — intentional (2026-11-28):** Lockr ships on Windows only. The Windows signing path
+is active, and the Windows job deliberately accepts the self-signed development certificate on the
+ephemeral runner so the verifier can validate it. The macOS and Linux signing guards, key imports,
+signing environment and verification steps are commented out in `publish.yml`; those jobs still
+build, but produce unsigned artefacts. This is a recorded temporary decision, not an oversight:
+restore the blocks (and their secrets) before shipping those platforms. While it holds, T-15 covers
+Windows only.
 
 **T-15 is not met.** The pipeline is implemented and statically checked
 (`static:release-signing-config`). A self-signed dry run at `d001c13` produced `Valid` and

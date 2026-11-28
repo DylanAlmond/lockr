@@ -103,10 +103,11 @@ and exits non-zero if any check failed.
 
 | Id | Assertion |
 |---|---|
-| `static:release-signing-config` | `tauri.conf.json` pins Windows `digestAlgorithm: sha256`, a timestamp URL and no environment-specific thumbprint; `publish.yml` contains the Windows certificate import, the macOS Developer ID/notarization variables, the Linux GPG setup, the three verifier calls and the `must be set for a release build (T-15)` guards |
+| `static:release-signing-config` | `tauri.conf.json` pins Windows `digestAlgorithm: sha256`, a timestamp URL and no environment-specific thumbprint; the active workflow lines contain the Windows certificate import, the self-signed trust branch, the Windows verifier and the T-15 guard, and do **not** contain the macOS/Linux signing or verification tokens; the workflow records the intentional Windows-only scope and the temporary dev-certificate trust |
 
-The check proves the *pipeline* is wired. It cannot prove an artefact is signed — that is the
-manual T-15 row, which needs a release built with the secrets.
+The check proves the *pipeline* is wired and that the disabled platforms stay disabled. It cannot
+prove an artefact is signed — that is the manual T-15 row, which needs a release built with the
+secrets.
 
 ### `deps.mjs`
 
@@ -172,7 +173,7 @@ in `security-level.md`.
 
 | Row | Reason |
 |---|---|
-| T-15 | A signature can only be checked on a signed artefact; the release pipeline and verifiers exist (`release-signing.md`), but no signing material is configured yet |
+| T-15 | A signature can only be checked on a signed artefact. The Windows pipeline and verifier exist and accept the self-signed dev certificate intentionally; macOS/Linux signing and verification are disabled for the Windows-only release (`release-signing.md` §5) |
 | 13.4.1 | Installer payload contents cannot be inspected without the artefact |
 | 13.4.2 / T-09 | Devtools absence is confirmed by launching a release build |
 | 3.4.5 | Tauri 2.11 cannot set `Referrer-Policy`; the residual is argued, not tested |

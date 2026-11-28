@@ -41,6 +41,13 @@ To close T-15:
 
 Until step 3, the row stays unchecked.
 
+**Workflow scope (intentional, 2026-11-28):** the publish workflow accepts the self-signed
+certificate on the ephemeral Windows runner and has the macOS/Linux signing guards, key imports and
+verification steps commented out, so a Windows-only release can run without Apple or GPG
+credentials. The macOS and Linux jobs still build, but their artefacts are unsigned. Restore those
+blocks before shipping either platform; the static check pins both the active Windows path and the
+disabled state.
+
 ### Development-certificate dry run
 
 To prove the build → sign → verify path before buying a certificate, the tree was built at `d001c13`
@@ -86,7 +93,7 @@ Trusted Signing.
 | T-09 | Confirming no inspector opens needs launching the installed release and attempting to open devtools; the source-side feature check is not a launch test |
 | 13.4.1 | Enumerating the installer payload needs `lessmsi`/`7z` (neither installed here); `dist/` has no VCS metadata or maps, and the installer is Tauri-generated from the release exe, but the payload was not inspected |
 | 13.4.2 | A launch check of the installed release is needed to confirm debug mode is off; the build-side sourcemap assertion passes |
-| T-15 | Unsigned release artefacts. A self-signed dry run signs and verifies correctly, but the certificate is not trusted off the build machine; a CA-issued certificate or Azure Trusted Signing is still required |
+| T-15 | Windows-only. A self-signed dry run signs and verifies correctly, and the workflow now accepts that certificate on the runner; macOS/Linux signing and verification are intentionally disabled. The certificate is not trusted off the build machine, so a CA-issued certificate or Azure Trusted Signing is still required |
 
 The audit rung stays **assessed against L2** until these are closed.
 

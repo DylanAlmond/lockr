@@ -99,24 +99,57 @@ export const checks = [
       );
 
       const workflow = readText('.github', 'workflows', 'publish.yml');
+      const active = workflow
+        .split('\n')
+        .filter((line) => !line.trimStart().startsWith('#'))
+        .join('\n');
+
       for (const token of [
         'WINDOWS_CERTIFICATE',
         'Import-PfxCertificate',
+        '$cert.Subject -eq $cert.Issuer',
+        'verify-windows-signatures.ps1',
+        'must be set for a release build (T-15)',
+      ]) {
+        assert.ok(
+          active.includes(token),
+          `the active release workflow must contain ${token}`
+        );
+      }
+
+      // The macOS and Linux signing/verification blocks are intentionally
+      // commented out for the Windows-only release. Their text may remain in
+      // the file; their execution must not.
+      for (const token of [
         'APPLE_CERTIFICATE',
         'APPLE_SIGNING_IDENTITY',
         'APPLE_TEAM_ID',
         'LINUX_GPG_PRIVATE_KEY',
         'APPIMAGETOOL_FORCE_SIGN',
-        'verify-windows-signatures.ps1',
         'verify-macos-signatures.sh',
         'verify-linux-signatures.sh',
-        'must be set for a release build (T-15)',
       ]) {
         assert.ok(
-          workflow.includes(token),
-          `the release workflow must contain ${token}`
+          !active.includes(token),
+          `${token} must stay disabled until macOS/Linux shipping resumes`
         );
       }
+
+      assert.match(
+        workflow,
+        /Lockr currently ships on Windows only/,
+        'the workflow must record the intentional Windows-only scope'
+      );
+      assert.match(
+        workflow,
+        /self-signed\s+#?\s*development certificate on purpose/,
+        'the workflow must record that accepting the dev certificate is intentional'
+      );
+      assert.match(
+        workflow,
+        /TEMPORARY \(intentional\)/,
+        'the self-signed trust block must be marked temporary'
+      );
     },
   },
 ];
