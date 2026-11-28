@@ -37,8 +37,8 @@ The rule: every row has one, and `manual:` states why automation is not possible
 | Date | 2026-11-28 |
 | Runner | OpenCode subagent |
 | Toolchain | Node 24.7.0 · Rust 1.99.1 stable · Tauri 2.11.4 |
-| Automated checks | `yarn test:compliance` 31/31 static passed (after `yarn build`) · `cargo test` 104 passed (101 unit + 3 integration) · `yarn test` 13 passed (3 files) · `yarn build` succeeded |
-| Release artefacts | Unsigned MSI + NSIS at `bdea025`; both `NotSigned` (`release-verification.md`). T-15 not met; T-09/13.4.1/13.4.2 still need a launch/payload check |
+| Automated checks | `yarn test:compliance` 32/32 static passed (after `yarn build`) · `cargo test` 104 passed (101 unit + 3 integration) · `yarn test` 13 passed (3 files) · `yarn build` succeeded |
+| Release artefacts | Unsigned MSI + NSIS at `bdea025`; both `NotSigned` (`release-verification.md`). Signing is wired for all three platforms and enforced by the workflow (`release-signing.md`), but no signing material exists yet, so T-15 stays unchecked. T-09/13.4.1/13.4.2 still need a launch/payload check |
 | Rows (✅/⚠️/❌/➖/⬜) | g1 18/0/0/3/2 · g2 22/1/0/1/0 · g3 13/0/0/0/0 · g4 13/0/2/0/0 · g5 12/1/0/2/0 · g6 6/0/0/0/2 · g7 5/0/2/0/0 — **total ✅ 89 · ⚠️ 2 · ❌ 4 · ➖ 6 · ⬜ 4** |
 
 ---
@@ -61,7 +61,7 @@ The rule: every row has one, and `manual:` states why automation is not possible
 | T-12 | Single-instance plugin first, `argv`/`cwd` treated as untrusted | `manual:not present in 1.2.0` | ➖ | No single-instance plugin; row stays for a future addition |
 | T-13 | Deep links statically configured; URL shape validated | `manual:not present in 1.2.0` | ➖ | No deep-link plugin |
 | T-14 | Updater artifacts signed, key pinned, HTTPS endpoints | `manual:not present in 1.2.0` | ➖ | No updater |
-| T-15 | Installers code-signed per platform | `manual:signtool/codesign on release artifact` | ⬜ | No signed installer available in this run; not verifiable from the tree |
+| T-15 | Installers code-signed per platform | `manual:signed release artefact via scripts/verify-*-signatures.*` + `static:release-signing-config` | ⬜ | Pipeline signs Windows (Authenticode + timestamp), macOS (Developer ID + notarization) and Linux (GPG); it fails the job when secrets are missing or a signature is invalid. No signed artefact exists yet, so the row is unverified (`release-signing.md`) |
 | T-16 | Headers supply nosniff and the supported security set | `static:headers` | ✅ | `nosniff`, CORP/COOP `same-origin`, device-denying `Permissions-Policy` (F-06, `bcce2f5`) |
 | T-17 | Opener scope narrower than `opener:default` | `static:capabilities-opener` | ✅ | No `opener:*`; Cargo and npm plugin removed (F-02, `bcce2f5`) |
 | 8.2.1 | Function-level access restricted to explicit permission | `static:capabilities` + `static:command-scope` | ✅ | App commands declared and granted one by one; a new command fails closed (F-04, F-05) |

@@ -25,6 +25,22 @@ Both artefacts report `NotSigned` from `Get-AuthenticodeSignature`; there is no
 signer certificate. T-15 remains **unchecked**. Closing it needs a code-signing
 certificate and a signed build; the source tree cannot supply that.
 
+The release pipeline is now wired to sign on all three platforms and to fail
+rather than publish an unsigned artefact (`release-signing.md`): Windows
+Authenticode with an RFC 3161 timestamp, macOS Developer ID with notarization
+and stapling, and Linux GPG signatures over an AppImage and a `SHA256SUMS`
+manifest. The local build above is deliberately unsigned, so it cannot close
+the row. `static:release-signing-config` checks that the workflow still carries
+the guards, the verification scripts and the Windows digest/timestamp config.
+
+To close T-15:
+
+1. Configure the secrets listed in `release-signing.md` §2.
+2. Run the `publish` workflow (push to `release`, or dispatch it manually).
+3. Record the signed artefacts and the verifier output in this document.
+
+Until step 3, the row stays unchecked.
+
 ## 3. What the build does verify
 
 - **Source maps (13.4.2, partly):** `dist/` contains no `*.map` and no
@@ -44,7 +60,7 @@ certificate and a signed build; the source tree cannot supply that.
 | T-09 | Confirming no inspector opens needs launching the installed release and attempting to open devtools; the source-side feature check is not a launch test |
 | 13.4.1 | Enumerating the installer payload needs `lessmsi`/`7z` (neither installed here); `dist/` has no VCS metadata or maps, and the installer is Tauri-generated from the release exe, but the payload was not inspected |
 | 13.4.2 | A launch check of the installed release is needed to confirm debug mode is off; the build-side sourcemap assertion passes |
-| T-15 | Unsigned artefacts; a certificate and signed build are required |
+| T-15 | Unsigned artefacts; a certificate and signed build are required. The pipeline is implemented but no signing material exists |
 
 The audit rung stays **assessed against L2** until these are closed.
 
@@ -52,7 +68,10 @@ The audit rung stays **assessed against L2** until these are closed.
 
 ```powershell
 yarn tauri build
-Get-AuthenticodeSignature src-tauri/target/release/bundle/msi/*.msi, src-tauri/target/release/bundle/nsis/*.exe
+pwsh scripts/verify-windows-signatures.ps1
 Get-FileHash src-tauri/target/release/bundle/msi/*.msi, src-tauri/target/release/bundle/nsis/*.exe -Algorithm SHA256
 yarn test:compliance
 ```
+
+Signed releases are produced only by `.github/workflows/publish.yml`; follow
+`release-signing.md` §4 for the per-platform verification commands.

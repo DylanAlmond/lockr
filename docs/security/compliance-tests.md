@@ -48,7 +48,8 @@ and exits non-zero if any check failed.
 `run.mjs`, wired as `yarn test:compliance`.
 
 - `hygiene.mjs`: `static:sourcemap-config`, `static:devtools-absent`, `static:dead-logo-path`,
-  `static:deps-audit`, `static:deps-crypto`, `static:deps-inventory`.
+  `static:deps-audit`, `static:deps-crypto`, `static:deps-inventory`,
+  `static:release-signing-config`.
 - `capabilities.mjs`: `static:capabilities`, `static:capabilities-opener`, `static:command-scope`.
 - `source.mjs`: the eleven `static:source-*` rows and `static:command-validation`.
 - `bundle.mjs`: the four `static:bundle-*` rows. They run against `dist/` and **skip when `dist/` is
@@ -97,6 +98,15 @@ and exits non-zero if any check failed.
 | `static:bundle-secrets` | The `.env` token value, `logo.dev`, `VITE_LOGO_API_TOKEN`, `Dev seed data` and `test12` all have zero hits |
 | `static:bundle-dead-code` | No dev-only module name appears |
 | `static:bundle-external-hosts` | Host set ⊆ `{www.w3.org, vuejs.org}` |
+
+### `hygiene.mjs` — release signing
+
+| Id | Assertion |
+|---|---|
+| `static:release-signing-config` | `tauri.conf.json` pins Windows `digestAlgorithm: sha256`, a timestamp URL and no environment-specific thumbprint; `publish.yml` contains the Windows certificate import, the macOS Developer ID/notarization variables, the Linux GPG setup, the three verifier calls and the `must be set for a release build (T-15)` guards |
+
+The check proves the *pipeline* is wired. It cannot prove an artefact is signed — that is the
+manual T-15 row, which needs a release built with the secrets.
 
 ### `deps.mjs`
 
@@ -162,7 +172,7 @@ in `security-level.md`.
 
 | Row | Reason |
 |---|---|
-| T-15 | Installer signing needs a signed release artefact |
+| T-15 | A signature can only be checked on a signed artefact; the release pipeline and verifiers exist (`release-signing.md`), but no signing material is configured yet |
 | 13.4.1 | Installer payload contents cannot be inspected without the artefact |
 | 13.4.2 / T-09 | Devtools absence is confirmed by launching a release build |
 | 3.4.5 | Tauri 2.11 cannot set `Referrer-Policy`; the residual is argued, not tested |

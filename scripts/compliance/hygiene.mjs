@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import { execSync } from 'node:child_process';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { readText, root } from './lib.mjs';
+import { readJson, readText, root } from './lib.mjs';
 
 function walk(dir) {
   return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
@@ -75,6 +75,48 @@ export const checks = [
         cwd: root,
         stdio: 'ignore',
       });
+    },
+  },
+  {
+    id: 'static:release-signing-config',
+    run() {
+      const config = readJson('src-tauri', 'tauri.conf.json');
+      const windows = config.bundle?.windows ?? {};
+
+      assert.equal(
+        windows.digestAlgorithm,
+        'sha256',
+        'Windows signing must use SHA-256'
+      );
+      assert.ok(
+        windows.timestampUrl,
+        'Windows signing must configure a timestamp server'
+      );
+      assert.equal(
+        windows.certificateThumbprint,
+        undefined,
+        'the Windows certificate thumbprint is environment-specific and must come from CI'
+      );
+
+      const workflow = readText('.github', 'workflows', 'publish.yml');
+      for (const token of [
+        'WINDOWS_CERTIFICATE',
+        'Import-PfxCertificate',
+        'APPLE_CERTIFICATE',
+        'APPLE_SIGNING_IDENTITY',
+        'APPLE_TEAM_ID',
+        'LINUX_GPG_PRIVATE_KEY',
+        'APPIMAGETOOL_FORCE_SIGN',
+        'verify-windows-signatures.ps1',
+        'verify-macos-signatures.sh',
+        'verify-linux-signatures.sh',
+        'must be set for a release build (T-15)',
+      ]) {
+        assert.ok(
+          workflow.includes(token),
+          `the release workflow must contain ${token}`
+        );
+      }
     },
   },
 ];
