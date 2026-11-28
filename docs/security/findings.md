@@ -223,7 +223,8 @@ process in the User's session can read the password long after the copy.
 **Fix:** applied in `97a6599`. `copy_item_secret` writes the secret in the core and never returns it
 over IPC; the clipboard is cleared after 30 s only if it still holds that value, a newer copy keeps
 its own window, and logout/window close compare-and-clear. Pinned by `rust:clipboard-expiry`. The
-copier no longer fetches plaintext into the renderer, and the cosmetic cooldown is gone.
+copier no longer fetches plaintext into the renderer, and the copy button now shows a 2 s tick as
+feedback only.
 **Status:** fixed.
 
 ### A rule refinement this sweep forced

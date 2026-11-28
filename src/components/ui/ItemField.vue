@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { computed } from 'vue';
-import { Copy } from '@lucide/vue';
+import { computed, onUnmounted, ref, watch } from 'vue';
+import { Check, Copy } from '@lucide/vue';
 import Button from './Button.vue';
 import { ACCOUNT_PASSWORD_MASK } from '../../util/secrets.ts';
 
@@ -37,6 +37,12 @@ const emit = defineEmits<{
   (e: 'blur'): void;
 }>();
 
+/** Icon feedback only; clipboard expiry is enforced by the core, not here. */
+const COPY_FEEDBACK_MS = 2_000;
+
+const copied = ref(false);
+let feedbackTimer: ReturnType<typeof setTimeout> | null = null;
+
 const hasCopyValue = computed(() => {
   if (props.copyAction) return true;
   if (props.input) return !!props.modelValue;
@@ -44,6 +50,17 @@ const hasCopyValue = computed(() => {
   if (props.copyValue !== undefined && props.copyValue !== null) return !!props.copyValue;
   return !!props.displayValue && props.displayValue !== ACCOUNT_PASSWORD_MASK;
 });
+
+function markCopied() {
+  copied.value = true;
+
+  if (feedbackTimer) clearTimeout(feedbackTimer);
+
+  feedbackTimer = setTimeout(() => {
+    copied.value = false;
+    feedbackTimer = null;
+  }, COPY_FEEDBACK_MS);
+}
 
 async function handleCopy() {
   if (props.copyAction) {
@@ -68,9 +85,28 @@ async function handleCopy() {
       await navigator.clipboard.writeText(valueToCopy);
     } catch (err) {
       console.error('Failed to copy text:', err);
+      return;
     }
   }
+
+  markCopied();
 }
+
+// A new field or value must not inherit the previous field's tick.
+watch(
+  () => [props.id, props.displayValue, props.modelValue],
+  () => {
+    if (feedbackTimer) {
+      clearTimeout(feedbackTimer);
+      feedbackTimer = null;
+    }
+    copied.value = false;
+  }
+);
+
+onUnmounted(() => {
+  if (feedbackTimer) clearTimeout(feedbackTimer);
+});
 </script>
 
 <template>
@@ -108,7 +144,7 @@ async function handleCopy() {
         variant="outline"
         size="small"
         :disabled="!hasCopyValue"
-        :icon-component="Copy"
+        :icon-component="copied ? Check : Copy"
         @click="handleCopy"
       />
     </div>
