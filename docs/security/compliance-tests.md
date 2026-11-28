@@ -46,8 +46,9 @@ and exits non-zero if any check failed.
 
 **Implemented:** `csp.mjs`, `capabilities.mjs`, `hygiene.mjs` and `run.mjs`, wired as
 `yarn test:compliance`. `hygiene.mjs` covers `static:sourcemap-config`, `static:devtools-absent`,
-`static:dead-logo-path`, `static:deps-audit` and `static:deps-crypto`. `static:command-scope` is
-deferred until F-05; `source.mjs`, `bundle.mjs` and `deps.mjs` are still pending.
+`static:dead-logo-path`, `static:deps-audit`, `static:deps-crypto` and `static:deps-inventory`.
+`static:command-scope` is deferred until F-05; `source.mjs`, `bundle.mjs` and `deps.mjs` are still
+pending.
 
 ### `csp.mjs`
 

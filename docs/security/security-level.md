@@ -24,6 +24,23 @@ Decision record for [#72](https://github.com/DylanAlmond/lockr/issues/72) (paren
 "Level 2" means **all applicable L1 and L2 requirements**, not a subset. That is why the claim is
 split into a target and a status.
 
+### Allowed communication
+
+The complete egress allowlist. Production builds make **no outbound HTTP, DNS or TLS request**;
+the CSP restricts the renderer to the entries below.
+
+| Destination | When | Purpose |
+|---|---|---|
+| `ipc: http://ipc.localhost` | always | renderer ↔ Rust core (`invoke`) |
+| App protocol, `'self'` | always | bundled scripts, styles, font, bundled SVG |
+| `data:` images | always | icon uploads (128 × 128 PNG) |
+| `ws://localhost:1420`, `ws://localhost:1421` | **development only** | Vite HMR, allowed by `devCsp` |
+
+No other destination is permitted: `connect-src` is IPC-only, `img-src` is
+`'self' data:`, and the `opener`, `fs`, `shell` and `http` plugins are not
+installed. The bundle's only external string literals are `http://www.w3.org`
+(the SVG namespace) and `https://vuejs.org` (Vue error text); neither is fetched.
+
 ## 2. The claim
 
 **Target:** ASVS 5.0 Level 2, client tier, plus the Tauri supplement recorded in
