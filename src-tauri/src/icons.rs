@@ -8,7 +8,9 @@
 
 use crate::VaultError;
 
-/// Whether an icon value may be rendered.
+/// Whether an icon value may be rendered. The production paths use the
+/// trimmed form directly; this predicate is the test-facing spelling.
+#[cfg(test)]
 pub fn is_allowed_icon(value: &str) -> bool {
     is_allowed_trimmed(value.trim())
 }

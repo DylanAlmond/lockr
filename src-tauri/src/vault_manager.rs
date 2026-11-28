@@ -690,6 +690,9 @@ impl VaultManager {
     }
 
     /// Retrieve a specific item of any sendable kind by id (all unlocked vaults).
+    /// Commands use the scoped `_in` variant; this is the unscoped manager
+    /// form used by tests.
+    #[allow(dead_code)]
     pub fn get_item_by_id(&self, item_id: ItemId) -> Result<SafeItem, VaultError> {
         let unlocked: Vec<VaultId> = self.unlocked_vaults.keys().copied().collect();
         self.get_item_by_id_in(&unlocked, item_id)
@@ -775,6 +778,9 @@ impl VaultManager {
     }
 
     /// Retrieves items of all kinds across one or all vaults, applying filters.
+    /// Commands use the scoped `_in` variant; this is the unscoped manager
+    /// form used by tests.
+    #[allow(dead_code)]
     pub fn get_all_items(&self, filter: ItemFilter) -> Result<Vec<SafeItem>, VaultError> {
         let unlocked: Vec<VaultId> = self.unlocked_vaults.keys().copied().collect();
         self.get_all_items_in(&unlocked, filter)
