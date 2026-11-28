@@ -130,7 +130,8 @@ control.
 | `rust:command-bounds` | strings beyond the per-field maximum | rejected (after F-17) |
 
 **Implemented:** `tests/compliance_auth.rs` covers `rust:password-policy`, `rust:login-rate-limit` and
-`rust:auth-logging`.
+`rust:auth-logging`. `rust:command-bounds` and `rust:error-messages` are covered by the `validation`
+and `error` unit tests; the managers are not exposed to integration tests.
 
 ## 5. Renderer suite
 

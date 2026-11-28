@@ -356,8 +356,9 @@ There is no written record of which command validates what, which fields a calle
 F-14 were not obvious.
 
 **Evidence:** no validation or authorisation document in `docs/`.
-**Fix:** command→caller matrix and per-command validation rules.
-**Status:** open.
+**Fix:** applied in `fbb309b` — `ipc-validation.md` records the authorisation rule, the command
+categories and the per-field bounds.
+**Status:** fixed.
 
 ### F-17 — No length bounds on strings crossing IPC · P3
 
@@ -371,8 +372,11 @@ does not send dangerous lengths today, but the backend is the trusted layer and 
 arrives.
 
 **Evidence:** no length checks in `validation` paths of `vault_manager.rs`; `models.rs` uses `String`.
-**Fix:** per-field maximum lengths, rejected with a validation error.
-**Status:** open.
+**Fix:** applied in `fbb309b` — `validation.rs` bounds every free-text field (names, note title/body,
+account/card/identity fields, tags, colours, secrets) before mutation; the bounds are listed in
+`ipc-validation.md` §3. Pinned by the `validation` unit tests and
+`test_item_fields_are_bounded` / `test_vault_metadata_is_bounded` / `test_profile_fields_are_bounded`.
+**Status:** fixed.
 
 ### Controls that held
 
@@ -665,8 +669,10 @@ None of these is a secret, but together they hand a renderer (or anyone reading 
 data path and profile ids — useful reconnaissance for the filesystem-facing findings above.
 
 **Evidence:** `error.rs:19-23`; `commands.rs:84`; `user_manager.rs:59`.
-**Fix:** a UI-facing error type that carries a code and a generic message; delete the ad-hoc prints.
-**Status:** open.
+**Fix:** applied in `fbb309b` — I/O, serialization and not-found errors now Display a generic message
+(paths and ids stay in `Debug`/`source`), and the two ad-hoc prints are gone. Pinned by
+`test_io_display_does_not_leak_the_path` and `test_not_found_display_hides_the_identifier`.
+**Status:** fixed.
 
 ### Controls that held
 
