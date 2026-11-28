@@ -27,3 +27,11 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Signing material — certificates, private keys and machine-specific config
+*.pfx
+*.p12
+*.cer
+*.key
+certificate/
+windows-signing*.json

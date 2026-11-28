@@ -41,6 +41,14 @@ Notarization can use an App Store Connect API key instead of `APPLE_ID`/`APPLE_P
 chosen, replace those three secrets with `APPLE_API_ISSUER`, `APPLE_API_KEY` and
 `APPLE_API_KEY_PATH` and update the guard step to match.
 
+### Development certificate
+
+`scripts/create-dev-certificate.ps1` creates a self-signed code-signing certificate with subject
+`CN=Lockr, O=Dylan Almond`, trusts it on the current machine and writes
+`windows-signing.local.json`. It exists to exercise the build → sign → verify path locally. It is
+**not** a release credential: other machines do not trust it, and it does not satisfy T-15. The
+script prints the commands that remove the certificate and the local config.
+
 ## 3. How the pipeline signs
 
 1. **Guards.** Each platform has a step that errors with `must be set for a release build (T-15)`
