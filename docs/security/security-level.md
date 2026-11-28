@@ -50,6 +50,11 @@ installed. The bundle's only external string literals are `http://www.w3.org`
 **No ASVS level is claimed** — a compliance claim needs zero open deviations, and the sweep found one
 P0, two P1 and a long P2/P3 tail.
 
+**Remediation status (2026-11-28):** all 29 findings are fixed; every finding in `findings.md` now
+names its commit and tests. This does **not** move the rung: the checklist has not been re-run against
+the remediated tree, and the manual rows (installer signing, release devtools, OS facts) have not been
+re-verified. Re-running `audit-checklist.md` and re-pinning this document is the release task.
+
 | Rung | Meaning |
 |---|---|
 | **In assessment** | The sweep is not complete. No level is claimed. |
@@ -96,6 +101,9 @@ The three that matter most:
 - **F-12 (P1) — no command checks `vault_id ∈ active_user.vault_ids`.** Latent while only one User's
   vaults are unlocked, and a cross-User read path in combination with F-13.
 
+**Post-remediation:** each of these is fixed in `findings.md` with its commit and tests. The counts
+and examples above describe the pinned `f3d5c82` sweep, not the current tree.
+
 **Notable absence:** there is no HTML, script, navigation or `postMessage` sink in the renderer. The
 audit found no live cross-site-scripting path, which is why the missing CSP is P2 rather than P0.
 
@@ -135,3 +143,4 @@ does not lead to a row, the claim is wrong and should be removed.
 |---|---|---|
 | 2026-11-27 | `f3d5c82` | Document created; target set |
 | 2026-11-27 | `f3d5c82` | Conformance sweep complete; status = assessed against L2; 29 findings recorded |
+| 2026-11-28 | remediation branches | All 29 findings fixed; assessment not re-pinned; checklist re-run is the release task |

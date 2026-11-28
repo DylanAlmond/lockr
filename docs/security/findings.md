@@ -15,7 +15,8 @@ Severity follows the map's scheme, not CVSS:
 Each finding follows `threat-model.md` §11: asset (`A#`), entry point (`E#`), adversary (`ADV#`),
 rule broken, evidence, fix reference, status. Status vocabulary is in `evidence-standard.md` §3.
 
-**State: partial.** Group 1 is complete; the remaining groups' findings are pending their sweeps.
+**State: complete.** All seven sweep groups are recorded, and every finding is dispositioned:
+**29 fixed, 0 open.** Each finding's `Status` names the commit and the tests that pin it.
 
 ---
 
