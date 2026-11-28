@@ -92,26 +92,33 @@ impl ManagerState {
         Ok(())
     }
 
-    /// End the current session: persist unsaved changes, then tear down.
+    /// End the current session: persist unsaved changes, then tear down. The
+    /// teardown runs even when the flush fails, so a disk error cannot leave
+    /// vaults unlocked or credentials cached.
     fn end_session(&mut self) -> Result<(), VaultError> {
         // Persist every unlocked vault, not only the active user's: the
-        // session is ending and all RAM state must reach disk before it is
-        // dropped.
-        self.vault_manager.flush_all()?;
+        // session is ending and all RAM state must reach disk first.
+        let flush = self.vault_manager.flush_all();
         self.teardown_session();
-        Ok(())
+        flush
+    }
+
+    /// Drop the secrets and clocks of the session, leaving the active-user
+    /// pointer alone. `delete_user` needs that pointer to remove the profile.
+    fn clear_session_state(&mut self) {
+        self.vault_manager.lock_vault(None);
+        self.clear_credentials();
+        // Do not leave a copied secret on the clipboard after logout.
+        crate::clipboard::clear();
+        self.session_started.set(None);
+        self.last_activity.set(None);
     }
 
     /// Drop everything that belongs to the session. Infallible so a timeout
     /// can always end the session, even when the disk is unavailable.
     fn teardown_session(&mut self) {
-        self.vault_manager.lock_vault(None);
-        self.clear_credentials();
-        // Do not leave a copied secret on the clipboard after logout.
-        crate::clipboard::clear();
+        self.clear_session_state();
         self.user_manager.clear_active_user();
-        self.session_started.set(None);
-        self.last_activity.set(None);
     }
 
     fn start_session(&self) {
@@ -146,8 +153,8 @@ impl ManagerState {
             return false;
         }
 
-        let _ = self.vault_manager.flush_all();
-        self.teardown_session();
+        // The flush is best-effort; teardown still runs on error.
+        let _ = self.end_session();
         true
     }
 
@@ -191,8 +198,14 @@ impl ManagerState {
 
         self.master_password = Some(master_password);
         self.secret_key = Some(secret_key);
-        self.user_manager.add_vault_to_user(new_vault.id)?;
         self.start_session();
+
+        // If recording the vault fails, drop the half-started session rather
+        // than leaving credentials cached with an unbounded clock.
+        if let Err(error) = self.user_manager.add_vault_to_user(new_vault.id) {
+            self.teardown_session();
+            return Err(error);
+        }
 
         Ok(vec![new_vault.into_safe()])
     }
@@ -413,7 +426,8 @@ pub fn spawn_session_monitor(handle: AppHandle) {
             let app_state = handle.state::<Mutex<ManagerState>>();
             let mut state = match app_state.lock() {
                 Ok(state) => state,
-                Err(_) => continue,
+                // A panic elsewhere must not silently disable the timeout.
+                Err(poisoned) => poisoned.into_inner(),
             };
             state.expire_session()
         };
@@ -430,11 +444,7 @@ pub fn delete_user(state: AppState) -> Result<(), String> {
 
     // `delete_user` removes the profile and clears the active user itself;
     // the account is going away, so there is no session to flush first.
-    state.vault_manager.lock_vault(None);
-    state.clear_credentials();
-    state.session_started.set(None);
-    state.last_activity.set(None);
-    crate::clipboard::clear();
+    state.clear_session_state();
 
     state.user_manager.delete_user().map_err(|e| e.to_string())
 }

@@ -428,9 +428,10 @@ Rule broken: 6.1.1, 7.1.1
 There is no written statement of the master-password rules, the lock semantics, or the intended
 session lifetime. Without it, F-18 and F-19 cannot be judged as defects rather than choices.
 
-**Evidence:** no auth or session document in `docs/`.
+**Evidence:** no auth or session document in `docs/`. Session lifetime and lock triggers are now in
+`session-policy.md`; master-password rules are still unwritten.
 **Fix:** a short auth policy covering password rules, lock triggers and session lifetime.
-**Status:** open.
+**Status:** open (session half documented).
 
 ### Two standing deviations, not new findings
 

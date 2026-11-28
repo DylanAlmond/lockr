@@ -115,6 +115,7 @@ control.
 | `rust:uuid-traversal` | ids like `../x`, `..%2f`, non-UUID | rejected before any path use |
 | `rust:atomic-write` | save interrupted between write and rename | original file intact (after F-28) |
 | `rust:clipboard-expiry` | copied secret at the TTL, clipboard unchanged / replaced | cleared only if unchanged; a newer copy keeps its own window |
+| `rust:session-timeout` | idle past 15 min / active past 12 h | session torn down: key and password dropped, vaults locked, clipboard cleared, active user cleared |
 | `rust:serde-targets` | malformed vault JSON | rejected with a typed error |
 | `rust:crypto-attrs` | Argon2 params and AEAD mode | Argon2id, m=64 MiB, t=3, p=4; AES-256-GCM |
 | `rust:format-version` | a saved vault | carries `schema_version` |
@@ -133,13 +134,12 @@ control.
 time-based. **Implemented (F-10):** `tests/compliance/secret-reveal.test.ts` covers
 `renderer:reveal-timeout`.
 
-Clipboard expiry is `rust:clipboard-expiry`, not a renderer row: the copy path lives in the core
-(secret-lifetime §5).
+Clipboard expiry is `rust:clipboard-expiry` and the idle/absolute timeout is `rust:session-timeout`,
+not renderer rows: the copy path and the session clock live in the core.
 
 | Id | Subject | Expected |
 |---|---|---|
 | `renderer:reveal-timeout` | reveal a password, advance 10 s | re-masked; value ref is `null` |
-| `renderer:idle-lock` | no interaction for the configured timeout | vault locks (after F-19) |
 | `renderer:never-hold` | after a reveal | `localStorage`/`sessionStorage` empty; route has no secret |
 | `renderer:masking` | masked card/account fields | no character of the value except the card last four |
 | `renderer:upload-rasterisation` | upload an SVG | stored value is a PNG `data:` URL |

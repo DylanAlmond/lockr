@@ -109,6 +109,12 @@ export function useUser() {
     }
   }
 
+  /** The core ended the session: clear local state and return to auth. */
+  function handleSessionExpired() {
+    user.value = null;
+    router.replace('/auth');
+  }
+
   async function deleteUser(): Promise<Boolean> {
     try {
       await invoke<User>('delete_user');
@@ -129,6 +135,7 @@ export function useUser() {
     register,
     login,
     logout,
+    handleSessionExpired,
     fetchUser,
     updateProfile,
     deleteUser

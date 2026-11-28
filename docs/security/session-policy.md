@@ -56,9 +56,9 @@ state.
   scrub memory.
 - **OS screen lock is separate.** This policy does not observe the OS lock
   state.
-- **Flush is best-effort on timeout.** Unsaved changes may be lost if the disk
-  is unavailable when the session expires; the alternative is keeping the
-  session open.
+- **Flush is best-effort when the session ends.** Unsaved changes may be lost
+  if the disk is unavailable on logout or timeout; the alternative is keeping
+  the session open.
 
 ## 5. Verification
 

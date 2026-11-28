@@ -13,7 +13,7 @@ const ACTIVITY_EVENTS = ['pointerdown', 'keydown', 'wheel'] as const;
  * core ends the session.
  */
 export function useSessionTimeout() {
-  const { logout } = useUser();
+  const { handleSessionExpired } = useUser();
 
   let lastReported = 0;
   let unlisten: UnlistenFn | null = null;
@@ -36,7 +36,10 @@ export function useSessionTimeout() {
     }
 
     const stop = await listen('session-expired', () => {
-      logout();
+      // The core already cleared the session; do not call logout (it expects
+      // an active user). Just leave the authenticated UI.
+      lastReported = 0;
+      handleSessionExpired();
     });
 
     if (disposed) {
