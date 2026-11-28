@@ -8,6 +8,10 @@ caller's authority and every field's shape in Rust.**
 
 ## 1. Authorisation
 
+- App commands are declared in `build.rs` (`AppManifest::commands`) and granted
+  to the main window one `allow-<command>` at a time. With an app manifest
+  present, Tauri denies any app command the capability does not grant, so a new
+  command that is not declared and granted fails closed.
 - Every vault/item command calls `ManagerState::require_owned_vault`, which
   asserts `vault_id ∈ active_user.vault_ids` before touching vault data.
 - Scan commands (`get_all_items`, `get_item_by_id`, `get_unlocked_vaults`,

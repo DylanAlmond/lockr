@@ -139,7 +139,12 @@ Each entry has a call site: `core:event` for `onResized`; `app:allow-version` fo
 `getVersion`; the window permissions for `Titlebar.vue` and `data-tauri-drag-region`. Tauri's drag
 script invokes `internal_toggle_maximize` on a drag-region double-click, so that permission is
 required too. `core:default` is dropped because it also bundles menu, tray, image, resources and path
-permissions the app never uses. `invoke` of app-defined commands needs no entry.
+permissions the app never uses.
+
+The capability also carries one `allow-<command>` per app command (33 at the time of writing). Those
+identifiers are generated from `build.rs`'s `AppManifest::commands`; with an app manifest present,
+Tauri denies any app command the capability does not grant. `static:command-scope` pins the
+commands.rs ↔ build.rs ↔ capability match; see `ipc-validation.md`.
 
 ## 6. Isolation pattern: declined, recorded
 

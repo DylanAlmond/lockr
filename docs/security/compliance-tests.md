@@ -47,8 +47,8 @@ and exits non-zero if any check failed.
 **Implemented:** `csp.mjs`, `capabilities.mjs`, `hygiene.mjs` and `run.mjs`, wired as
 `yarn test:compliance`. `hygiene.mjs` covers `static:sourcemap-config`, `static:devtools-absent`,
 `static:dead-logo-path`, `static:deps-audit`, `static:deps-crypto` and `static:deps-inventory`.
-`static:command-scope` is not implemented: F-05 is accepted (see §6). `source.mjs`, `bundle.mjs` and
-`deps.mjs` are still pending.
+`static:command-scope` is implemented in `capabilities.mjs`; `source.mjs`, `bundle.mjs` and `deps.mjs`
+are still pending.
 
 ### `csp.mjs`
 
@@ -67,7 +67,7 @@ and exits non-zero if any check failed.
 |---|---|
 | `static:capabilities` | Permission list equals the expected eight-entry set (config baseline §5) |
 | `static:capabilities-opener` | No permission starts with `opener:`; `tauri-plugin-opener` absent from `Cargo.toml` and `package.json` |
-| — | App-command scoping | accepted in F-05: one window, no plugin command surface; a window ACL cannot separate the UI from a compromised renderer |
+| `static:command-scope` | `build.rs` `AppManifest::commands`, the `#[tauri::command]` set and the capability's `allow-*` set all match |
 
 ### `source.mjs`
 
