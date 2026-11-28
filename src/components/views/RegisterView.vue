@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref } from 'vue';
+import { computed, ref } from 'vue';
 import Button from '../../components/ui/Button.vue';
 import Input from '../../components/ui/Input.vue';
 import { useRouter } from 'vue-router';
@@ -9,10 +9,17 @@ import { LockOpen } from '@lucide/vue';
 const { register } = useUser();
 const router = useRouter();
 
+/** Mirrors the backend floor; the score check remains backend-only. */
+const MASTER_PASSWORD_MIN_LENGTH = 12;
+
 const name = ref('');
 const masterPassword = ref('');
 const error = ref('');
 const isLoading = ref(false);
+
+const canSubmit = computed(
+  () => !!name.value && masterPassword.value.length >= MASTER_PASSWORD_MIN_LENGTH
+);
 
 async function handleRegister() {
   if (!name.value || !masterPassword.value) {
@@ -56,11 +63,16 @@ async function handleRegister() {
       name="master_password"
     />
 
+    <p class="password-hint">
+      At least {{ MASTER_PASSWORD_MIN_LENGTH }} characters and not easily guessed. A passphrase of
+      several words is strongest.
+    </p>
+
     <Button
       type="submit"
       variant="solid"
       :icon-component="LockOpen"
-      :disabled="isLoading || !masterPassword"
+      :disabled="isLoading || !canSubmit"
       fill
     >
       <span v-if="isLoading">Creating...</span>
@@ -71,4 +83,12 @@ async function handleRegister() {
   <p v-if="error" class="error-text">{{ error }}</p>
 </template>
 
-<style scoped></style>
+<style scoped>
+.password-hint {
+  margin: 0;
+  font-size: 0.8125rem;
+  line-height: 1.4;
+  color: var(--color-text-secondary);
+  text-align: center;
+}
+</style>

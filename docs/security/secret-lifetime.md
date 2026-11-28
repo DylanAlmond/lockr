@@ -6,7 +6,7 @@ gap in each component. Implementation becomes fix tickets after the map closes.
 
 **Applied:** R-S2 and R-S4, including the backend copy path in §5, for the detail views, the Input
 password toggle and the copier (F-10, F-11), and the idle/absolute session timeout (F-19,
-`session-policy.md`). §3 describes the pre-fix behaviour. R-S3 (editor draft teardown) remains open.
+`auth-policy.md`). §3 describes the pre-fix behaviour. R-S3 (editor draft teardown) remains open.
 
 Scope: **T1 field-key secrets** from the threat model — account `password`; card `card_number`,
 `security_code`, `pin`. Master-password reveal toggles on the auth screens are included because
@@ -126,7 +126,7 @@ land. Stated plainly: lifetime policy is exposure minimisation, not access contr
 - **Core-side plaintext.** The Rust core holds decrypted vaults for the whole session, and
   `set_autosave(false)` can extend that indefinitely. Renderer copies are bounded here; core
   plaintext is bounded by the threat model's session rule.
-- **Idle auto-lock.** Decided separately and implemented in `session-policy.md`: a 15-minute idle and
+- **Idle auto-lock.** Decided separately and implemented in `auth-policy.md`: a 15-minute idle and
   12-hour absolute timeout end the session in the core. That is what bounds core plaintext; this
   policy continues to bound renderer reachability.
 - **T2 content.** Note bodies, identity PII, usernames and URLs stay visible and copyable. The audit
@@ -150,7 +150,7 @@ land. Stated plainly: lifetime policy is exposure minimisation, not access contr
 Discharges or partly discharges: ASVS **14.3.1** (authenticated data cleared when the session ends),
 **14.2.1** (no sensitive data in URLs), **16.2.5** (no secrets in logs), **7.4.1** (a terminated
 session cannot be used again — with the session rule). **7.3.1** (inactivity timeout) is discharged
-by `session-policy.md`. The project-specific rows are: reveal bound, clipboard expiry, never-hold
+by `auth-policy.md`. The project-specific rows are: reveal bound, clipboard expiry, never-hold
 list, masking invariant, and no-false-zeroization.
 
 ## 10. Named follow-ups
@@ -166,4 +166,4 @@ Fix tickets after the map closes, in priority order:
 4. **Copy feedback is icon-only** — `ItemField` shows a 2 s tick when a copy succeeds. It is feedback,
    not a clipboard-expiry signal; the 30 s clear is enforced in the core.
 5. **Idle auto-lock** — decided and implemented: a 15-minute idle and 12-hour absolute timeout end
-   the session in the core (`session-policy.md`).
+   the session in the core (`auth-policy.md`).

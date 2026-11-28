@@ -413,7 +413,7 @@ unlocked and every secret one reveal away.
 
 **Evidence:** `commands.rs` `login_user` / `logout`; `lock_vault` registered at `lib.rs:61` with no
 call site; no timer or inactivity listener anywhere in `src/`.
-**Fix:** applied in `28d9c77` and recorded in `session-policy.md`. The core enforces a 15-minute idle
+**Fix:** applied in `28d9c77` and recorded in `auth-policy.md`. The core enforces a 15-minute idle
 timeout and a 12-hour absolute lifetime, tears the session down and emits `session-expired`; the
 renderer reports activity and returns to auth.
 **Status:** fixed.
@@ -429,7 +429,7 @@ There is no written statement of the master-password rules, the lock semantics, 
 session lifetime. Without it, F-18 and F-19 cannot be judged as defects rather than choices.
 
 **Evidence:** no auth or session document in `docs/`. Session lifetime and lock triggers are now in
-`session-policy.md`; master-password rules are still unwritten.
+`auth-policy.md`; master-password rules are still unwritten.
 **Fix:** a short auth policy covering password rules, lock triggers and session lifetime.
 **Status:** open (session half documented).
 

@@ -11,7 +11,7 @@ use uuid::Uuid;
 use zeroize::{Zeroize, Zeroizing};
 use zxcvbn::{zxcvbn, Entropy};
 
-use crate::user_manager::UserManager;
+use crate::user_manager::{validate_master_password, UserManager};
 use crate::vault_manager::VaultManager;
 use crate::{
     ItemFilter, ItemId, IntoSafe, NewItemData, SafeItem, SafeVault, SecretInput, User, UserId,
@@ -174,6 +174,9 @@ impl ManagerState {
         name: String,
         master_password: String,
     ) -> Result<Vec<SafeVault>, VaultError> {
+        // Reject a weak master password before ending any current session.
+        validate_master_password(&name, &master_password)?;
+
         self.end_session()?;
 
         let user = self.user_manager.register(name, &master_password)?;
@@ -1231,11 +1234,31 @@ mod tests {
     }
 
     #[test]
+    fn test_register_rejects_a_weak_password_without_ending_the_session() {
+        let (mut state, owned, _) = setup();
+
+        let result = state.register_user("Bob".to_string(), "short".to_string());
+
+        assert!(
+            matches!(result, Err(VaultError::Validation(_))),
+            "got {result:?}"
+        );
+        assert!(
+            state.vault_manager.get_vault(owned).is_ok(),
+            "a rejected registration must leave the current session unlocked"
+        );
+        assert!(state.master_password.is_some());
+    }
+
+    #[test]
     fn test_register_ends_the_previous_session() {
         let (mut state, owned, _) = setup();
 
         let vaults = state
-            .register_user("Bob".to_string(), "BobPassword".to_string())
+            .register_user(
+                "Bob".to_string(),
+                "correct horse battery staple".to_string(),
+            )
             .unwrap();
 
         assert!(

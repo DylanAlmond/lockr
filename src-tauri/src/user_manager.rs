@@ -1,7 +1,14 @@
 use argon2::password_hash::rand_core::{OsRng, RngCore};
-use std::{path::PathBuf, println};
+use std::{
+    collections::HashMap,
+    io::Write,
+    path::PathBuf,
+    println,
+    time::{Duration, Instant},
+};
 use uuid::Uuid;
 use zeroize::Zeroize;
+use zxcvbn::zxcvbn;
 
 use crate::{
     crypto::{decrypt, encrypt},
@@ -9,10 +16,65 @@ use crate::{
     User, UserId, VaultError, VaultId,
 };
 
+/// Master-password policy and login throttle (docs/security/auth-policy.md).
+pub const MASTER_PASSWORD_MIN_LEN: usize = 12;
+pub const MASTER_PASSWORD_MIN_SCORE: u8 = 3;
+const MASTER_PASSWORD_CONTEXT: &[&str] = &["lockr", "vault", "password"];
+const LOGIN_MAX_FAILURES: u32 = 5;
+const LOGIN_BACKOFF_BASE: Duration = Duration::from_secs(30);
+const LOGIN_BACKOFF_MAX: Duration = Duration::from_secs(15 * 60);
+
+struct LoginThrottle {
+    failures: u32,
+    blocked_until: Option<Instant>,
+}
+
 pub struct UserManager {
     app_data_dir: PathBuf,
     pub active_user_id: Option<UserId>,
     active_path: Option<PathBuf>,
+
+    /// Consecutive failed logins per user. In memory only: a restart clears it.
+    throttle: HashMap<UserId, LoginThrottle>,
+}
+
+/// Reject a master password that does not meet the documented policy. Context
+/// words include the user's name and the product, so predictable passwords
+/// built from them score low.
+pub fn validate_master_password(name: &str, master_password: &str) -> Result<(), VaultError> {
+    if master_password.chars().count() < MASTER_PASSWORD_MIN_LEN {
+        return Err(VaultError::Validation(format!(
+            "Master password must be at least {MASTER_PASSWORD_MIN_LEN} characters"
+        )));
+    }
+
+    let mut inputs: Vec<&str> = MASTER_PASSWORD_CONTEXT.to_vec();
+    inputs.extend(name.split_whitespace());
+
+    let entropy = zxcvbn(master_password, &inputs);
+    let score = u8::from(entropy.score());
+    if score < MASTER_PASSWORD_MIN_SCORE {
+        return Err(VaultError::Validation(format!(
+            "Master password is too weak (score {score}/4); use a longer, less predictable password"
+        )));
+    }
+
+    Ok(())
+}
+
+/// Blocking delay after `failures` consecutive failures, capped. `None` means
+/// the next attempt is still allowed immediately.
+fn login_backoff(failures: u32) -> Option<Duration> {
+    if failures < LOGIN_MAX_FAILURES {
+        return None;
+    }
+
+    let exponent = (failures - LOGIN_MAX_FAILURES).min(10);
+    Some(
+        LOGIN_BACKOFF_BASE
+            .saturating_mul(1u32 << exponent)
+            .min(LOGIN_BACKOFF_MAX),
+    )
 }
 
 impl UserManager {
@@ -36,6 +98,7 @@ impl UserManager {
             app_data_dir,
             active_user_id: None,
             active_path: None,
+            throttle: HashMap::new(),
         })
     }
 
@@ -78,6 +141,58 @@ impl UserManager {
             .exists()
     }
 
+    /// Append one authentication event to `auth.log`. Best-effort and never
+    /// contains secret material.
+    fn audit(&self, event: &str, user: Option<&UserId>) {
+        let timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let line = match user {
+            Some(id) => format!("{timestamp} {event} user={id}\n"),
+            None => format!("{timestamp} {event}\n"),
+        };
+
+        let _ = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(self.app_data_dir.join("auth.log"))
+            .and_then(|mut file| file.write_all(line.as_bytes()));
+    }
+
+    fn check_login_allowed(&self, id: &UserId) -> Result<(), VaultError> {
+        let Some(throttle) = self.throttle.get(id) else {
+            return Ok(());
+        };
+        let Some(blocked_until) = throttle.blocked_until else {
+            return Ok(());
+        };
+
+        let now = Instant::now();
+        if blocked_until > now {
+            let remaining = blocked_until
+                .saturating_duration_since(now)
+                .as_secs()
+                .max(1);
+            return Err(VaultError::TooManyAttempts(remaining));
+        }
+
+        Ok(())
+    }
+
+    fn record_failed_login(&mut self, id: &UserId) {
+        let throttle = self.throttle.entry(*id).or_insert(LoginThrottle {
+            failures: 0,
+            blocked_until: None,
+        });
+        throttle.failures = throttle.failures.saturating_add(1);
+
+        if let Some(delay) = login_backoff(throttle.failures) {
+            throttle.blocked_until = Some(Instant::now() + delay);
+        }
+    }
+
+    fn record_successful_login(&mut self, id: &UserId) {
+        self.throttle.remove(id);
+    }
+
     /// Create a brand new user profile.
     /// Generates a random Secret Key and encrypts it with the Master Password.
     pub fn register(&mut self, name: String, master_password: &str) -> Result<User, VaultError> {
@@ -104,12 +219,18 @@ impl UserManager {
                 .join(format!("{}.json", user.id.to_string())),
         );
         self.save_user(&user)?;
+        self.audit("registered", Some(&user.id));
 
         Ok(user)
     }
 
     /// Verify the Master Password and decrypt the Secret Key.
     pub fn login(&mut self, id: &UserId, master_password: &str) -> Result<Vec<u8>, VaultError> {
+        if let Err(error) = self.check_login_allowed(id) {
+            self.audit("login_blocked", Some(id));
+            return Err(error);
+        }
+
         if !self.is_user_registered(id) {
             return Err(VaultError::UserNotFound("User not registered".into()));
         }
@@ -121,7 +242,17 @@ impl UserManager {
         let user_file: User = serde_json::from_str(&json)?;
 
         let decrypted_key =
-            Self::decrypt_secret_key(master_password, &user_file.encrypted_secret_key)?;
+            match Self::decrypt_secret_key(master_password, &user_file.encrypted_secret_key) {
+                Ok(key) => key,
+                Err(error) => {
+                    self.record_failed_login(id);
+                    self.audit("login_failed", Some(id));
+                    return Err(error);
+                }
+            };
+
+        self.record_successful_login(id);
+        self.audit("login_success", Some(id));
 
         self.active_user_id = Some(user_file.id);
         self.active_path = Some(path);
@@ -301,6 +432,62 @@ mod tests {
         std::fs::create_dir_all(&temp_dir).unwrap();
 
         temp_dir
+    }
+
+    #[test]
+    fn test_master_password_policy() {
+        assert!(validate_master_password("Alice", "short").is_err());
+        assert!(
+            validate_master_password("Alice", "passwordpassword").is_err(),
+            "a predictable password must not pass the score floor"
+        );
+        assert!(validate_master_password("Alice", "correct horse battery staple").is_ok());
+    }
+
+    #[test]
+    fn test_login_backoff_grows_and_caps() {
+        assert_eq!(login_backoff(4), None);
+        assert_eq!(login_backoff(5), Some(Duration::from_secs(30)));
+        assert_eq!(login_backoff(6), Some(Duration::from_secs(60)));
+        assert_eq!(login_backoff(20), Some(LOGIN_BACKOFF_MAX));
+    }
+
+    #[test]
+    fn test_login_throttle_blocks_and_clears() {
+        let temp_dir = setup();
+        let mut manager = UserManager::new(temp_dir.clone()).unwrap();
+        let id = Uuid::new_v4();
+
+        for _ in 0..4 {
+            manager.record_failed_login(&id);
+        }
+        manager.check_login_allowed(&id).unwrap();
+
+        manager.record_failed_login(&id);
+        assert!(matches!(
+            manager.check_login_allowed(&id),
+            Err(VaultError::TooManyAttempts(_))
+        ));
+
+        manager.record_successful_login(&id);
+        manager.check_login_allowed(&id).unwrap();
+
+        std::fs::remove_dir_all(temp_dir).ok();
+    }
+
+    #[test]
+    fn test_audit_log_records_events_without_secrets() {
+        let temp_dir = setup();
+        let manager = UserManager::new(temp_dir.clone()).unwrap();
+        let id = Uuid::new_v4();
+
+        manager.audit("login_failed", Some(&id));
+
+        let log = std::fs::read_to_string(temp_dir.join("auth.log")).unwrap();
+        assert!(log.contains("login_failed"));
+        assert!(log.contains(&id.to_string()));
+
+        std::fs::remove_dir_all(temp_dir).ok();
     }
 
     #[test]

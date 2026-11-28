@@ -14,6 +14,9 @@ pub enum VaultError {
     #[error("Wrong master password")]
     AuthenticationFailed,
 
+    #[error("Too many failed login attempts; try again in {0} seconds")]
+    TooManyAttempts(u64),
+
     #[error("Vault is locked")]
     VaultLocked,
 
