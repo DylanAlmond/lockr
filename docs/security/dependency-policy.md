@@ -1,0 +1,36 @@
+# Dependency policy
+
+How dependency risk is gated and remediated. Companion to `compliance-tests.md`
+(`static:deps-audit`, `static:deps-crypto`).
+
+## 1. Gate
+
+- **JavaScript:** `yarn audit` (`yarn npm audit --severity high`) must report zero
+  high or critical advisories before a release. The check is
+  `static:deps-audit` and the script is `yarn audit`.
+- **Rust:** `cargo tree` is reviewed when a dependency is added or upgraded.
+  There is no automated Rust advisory gate yet.
+- **Lockfiles are committed** (`yarn.lock`, `src-tauri/Cargo.lock`) and reviewed
+  in the same change as the manifest. No git, URL or file resolutions.
+
+## 2. Scope
+
+Development dependencies are in scope: the build can ship their output, and a
+compromised build tool is a supply-chain risk even when it never reaches the
+User. `vite` was the first case (F-25).
+
+## 3. Remediation window
+
+| Severity | Deadline |
+|---|---|
+| critical / high | before the next release |
+| moderate | within 30 days |
+| low | at the next dependency update |
+
+An advisory that cannot be fixed in the window is recorded in `findings.md`
+with the reason and the compensating control.
+
+## 4. Known gaps
+
+- No SBOM is generated or committed (F-24).
+- No automated Rust advisory gate; `cargo audit` would be the obvious addition.

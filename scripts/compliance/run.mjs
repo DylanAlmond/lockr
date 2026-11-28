@@ -6,8 +6,9 @@
 
 import { checks as cspChecks } from './csp.mjs';
 import { checks as capabilityChecks } from './capabilities.mjs';
+import { checks as hygieneChecks } from './hygiene.mjs';
 
-const checks = [...cspChecks, ...capabilityChecks];
+const checks = [...cspChecks, ...capabilityChecks, ...hygieneChecks];
 
 let failed = 0;
 

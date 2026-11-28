@@ -9,6 +9,12 @@ const host = process.env.TAURI_DEV_HOST;
 export default defineConfig(async () => ({
   plugins: [vue(), svgLoader()],
 
+  build: {
+    // Follow the Tauri debug flag rather than Vite's default, so a release
+    // build cannot ship source maps by accident.
+    sourcemap: !!process.env.TAURI_ENV_DEBUG
+  },
+
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   //
   // 1. prevent Vite from obscuring rust errors

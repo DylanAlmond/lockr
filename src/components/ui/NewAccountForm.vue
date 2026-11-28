@@ -5,7 +5,6 @@ import Button from './Button.vue';
 import ItemField from './ItemField.vue';
 import { CreateItemProps, useVault } from '../../composables/useVault.ts';
 import { PASSWORDSTRENGTHS } from '../../util/constants.ts';
-// import { fetchBrandLogoAsBase64 } from '../../util/imageUpload.ts';
 import Select from './Select.vue';
 import IconUpload from './IconUpload.vue';
 

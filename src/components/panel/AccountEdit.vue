@@ -22,9 +22,6 @@ const { getItemSecret, getPasswordStrength, updateItemSecret } = useVault();
 const account = computed(() => (state.activeItem?.kind === 'account' ? state.activeItem : null));
 
 const form = ref<Partial<Account>>({});
-// const isFetchingLogo = ref(false);
-const manuallySetIcon = ref(false);
-// let displayNameDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 
 // The stored value is prefetched on mount; the input holds the real
 // value, masked as password dots until the field is focused. A present
@@ -98,7 +95,6 @@ watch(
   (item) => {
     const view = item?.kind === 'account' ? item : null;
     form.value = view ? { ...view } : {};
-    manuallySetIcon.value = false; // Reset when loading a new item
 
     // Reset the password row and fetch for the (new) account
     passwordOriginal.value = null;
@@ -110,35 +106,6 @@ watch(
   },
   { immediate: true }
 );
-
-// Auto-fetch logo when display name changes (if icon wasn't manually set)
-// watch(
-//   () => form.value.display_name,
-//   (displayName) => {
-//     if (!displayName || manuallySetIcon.value) {
-//       return;
-//     }
-
-//     // Debounce the logo fetch to avoid too many requests
-//     if (displayNameDebounceTimer) {
-//       clearTimeout(displayNameDebounceTimer);
-//     }
-
-//     displayNameDebounceTimer = setTimeout(async () => {
-//       try {
-//         isFetchingLogo.value = true;
-//         const logo = await fetchBrandLogoAsBase64(displayName);
-//         if (logo) {
-//           form.value.icon = logo;
-//         }
-//       } catch (error) {
-//         console.error('Logo fetch error:', error);
-//       } finally {
-//         isFetchingLogo.value = false;
-//       }
-//     }, 500);
-//   }
-// );
 
 function handleCancel() {
   router.push({

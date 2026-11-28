@@ -9,6 +9,7 @@
     "preview": "vite preview",
     "test": "vitest run",
     "test:compliance": "node scripts/compliance/run.mjs",
+    "audit": "yarn npm audit --severity high",
     "tauri": "tauri"
   },
   "dependencies": {
@@ -25,9 +26,9 @@
     "@vue/test-utils": "^2.4.6",
     "jsdom": "^26.1.0",
     "typescript": "~5.6.2",
-    "vite": "^6.0.3",
+    "vite": "^6.4.6",
     "vite-svg-loader": "^5.1.1",
-    "vitest": "^3.2.4",
+    "vitest": "^4.1.11",
     "vue-tsc": "^2.1.10"
   },
   "packageManager": "yarn@4.18.1"
