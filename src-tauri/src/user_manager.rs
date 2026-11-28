@@ -21,7 +21,7 @@ pub const MASTER_PASSWORD_MIN_LEN: usize = 12;
 pub const MASTER_PASSWORD_MIN_SCORE: u8 = 3;
 const MASTER_PASSWORD_CONTEXT: &[&str] = &["lockr", "vault", "password"];
 const LOGIN_MAX_FAILURES: u32 = 5;
-const LOGIN_BACKOFF_BASE: Duration = Duration::from_secs(30);
+const LOGIN_BACKOFF_BASE: Duration = Duration::from_secs(5 * 60);
 const LOGIN_BACKOFF_MAX: Duration = Duration::from_secs(15 * 60);
 
 struct LoginThrottle {
@@ -60,6 +60,31 @@ pub fn validate_master_password(name: &str, master_password: &str) -> Result<(),
     }
 
     Ok(())
+}
+
+/// Human-readable retry delay for the throttle message.
+fn format_retry_delay(remaining: Duration) -> String {
+    let seconds = remaining.as_secs().max(1);
+    let minutes = seconds / 60;
+    let secs = seconds % 60;
+
+    match (minutes, secs) {
+        (0, secs) => format!("{secs} second{}", plural(secs)),
+        (minutes, 0) => format!("{minutes} minute{}", plural(minutes)),
+        (minutes, secs) => format!(
+            "{minutes} minute{} {secs} second{}",
+            plural(minutes),
+            plural(secs)
+        ),
+    }
+}
+
+fn plural(value: u64) -> &'static str {
+    if value == 1 {
+        ""
+    } else {
+        "s"
+    }
 }
 
 /// Blocking delay after `failures` consecutive failures, capped. `None` means
@@ -164,11 +189,8 @@ impl UserManager {
 
         let now = Instant::now();
         if blocked_until > now {
-            let remaining = blocked_until
-                .saturating_duration_since(now)
-                .as_secs()
-                .max(1);
-            return Err(VaultError::TooManyAttempts(remaining));
+            let remaining = blocked_until.saturating_duration_since(now);
+            return Err(VaultError::TooManyAttempts(format_retry_delay(remaining)));
         }
 
         Ok(())
@@ -465,9 +487,21 @@ mod tests {
     #[test]
     fn test_login_backoff_grows_and_caps() {
         assert_eq!(login_backoff(4), None);
-        assert_eq!(login_backoff(5), Some(Duration::from_secs(30)));
-        assert_eq!(login_backoff(6), Some(Duration::from_secs(60)));
+        assert_eq!(login_backoff(5), Some(Duration::from_secs(5 * 60)));
+        assert_eq!(login_backoff(6), Some(Duration::from_secs(10 * 60)));
+        assert_eq!(login_backoff(7), Some(LOGIN_BACKOFF_MAX));
         assert_eq!(login_backoff(20), Some(LOGIN_BACKOFF_MAX));
+    }
+
+    #[test]
+    fn test_retry_delay_is_human_readable() {
+        assert_eq!(format_retry_delay(Duration::from_secs(300)), "5 minutes");
+        assert_eq!(
+            format_retry_delay(Duration::from_secs(150)),
+            "2 minutes 30 seconds"
+        );
+        assert_eq!(format_retry_delay(Duration::from_secs(1)), "1 second");
+        assert_eq!(format_retry_delay(Duration::from_secs(60)), "1 minute");
     }
 
     #[test]

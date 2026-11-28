@@ -31,8 +31,8 @@ Failed logins are counted per user, in memory:
 | Consecutive failures | Delay before the next attempt |
 |---|---|
 | 1–4 | none |
-| 5 | 30 seconds |
-| 6 | 60 seconds |
+| 5 | 5 minutes |
+| 6 | 10 minutes |
 | 7, 8, … | doubles, capped at **15 minutes** |
 
 A successful login clears the counter. The counter lives in `UserManager` and

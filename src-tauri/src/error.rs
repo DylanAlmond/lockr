@@ -14,9 +14,9 @@ pub enum VaultError {
     #[error("Wrong master password")]
     AuthenticationFailed,
 
-    /// Blocked; the payload is the number of seconds until the next attempt.
-    #[error("Too many failed login attempts; try again in {0} seconds")]
-    TooManyAttempts(u64),
+    /// Blocked; the payload is a human-readable retry delay.
+    #[error("Too many failed login attempts; try again in {0}")]
+    TooManyAttempts(String),
 
     #[error("Vault is locked")]
     VaultLocked,

@@ -333,8 +333,8 @@ Rule broken: 2.4.1, 6.3.1
 expensive, which is the only brake; a local attacker can retry indefinitely and nothing records it.
 
 **Evidence:** `commands.rs` `login_user`; `user_manager.rs:110-132`.
-**Fix:** applied in `7e6b85e`. Five consecutive failures block the next attempt for 30 s, doubling to
-a 15-minute cap; success clears the counter. Attempts append `login_success`, `login_failed` and
+**Fix:** applied in `7e6b85e`. Five consecutive failures block the next attempt for 5 minutes,
+doubling to a 15-minute cap; success clears the counter. Attempts append `login_success`, `login_failed` and
 `login_blocked` lines to `auth.log` (identifiers only). Pinned by `test_login_backoff_grows_and_caps`,
 `test_login_throttle_blocks_and_clears` and `test_audit_log_records_events_without_secrets`.
 **Status:** fixed.
