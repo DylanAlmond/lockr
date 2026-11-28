@@ -333,8 +333,11 @@ Rule broken: 2.4.1, 6.3.1
 expensive, which is the only brake; a local attacker can retry indefinitely and nothing records it.
 
 **Evidence:** `commands.rs` `login_user`; `user_manager.rs:110-132`.
-**Fix:** a counter with backoff, plus an auth log (group 7).
-**Status:** open.
+**Fix:** applied in `7e6b85e`. Five consecutive failures block the next attempt for 30 s, doubling to
+a 15-minute cap; success clears the counter. Attempts append `login_success`, `login_failed` and
+`login_blocked` lines to `auth.log` (identifiers only). Pinned by `test_login_backoff_grows_and_caps`,
+`test_login_throttle_blocks_and_clears` and `test_audit_log_records_events_without_secrets`.
+**Status:** fixed.
 
 ### F-16 — Validation and authorisation rules are undocumented · P3
 
@@ -397,8 +400,12 @@ of Argon2id. The KDF raises the cost per guess; it does not make a guessable pas
 
 **Evidence:** `commands.rs` `register_user`; `commands.rs:330`;
 `RegisterView.vue:27`; no strength call on the registration path.
-**Fix:** enforce a minimum length and a strength floor at registration, pass product/context words to
-zxcvbn. **Status:** open.
+**Fix:** applied in `7e6b85e`. `validate_master_password` requires 12 characters and a zxcvbn score
+of 3+/4, with the user's name and product context words as inputs, and runs before the session
+changes. The registration form shows the rule and disables submit below the length floor. Pinned by
+`test_master_password_policy` and
+`test_register_rejects_a_weak_password_without_ending_the_session`.
+**Status:** fixed.
 
 ### F-19 — No idle or absolute session timeout · P2
 
@@ -428,10 +435,10 @@ Rule broken: 6.1.1, 7.1.1
 There is no written statement of the master-password rules, the lock semantics, or the intended
 session lifetime. Without it, F-18 and F-19 cannot be judged as defects rather than choices.
 
-**Evidence:** no auth or session document in `docs/`. Session lifetime and lock triggers are now in
-`auth-policy.md`; master-password rules are still unwritten.
-**Fix:** a short auth policy covering password rules, lock triggers and session lifetime.
-**Status:** open (session half documented).
+**Evidence:** no auth or session document in `docs/` at audit time.
+**Fix:** applied in `7e6b85e` — `auth-policy.md` covers the master-password rules, login throttling
+and lock triggers, and session lifetime.
+**Status:** fixed.
 
 ### Two standing deviations, not new findings
 
