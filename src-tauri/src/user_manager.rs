@@ -280,12 +280,25 @@ impl UserManager {
     /// Re-check the master password of the active user without changing the
     /// session. The decrypted secret key is zeroized before returning, so a
     /// successful check leaves no new copy of key material behind.
-    pub fn verify_password(&self, master_password: &str) -> Result<(), VaultError> {
+    pub fn verify_password(&mut self, master_password: &str) -> Result<(), VaultError> {
         let user = self.active_user()?;
 
+        if let Err(error) = self.check_login_allowed(&user.id) {
+            self.audit("reauth_blocked", Some(&user.id));
+            return Err(error);
+        }
+
         let mut secret_key =
-            Self::decrypt_secret_key(master_password, &user.encrypted_secret_key)?;
+            match Self::decrypt_secret_key(master_password, &user.encrypted_secret_key) {
+                Ok(key) => key,
+                Err(error) => {
+                    self.record_failed_login(&user.id);
+                    self.audit("reauth_failed", Some(&user.id));
+                    return Err(error);
+                }
+            };
         secret_key.zeroize();
+        self.record_successful_login(&user.id);
 
         Ok(())
     }

@@ -7,7 +7,7 @@ import { useUser } from '../../composables/useUser.ts';
 import { LockOpen, Plus } from '@lucide/vue';
 import { User } from '../../types/index.ts';
 
-const { login, getUsers } = useUser();
+const { login, getUsers, error: authError } = useUser();
 const route = useRoute();
 const router = useRouter();
 
@@ -59,7 +59,10 @@ async function handleLogin() {
     if (vaults && vaults.length > 0) {
       router.push('/all-items');
     } else {
-      error.value = 'Failed to unlock vaults. Is the password correct?';
+      // Surface the backend reason (wrong password, throttle delay) rather
+      // than a generic message; useUser stores it on failure.
+      error.value =
+        authError.value || 'Failed to unlock vaults. Is the password correct?';
       isLoading.value = false;
     }
   } catch (e) {

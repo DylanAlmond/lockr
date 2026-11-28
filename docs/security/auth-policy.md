@@ -35,7 +35,8 @@ Failed logins are counted per user, in memory:
 
 A successful login clears the counter. The counter lives in `UserManager` and
 resets on process restart; Argon2id's cost remains the per-guess brake across
-restarts.
+restarts. The same counter and backoff cover the re-authentication check before
+deleting a vault, so that path is not an unthrottled password oracle.
 
 Each attempt is appended to `auth.log` in the app data directory:
 
@@ -44,6 +45,8 @@ Each attempt is appended to `auth.log` in the app data directory:
 <timestamp> login_success user=<id>
 <timestamp> login_failed user=<id>
 <timestamp> login_blocked user=<id>
+<timestamp> reauth_failed user=<id>
+<timestamp> reauth_blocked user=<id>
 ```
 
 The log contains identifiers and timestamps only, never a password, key, or

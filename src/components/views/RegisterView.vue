@@ -6,7 +6,7 @@ import { useRouter } from 'vue-router';
 import { useUser } from '../../composables/useUser.ts';
 import { LockOpen } from '@lucide/vue';
 
-const { register } = useUser();
+const { register, error: authError } = useUser();
 const router = useRouter();
 
 /** Mirrors the backend floor; the score check remains backend-only. */
@@ -35,7 +35,9 @@ async function handleRegister() {
     if (vaults && vaults.length > 0) {
       router.push('/all-items');
     } else {
-      error.value = 'Failed to create a new user.';
+      // Surface the backend reason (password policy) rather than a generic
+      // message; useUser stores it on failure.
+      error.value = authError.value || 'Failed to create a new user.';
       isLoading.value = false;
     }
   } catch (e) {
