@@ -32,14 +32,8 @@ pub fn run() {
                 UserManager::new(app_data_dir).expect("Failed to initialize UserManager");
 
             // Bundle them into our shared state
-            let app_state = ManagerState {
-                vault_manager,
-                user_manager,
-                master_password: None,
-                secret_key: None,
-            };
-
-            app.manage(Mutex::new(app_state));
+            app.manage(Mutex::new(ManagerState::new(vault_manager, user_manager)));
+            commands::spawn_session_monitor(app.handle().clone());
 
             Ok(())
         })
@@ -52,6 +46,7 @@ pub fn run() {
             commands::get_user_by_id,
             commands::update_profile,
             commands::logout,
+            commands::session_activity,
             commands::delete_user,
             // Vaults
             commands::list_vault_ids,

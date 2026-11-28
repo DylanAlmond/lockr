@@ -1,7 +1,12 @@
-use std::println;
-use std::sync::Mutex;
+use std::{
+    cell::Cell,
+    println,
+    sync::Mutex,
+    thread,
+    time::{Duration, Instant},
+};
 
-use tauri::State;
+use tauri::{AppHandle, Emitter, Manager, State};
 use uuid::Uuid;
 use zeroize::{Zeroize, Zeroizing};
 use zxcvbn::{zxcvbn, Entropy};
@@ -22,6 +27,11 @@ pub struct ManagerState {
     /// re-entering their password. Zeroized on logout.
     pub master_password: Option<String>,
     pub secret_key: Option<Vec<u8>>,
+
+    /// When the session began and when it was last active. Used by the
+    /// background monitor to enforce the idle and absolute timeouts.
+    session_started: Cell<Option<Instant>>,
+    last_activity: Cell<Option<Instant>>,
 }
 
 type AppState<'a> = State<'a, Mutex<ManagerState>>;
@@ -29,6 +39,11 @@ type AppState<'a> = State<'a, Mutex<ManagerState>>;
 /// Defaults for the vault created with a new profile.
 const DEFAULT_VAULT_NAME: &str = "Personal";
 const DEFAULT_VAULT_COLOUR: &str = "#6240BF";
+
+/// Session policy (docs/security/session-policy.md).
+const IDLE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+const ABSOLUTE_TIMEOUT: Duration = Duration::from_secs(12 * 60 * 60);
+const SESSION_CHECK_INTERVAL: Duration = Duration::from_secs(10);
 
 /// Parse the vault/item id pair shared by the item commands.
 fn parse_vault_item(vault_id: &str, item_id: &str) -> Result<(VaultId, ItemId), String> {
@@ -39,6 +54,18 @@ fn parse_vault_item(vault_id: &str, item_id: &str) -> Result<(VaultId, ItemId), 
 }
 
 impl ManagerState {
+    /// A logged-out state with both managers and no session.
+    pub fn new(vault_manager: VaultManager, user_manager: UserManager) -> Self {
+        Self {
+            vault_manager,
+            user_manager,
+            master_password: None,
+            secret_key: None,
+            session_started: Cell::new(None),
+            last_activity: Cell::new(None),
+        }
+    }
+
     /// Delete a vault the active user owns, after re-checking the master
     /// password.
     ///
@@ -65,19 +92,63 @@ impl ManagerState {
         Ok(())
     }
 
-    /// End the current session: persist unsaved changes, drop every unlocked
-    /// vault, zeroize the cached credentials and forget the active user.
+    /// End the current session: persist unsaved changes, then tear down.
     fn end_session(&mut self) -> Result<(), VaultError> {
         // Persist every unlocked vault, not only the active user's: the
         // session is ending and all RAM state must reach disk before it is
         // dropped.
         self.vault_manager.flush_all()?;
+        self.teardown_session();
+        Ok(())
+    }
+
+    /// Drop everything that belongs to the session. Infallible so a timeout
+    /// can always end the session, even when the disk is unavailable.
+    fn teardown_session(&mut self) {
         self.vault_manager.lock_vault(None);
         self.clear_credentials();
         // Do not leave a copied secret on the clipboard after logout.
         crate::clipboard::clear();
         self.user_manager.clear_active_user();
-        Ok(())
+        self.session_started.set(None);
+        self.last_activity.set(None);
+    }
+
+    fn start_session(&self) {
+        let now = Instant::now();
+        self.session_started.set(Some(now));
+        self.last_activity.set(Some(now));
+    }
+
+    /// Record activity for the idle timeout. No-op when no session is open.
+    fn touch(&self) {
+        if self.session_started.get().is_some() {
+            self.last_activity.set(Some(Instant::now()));
+        }
+    }
+
+    fn session_timed_out(&self) -> bool {
+        let Some(started) = self.session_started.get() else {
+            return false;
+        };
+        let last = self.last_activity.get().unwrap_or(started);
+        let now = Instant::now();
+
+        now.saturating_duration_since(last) >= IDLE_TIMEOUT
+            || now.saturating_duration_since(started) >= ABSOLUTE_TIMEOUT
+    }
+
+    /// End the session if the idle or absolute timeout has passed. Returns
+    /// whether it ended one. Flushing is best-effort: a timeout must not be
+    /// blocked by a disk error.
+    fn expire_session(&mut self) -> bool {
+        if !self.session_timed_out() {
+            return false;
+        }
+
+        let _ = self.vault_manager.flush_all();
+        self.teardown_session();
+        true
     }
 
     fn clear_credentials(&mut self) {
@@ -121,6 +192,7 @@ impl ManagerState {
         self.master_password = Some(master_password);
         self.secret_key = Some(secret_key);
         self.user_manager.add_vault_to_user(new_vault.id)?;
+        self.start_session();
 
         Ok(vec![new_vault.into_safe()])
     }
@@ -148,12 +220,14 @@ impl ManagerState {
 
         self.master_password = Some(master_password);
         self.secret_key = Some(secret_key);
+        self.start_session();
 
         self.get_unlocked_vaults()
     }
 
     /// The vault ids the active user owns, from the profile's `vault_ids`.
     fn owned_vault_ids(&self) -> Result<Vec<VaultId>, VaultError> {
+        self.touch();
         Ok(self.user_manager.active_user()?.vault_ids)
     }
 
@@ -161,6 +235,8 @@ impl ManagerState {
     /// mutate vault data call this first; locking and creating a vault do not
     /// need it.
     fn require_owned_vault(&self, vault_id: VaultId) -> Result<(), VaultError> {
+        self.touch();
+
         if self.user_manager.owns_vault(vault_id)? {
             Ok(())
         } else {
@@ -318,6 +394,36 @@ pub fn logout(state: AppState) -> Result<(), String> {
     state.end_session().map_err(|e| e.to_string())
 }
 
+/// Heartbeat for renderer-reported user input. It can only extend an existing
+/// session; it never creates one.
+#[tauri::command]
+pub fn session_activity(state: AppState) -> Result<(), String> {
+    let state = state.lock().map_err(|e| e.to_string())?;
+    state.touch();
+    Ok(())
+}
+
+/// Poll the session clock and end the session after the idle or absolute
+/// timeout, notifying the renderer so it can return to the auth screen.
+pub fn spawn_session_monitor(handle: AppHandle) {
+    thread::spawn(move || loop {
+        thread::sleep(SESSION_CHECK_INTERVAL);
+
+        let expired = {
+            let app_state = handle.state::<Mutex<ManagerState>>();
+            let mut state = match app_state.lock() {
+                Ok(state) => state,
+                Err(_) => continue,
+            };
+            state.expire_session()
+        };
+
+        if expired {
+            let _ = handle.emit("session-expired", ());
+        }
+    });
+}
+
 #[tauri::command]
 pub fn delete_user(state: AppState) -> Result<(), String> {
     let mut state = state.lock().map_err(|e| e.to_string())?;
@@ -326,6 +432,9 @@ pub fn delete_user(state: AppState) -> Result<(), String> {
     // the account is going away, so there is no session to flush first.
     state.vault_manager.lock_vault(None);
     state.clear_credentials();
+    state.session_started.set(None);
+    state.last_activity.set(None);
+    crate::clipboard::clear();
 
     state.user_manager.delete_user().map_err(|e| e.to_string())
 }
@@ -347,11 +456,14 @@ pub fn get_unlocked_vaults(state: AppState) -> Result<Vec<SafeVault>, String> {
 pub fn create_vault(state: AppState, name: String, color: String) -> Result<SafeVault, String> {
     let mut state = state.lock().map_err(|e| e.to_string())?;
 
+    state.touch();
+
     let ManagerState {
         vault_manager,
         master_password,
         secret_key,
         user_manager,
+        ..
     } = &mut *state;
 
     let mp = master_password.as_ref().ok_or("Not logged in")?;
@@ -716,6 +828,8 @@ mod tests {
             user_manager,
             master_password: Some(MASTER_PW.to_string()),
             secret_key: Some(SECRET_KEY.to_vec()),
+            session_started: Cell::new(Some(Instant::now())),
+            last_activity: Cell::new(Some(Instant::now())),
         };
 
         (state, vault.id, temp_dir)
@@ -968,6 +1082,60 @@ mod tests {
         let ids = state.list_vault_ids().unwrap();
 
         assert_eq!(ids, vec![owned.to_string()]);
+    }
+
+    // ============ Session timeouts ============
+
+    #[test]
+    fn test_session_expires_after_the_idle_timeout() {
+        let (mut state, owned, _) = setup();
+        state
+            .last_activity
+            .set(Some(Instant::now() - IDLE_TIMEOUT - Duration::from_secs(1)));
+
+        assert!(state.expire_session());
+        assert!(state.master_password.is_none());
+        assert!(
+            matches!(
+                state.vault_manager.get_vault(owned),
+                Err(VaultError::VaultLocked)
+            ),
+            "the timed-out session must leave no unlocked vault"
+        );
+        assert!(
+            !state.expire_session(),
+            "there is no session left to expire"
+        );
+    }
+
+    #[test]
+    fn test_recent_activity_keeps_the_session_alive() {
+        let (state, _, _) = setup();
+        state.last_activity.set(Some(Instant::now()));
+
+        assert!(!state.session_timed_out());
+    }
+
+    #[test]
+    fn test_absolute_lifetime_expires_even_while_active() {
+        let (state, _, _) = setup();
+        state
+            .session_started
+            .set(Some(Instant::now() - ABSOLUTE_TIMEOUT - Duration::from_secs(1)));
+        state.last_activity.set(Some(Instant::now()));
+
+        assert!(state.session_timed_out());
+    }
+
+    #[test]
+    fn test_touch_extends_the_idle_clock() {
+        let (state, _, _) = setup();
+        let old = Instant::now() - Duration::from_secs(60);
+        state.last_activity.set(Some(old));
+
+        state.touch();
+
+        assert!(state.last_activity.get().unwrap() > old);
     }
 
     // ============ Session switching ============
