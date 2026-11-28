@@ -179,4 +179,4 @@ does not lead to a row, the claim is wrong and should be removed.
 | 2026-11-28 | remediation branches | 28 findings fixed, F-27 accepted for its logging omissions; assessment not re-pinned; checklist re-run is the release task |
 | 2026-11-28 | `a41cde1` | Re-ran the checklist against the remediated tree; re-pinned; 89 met / 2 partial / 4 deviated / 6 n/a / 4 unchecked; status remains assessed against L2 |
 | 2026-11-28 | `bdea025` | Built unsigned MSI/NSIS installers; both NotSigned; build-side sourcemap/devtools controls verified, launch/payload checks remain |
-| 2026-11-28 | release-signing | Wired Windows Authenticode, macOS Developer ID/notarization and Linux GPG signing with fail-closed guards and per-platform verifiers; T-15 stays unchecked until a signed release exists |
+| 2026-11-28 | `d9a4935` | Wired Windows Authenticode, macOS Developer ID/notarization and Linux GPG signing with fail-closed guards and per-platform verifiers; T-15 stays unchecked until a signed release exists |
