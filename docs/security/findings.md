@@ -16,7 +16,8 @@ Each finding follows `threat-model.md` §11: asset (`A#`), entry point (`E#`), a
 rule broken, evidence, fix reference, status. Status vocabulary is in `evidence-standard.md` §3.
 
 **State: complete.** All seven sweep groups are recorded, and every finding is dispositioned:
-**29 fixed, 0 open.** Each finding's `Status` names the commit and the tests that pin it.
+**28 fixed, 1 accepted (F-27), 0 open.** Each finding's `Status` names the commit, the tests that pin
+it, or the reason the residual is accepted.
 
 ---
 
@@ -669,7 +670,11 @@ policy saying so, and no way for a User to see that someone tried their master p
 success/failure/blocked, re-auth; identifiers only) and the deliberate decision not to log item
 operations, authorisation denials or unexpected errors, with the consequences. The ad-hoc prints are
 gone (F-29).
-**Status:** fixed.
+**Status:** accepted (owner: DylanAlmond). Authentication events are logged, so 16.3.1 is met.
+Authorisation denials (16.3.2) and unexpected errors (16.3.4) are knowingly not logged: the app is
+local-first, and a second identifier store would add risk without a reader who can act on it. The
+consequence — no post-incident forensics beyond authentication attempts — is recorded in
+`logging-policy.md` §3. Revisit if sync, an updater or multi-user support lands.
 
 ### F-29 — Error strings and debug prints leak paths and identifiers · P3
 
@@ -705,7 +710,8 @@ data path and profile ids — useful reconnaissance for the filesystem-facing fi
 
 All seven sweep groups are recorded. The re-run at `a41cde1` (2026-11-28) totals across 105 rows:
 **89 met, 2 partial, 4 deviated, 6 n/a, 4 unchecked**. The full set is 29 findings: one P0 (F-14),
-two P1 (F-09, F-12), and the rest P2/P3. All 29 are fixed.
+two P1 (F-09, F-12), and the rest P2/P3. 28 are fixed; F-27 is accepted for its deliberately
+unlogged authorisation denials and unexpected errors.
 
 The four unchecked rows (T-09, T-15, 13.4.1, 13.4.2) need a signed release artefact or an OS
 inspection; the checklist does not claim them. The four deviated rows are the two standing

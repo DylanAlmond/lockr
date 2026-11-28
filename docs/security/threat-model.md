@@ -22,7 +22,7 @@ Pattern**. There is no Device, Pairing or sync in 1.2.0; see §10.
 - `login_user` caches the derived secret key and unlocks **every** vault in the active User's
   `vault_ids` (`src-tauri/src/commands.rs:117-153`).
 - No network code: no sync, no Device pairing, no updater, no deep links, no single-instance
-  plugin. ADR-0002 and its vocabulary were reverted before any implementation landed.
+  plugin. The sync ADR and its vocabulary were reverted before any implementation landed.
 
 The README makes three security claims this model exists to test:
 
@@ -82,16 +82,20 @@ deserialization proves shape, not authorisation.
 
 ## 4. Entry points
 
+> Refreshed 2026-11-28 after remediation: 33 commands, a least-privilege capability with no opener,
+> and clipboard copy through the core. The rows below describe the current tree.
+
 | ID | Entry point | Reaches | Notes |
 |---|---|---|---|
-| **E1** | IPC — 30 commands registered in `lib.rs:45-80` | Z3 | The entire native surface. Capabilities grant `core:default` + `opener:default` + window controls; no `fs`, `shell` or `http` plugin |
+| **E1** | IPC — 33 commands registered in `lib.rs` | Z3 | The entire native surface. The capability grants the eight core permissions plus one `allow-<command>` per app command; no `fs`, `shell` or `http` plugin |
 | **E2** | Vault file at rest | Z3 parsing, Z2 via safe views | Attacker-modified, restored from `.OLD`, or copied between machines |
 | **E3** | User profile JSON | Z2 directly | Plaintext on disk: `id`, `name`, `color`, `icon`, `encrypted_secret_key`, `vault_ids`. Hand-editable |
-| **E4** | Uploaded image | Z2 | Rasterised through a canvas to PNG/WebP; the stored value is a `data:` URL |
-| **E5** | Clipboard | Z2 outbound | Secrets are copied with no clear-on-timeout today |
-| **E6** | OS URL/file handlers | Z4 → external | `opener:default` is granted but has zero call sites. Latent, not live |
+| **E4** | Uploaded image | Z2 | PNG/JPEG/WebP/GIF up to 8 MiB, rasterised through a canvas to a 128 × 128 PNG `data:` URL |
+| **E5** | Clipboard | Z2 outbound → OS | Copy goes through the core; the clipboard is cleared after 30 s if unchanged |
+| **E6** | OS URL/file handlers | — | The opener plugin and capability are removed; no OS URL/file handler is exposed |
 | **E7** | Migration backup (`.vault.OLD`) | Z3 | Rollback path; never read by the app |
 | **E8** | Absent entry points | — | No network listener, no deep links, no updater, no `argv`/second-instance handling, no drag-and-drop import |
+| **E9** | Vault tombstone (`.vault.deleted`) | Z3 | Renamed aside on delete; never read, listed, or restored by the app (ADR-0002) |
 
 E8 is recorded on purpose: the audit asserts absence, so a later addition inherits the checklist
 instead of silently widening the surface.

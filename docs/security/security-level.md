@@ -50,8 +50,9 @@ installed. The bundle's only external string literals are `http://www.w3.org`
 **No ASVS level is claimed** — a compliance claim needs zero open deviations, and residual
 deviations and unverified release/OS rows remain.
 
-**Remediation status (2026-11-28):** all 29 findings are fixed; every finding in `findings.md` now
-names its commit and tests. The re-run marks **89 rows met, 2 partial, 4 deviated, 6 n/a and 4
+**Remediation status (2026-11-28):** 28 findings are fixed and F-27 is accepted for its deliberately
+unlogged authorisation denials and unexpected errors; every finding in `findings.md` names its
+commit, tests, or acceptance reason. The re-run marks **89 rows met, 2 partial, 4 deviated, 6 n/a and 4
 unchecked**. This does **not** move the rung: the four unchecked rows need a signed release artefact
 or an OS inspection (T-09, T-15, 13.4.1, 13.4.2), the two partial rows are mitigated-but-not-configured
 controls (3.4.5, 11.2.2), and the four deviated rows are standing policy choices (6.2.12, 6.3.3) or
@@ -87,7 +88,8 @@ Across **105 checklist rows at `a41cde1`**: 89 met, 2 partial, 4 deviated, 6 not
 was 40 met, 17 partial, 41 deviated, 6 not applicable, 1 unchecked.
 
 The original 41 deviated rows resolved into **29 findings**, in the project's severity scheme, not
-CVSS; all 29 are now fixed. The severity table below describes that original sweep:
+CVSS; 28 are fixed and F-27 is accepted for the logging omissions (§4 residual rows). The severity
+table below describes that original sweep:
 
 | Severity | Count | Findings |
 |---|---|---|
@@ -167,5 +169,5 @@ does not lead to a row, the claim is wrong and should be removed.
 |---|---|---|
 | 2026-11-27 | `f3d5c82` | Document created; target set |
 | 2026-11-27 | `f3d5c82` | Conformance sweep complete; status = assessed against L2; 29 findings recorded |
-| 2026-11-28 | remediation branches | All 29 findings fixed; assessment not re-pinned; checklist re-run is the release task |
+| 2026-11-28 | remediation branches | 28 findings fixed, F-27 accepted for its logging omissions; assessment not re-pinned; checklist re-run is the release task |
 | 2026-11-28 | `a41cde1` | Re-ran the checklist against the remediated tree; re-pinned; 89 met / 2 partial / 4 deviated / 6 n/a / 4 unchecked; status remains assessed against L2 |
