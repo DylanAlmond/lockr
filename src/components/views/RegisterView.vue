@@ -44,7 +44,7 @@ async function handleRegister() {
       isLoading.value = false;
     }
   } catch (e) {
-    console.error(e);
+    console.error('Registration failed:', e);
     error.value = String(e);
     isLoading.value = false;
   }

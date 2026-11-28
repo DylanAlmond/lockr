@@ -44,11 +44,15 @@ A test must print the checklist id it satisfies on failure, so a red run maps st
 One module per area, each exporting `{ id, run }`. `run.mjs` executes them all, prints every result,
 and exits non-zero if any check failed.
 
-**Implemented:** `csp.mjs`, `capabilities.mjs`, `hygiene.mjs` and `run.mjs`, wired as
-`yarn test:compliance`. `hygiene.mjs` covers `static:sourcemap-config`, `static:devtools-absent`,
-`static:dead-logo-path`, `static:deps-audit`, `static:deps-crypto` and `static:deps-inventory`.
-`static:command-scope` is implemented in `capabilities.mjs`; `source.mjs`, `bundle.mjs` and `deps.mjs`
-are still pending.
+**Implemented:** `csp.mjs`, `capabilities.mjs`, `hygiene.mjs`, `source.mjs`, `bundle.mjs` and
+`run.mjs`, wired as `yarn test:compliance`.
+
+- `hygiene.mjs`: `static:sourcemap-config`, `static:devtools-absent`, `static:dead-logo-path`,
+  `static:deps-audit`, `static:deps-crypto`, `static:deps-inventory`.
+- `capabilities.mjs`: `static:capabilities`, `static:capabilities-opener`, `static:command-scope`.
+- `source.mjs`: the eleven `static:source-*` rows and `static:command-validation`.
+- `bundle.mjs`: the four `static:bundle-*` rows. They run against `dist/` and **skip when `dist/` is
+  absent**, so run `vite build` first for a complete pass.
 
 ### `csp.mjs`
 

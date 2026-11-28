@@ -7,15 +7,29 @@
 import { checks as cspChecks } from './csp.mjs';
 import { checks as capabilityChecks } from './capabilities.mjs';
 import { checks as hygieneChecks } from './hygiene.mjs';
+import { checks as sourceChecks } from './source.mjs';
+import { checks as bundleChecks } from './bundle.mjs';
 
-const checks = [...cspChecks, ...capabilityChecks, ...hygieneChecks];
+const checks = [
+  ...cspChecks,
+  ...capabilityChecks,
+  ...hygieneChecks,
+  ...sourceChecks,
+  ...bundleChecks,
+];
 
 let failed = 0;
+let skipped = 0;
 
 for (const check of checks) {
   try {
-    await check.run();
-    console.log(`ok   ${check.id}`);
+    const result = await check.run();
+    if (result === 'skip') {
+      skipped += 1;
+      console.log(`skip ${check.id}`);
+    } else {
+      console.log(`ok   ${check.id}`);
+    }
   } catch (error) {
     failed += 1;
     console.error(`FAIL ${check.id}: ${error.message}`);
@@ -27,4 +41,6 @@ if (failed > 0) {
   process.exit(1);
 }
 
-console.log(`${checks.length} static checks passed`);
+console.log(
+  `${checks.length - skipped} static checks passed${skipped ? `, ${skipped} skipped` : ''}`
+);
