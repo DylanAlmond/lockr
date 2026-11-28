@@ -5,6 +5,7 @@ mod error;
 mod icons;
 mod models;
 pub mod user_manager;
+mod validation;
 mod vault_manager;
 
 use std::sync::Mutex;

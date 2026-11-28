@@ -1,6 +1,5 @@
 use std::{
     cell::Cell,
-    println,
     sync::Mutex,
     thread,
     time::{Duration, Instant},
@@ -355,8 +354,6 @@ pub fn get_user(state: AppState) -> Result<User, String> {
         .active_user_id
         .as_ref()
         .ok_or_else(|| "No user is active".to_string())?;
-
-    println!("id: {}", user_id);
 
     Ok(state
         .user_manager

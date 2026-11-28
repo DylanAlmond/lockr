@@ -13,6 +13,7 @@ use crate::crypto::{
     decrypt_with_key, derive_master_key, encrypt_with_key, generate_salt, MasterKey, SALT_LEN,
 };
 use crate::icons::validate_icon;
+use crate::validation;
 use crate::{
     ItemFilter, CURRENT_SCHEMA_VERSION, IntoSafe, ItemId, ItemKind, ItemSecrets,
     LegacyVault, NewItemData, SecretInput, SECRET_FIELD_PASSWORD, SafeItem, SafeVault, Vault,
@@ -185,6 +186,9 @@ impl VaultManager {
         master_password: &str,
         secret_key: &[u8],
     ) -> Result<Vault, VaultError> {
+        validation::text("vault name", &name, validation::MAX_NAME)?;
+        validation::color(&color)?;
+
         // Getting some weird issue in Win 10 where suddenly it wouldn't make the vaults dir on init
         if !self.vaults_dir.exists() {
             std::fs::create_dir_all(&self.vaults_dir)?;
@@ -421,6 +425,13 @@ impl VaultManager {
         name: Option<String>,
         color: Option<String>,
     ) -> Result<(), VaultError> {
+        if let Some(name) = &name {
+            validation::text("vault name", name, validation::MAX_NAME)?;
+        }
+        if let Some(color) = &color {
+            validation::color(color)?;
+        }
+
         {
             let vault = self.get_vault_mut(vault_id)?;
             if let Some(n) = name {
@@ -493,6 +504,13 @@ impl VaultManager {
         secrets: Option<Vec<SecretInput>>,
     ) -> Result<SafeItem, VaultError> {
         let icon = validate_icon(icon)?;
+        validation::optional("display name", &display_name, validation::MAX_DISPLAY_NAME)?;
+        validation::item_data(&data)?;
+        if let Some(inputs) = &secrets {
+            for input in inputs {
+                validation::secret_value("secret value", &input.value)?;
+            }
+        }
 
         let kind = match data {
             NewItemData::Account(mut account) => {
@@ -600,9 +618,19 @@ impl VaultManager {
         color: Option<String>,
         data: Option<NewItemData>,
     ) -> Result<SafeItem, VaultError> {
-        // Validate before mutating: a rejected icon must not leave the other
+        // Validate before mutating: a rejected field must not leave the other
         // fields half-applied in memory.
         let icon = validate_icon(icon)?;
+        validation::optional("display name", &display_name, validation::MAX_DISPLAY_NAME)?;
+        if let Some(tags) = &tags {
+            validation::tags(tags)?;
+        }
+        if let Some(color) = &color {
+            validation::color(color)?;
+        }
+        if let Some(data) = &data {
+            validation::item_data(data)?;
+        }
 
         {
             let vault = self.get_vault_mut(vault_id)?;
@@ -866,6 +894,10 @@ impl VaultManager {
         field_key: &str,
         value: Option<String>,
     ) -> Result<(), VaultError> {
+        if let Some(value) = &value {
+            validation::secret_value("secret value", value)?;
+        }
+
         // Validate the item's kind and field key before touching the store
         let is_noop = {
             let vault = self.get_vault_mut(vault_id)?;
@@ -1490,6 +1522,124 @@ mod tests {
         manager.lock_vault(Some(vault.id));
         let re_unlocked = manager.unlock_vault(vault.id, MASTER_PW, &KEY).unwrap();
         assert_eq!(re_unlocked.items.len(), 1);
+    }
+
+    // ============ Field bounds ============
+
+    #[test]
+    fn test_item_fields_are_bounded() {
+        let temp_dir = setup();
+        let mut manager = VaultManager::new(temp_dir).unwrap();
+        let vault = manager
+            .create_vault("Test".to_string(), "#6240BF".to_string(), MASTER_PW, &KEY)
+            .unwrap();
+
+        let long_name = "x".repeat(validation::MAX_DISPLAY_NAME + 1);
+        let result = manager.add_item(
+            vault.id,
+            Some(long_name),
+            None,
+            crate::NewItemData::Note(crate::NoteData {
+                title: None,
+                body: "body".to_string(),
+            }),
+            None,
+        );
+        assert!(
+            matches!(result, Err(VaultError::Validation(_))),
+            "got {result:?}"
+        );
+
+        let long_body = "x".repeat(validation::MAX_BODY + 1);
+        let result = manager.add_item(
+            vault.id,
+            None,
+            None,
+            crate::NewItemData::Note(crate::NoteData {
+                title: None,
+                body: long_body,
+            }),
+            None,
+        );
+        assert!(
+            matches!(result, Err(VaultError::Validation(_))),
+            "got {result:?}"
+        );
+
+        let note = add_test_note_id(&mut manager, vault.id);
+        let too_many_tags = vec!["tag".to_string(); validation::MAX_TAGS + 1];
+        let result = manager.update_item(
+            vault.id,
+            note,
+            None,
+            None,
+            None,
+            Some(too_many_tags),
+            None,
+            None,
+        );
+        assert!(
+            matches!(result, Err(VaultError::Validation(_))),
+            "got {result:?}"
+        );
+
+        let account = match manager
+            .add_item(
+                vault.id,
+                None,
+                None,
+                crate::NewItemData::Account(crate::AccountData {
+                    username: "user".to_string(),
+                    email: None,
+                }),
+                None,
+            )
+            .unwrap()
+        {
+            SafeItem::Account(account) => account.id,
+            other => panic!("expected account item, got {other:?}"),
+        };
+        let long_secret = "x".repeat(validation::MAX_SECRET + 1);
+        let result = manager.update_item_secret(
+            vault.id,
+            account,
+            crate::SECRET_FIELD_PASSWORD,
+            Some(long_secret),
+        );
+        assert!(
+            matches!(result, Err(VaultError::Validation(_))),
+            "got {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_vault_metadata_is_bounded() {
+        let temp_dir = setup();
+        let mut manager = VaultManager::new(temp_dir).unwrap();
+
+        let result = manager.create_vault(
+            "x".repeat(validation::MAX_NAME + 1),
+            "#6240BF".to_string(),
+            MASTER_PW,
+            &KEY,
+        );
+        assert!(
+            matches!(result, Err(VaultError::Validation(_))),
+            "got {result:?}"
+        );
+
+        let vault = manager
+            .create_vault("Test".to_string(), "#6240BF".to_string(), MASTER_PW, &KEY)
+            .unwrap();
+        let result = manager.update_vault(
+            vault.id,
+            None,
+            Some("x".repeat(validation::MAX_COLOR + 1)),
+        );
+        assert!(
+            matches!(result, Err(VaultError::Validation(_))),
+            "got {result:?}"
+        );
     }
 
     // ============ Atomic saves ============

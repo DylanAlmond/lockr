@@ -4,7 +4,6 @@ use std::{
     collections::HashMap,
     io::Write,
     path::{Path, PathBuf},
-    println,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use uuid::Uuid;
@@ -14,7 +13,7 @@ use zxcvbn::zxcvbn;
 use crate::{
     crypto::{decrypt, encrypt},
     icons::{safe_icon, validate_icon},
-    User, UserId, VaultError, VaultId,
+    validation, User, UserId, VaultError, VaultId,
 };
 
 /// Master-password policy and login throttle (docs/security/auth-policy.md).
@@ -189,8 +188,9 @@ impl UserManager {
                     user_data.icon = safe_icon(user_data.icon.as_deref());
                     available_accounts.push(user_data);
                 }
-                Err(err) => {
-                    eprintln!("Failed to parse user profile {}: {}", path.display(), err);
+                Err(_) => {
+                    // A malformed profile is skipped; the path and parser
+                    // detail are deliberately not printed.
                 }
             }
         }
@@ -305,6 +305,8 @@ impl UserManager {
     /// Create a brand new user profile.
     /// Generates a random Secret Key and encrypts it with the Master Password.
     pub fn register(&mut self, name: String, master_password: &str) -> Result<User, VaultError> {
+        validation::text("name", &name, validation::MAX_NAME)?;
+
         // The profile-creation layer enforces the policy so no caller can
         // bypass it; the command layer also checks early to preserve the
         // current session on rejection.
@@ -467,6 +469,13 @@ impl UserManager {
         color: Option<String>,
         icon: Option<String>,
     ) -> Result<(), VaultError> {
+        if let Some(name) = &name {
+            validation::text("name", name, validation::MAX_NAME)?;
+        }
+        if let Some(color) = &color {
+            validation::color(color)?;
+        }
+
         let user_id = self
             .active_user_id
             .as_ref()
@@ -562,6 +571,31 @@ mod tests {
         std::fs::create_dir_all(&temp_dir).unwrap();
 
         temp_dir
+    }
+
+    #[test]
+    fn test_profile_fields_are_bounded() {
+        let temp_dir = setup();
+        let mut manager = UserManager::new(temp_dir.clone()).unwrap();
+
+        let long_name = "x".repeat(validation::MAX_NAME + 1);
+        let result = manager.register(long_name.clone(), "correct horse battery staple");
+        assert!(
+            matches!(result, Err(VaultError::Validation(_))),
+            "got {result:?}"
+        );
+
+        let user = manager
+            .register("Alice".to_string(), "correct horse battery staple")
+            .unwrap();
+        let result = manager.update_profile(Some(long_name), None, None);
+        assert!(
+            matches!(result, Err(VaultError::Validation(_))),
+            "got {result:?}"
+        );
+        assert_eq!(manager.get_user(&user.id).unwrap().name, "Alice");
+
+        std::fs::remove_dir_all(temp_dir).ok();
     }
 
     #[test]
