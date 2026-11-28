@@ -41,6 +41,32 @@ To close T-15:
 
 Until step 3, the row stays unchecked.
 
+### Development-certificate dry run
+
+To prove the build → sign → verify path before buying a certificate, the tree was built at `d001c13`
+with the self-signed certificate from `scripts/create-dev-certificate.ps1`
+(`CN=Lockr, O=Dylan Almond`). `scripts/verify-windows-signatures.ps1` reported:
+
+```text
+Lockr_1.2.0_x64_en-US.msi: Valid (timestamped)
+Lockr_1.2.0_x64-setup.exe: Valid (timestamped)
+MSI payload lockr.exe: Valid (timestamped)
+All 3 Windows release artefacts carry a valid, timestamped signature.
+```
+
+The signatures use SHA-256 and a DigiCert RFC 3161 timestamp. The signed artefacts were:
+
+| Artefact | SHA-256 |
+|---|---|
+| MSI | `DA7245F5C31F0402E40A4D07551EC31492AEB196BA065852F08B65FA21A949BC` |
+| NSIS | `9CDDC48557D1FC6116EEDBF5002CB83E028E0C3822BAFFF4CDCE58407A63998F` |
+
+This proves the mechanism, not the trust: the certificate is self-signed and trusted only on the
+build machine, so Windows on any other machine still reports an unknown publisher. The pre-bundle
+`target/release/lockr.exe` is unsigned by design; the verifier checks the installers and the MSI
+payload instead. T-15 remains unchecked until the same run uses a CA-issued certificate or Azure
+Trusted Signing.
+
 ## 3. What the build does verify
 
 - **Source maps (13.4.2, partly):** `dist/` contains no `*.map` and no
@@ -60,7 +86,7 @@ Until step 3, the row stays unchecked.
 | T-09 | Confirming no inspector opens needs launching the installed release and attempting to open devtools; the source-side feature check is not a launch test |
 | 13.4.1 | Enumerating the installer payload needs `lessmsi`/`7z` (neither installed here); `dist/` has no VCS metadata or maps, and the installer is Tauri-generated from the release exe, but the payload was not inspected |
 | 13.4.2 | A launch check of the installed release is needed to confirm debug mode is off; the build-side sourcemap assertion passes |
-| T-15 | Unsigned artefacts; a certificate and signed build are required. The pipeline is implemented but no signing material exists |
+| T-15 | Unsigned release artefacts. A self-signed dry run signs and verifies correctly, but the certificate is not trusted off the build machine; a CA-issued certificate or Azure Trusted Signing is still required |
 
 The audit rung stays **assessed against L2** until these are closed.
 

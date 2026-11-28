@@ -8,9 +8,14 @@ in `audit-checklist.md`.
 
 | Platform | Artefacts | Mechanism | Verification |
 |---|---|---|---|
-| Windows | `lockr.exe`, NSIS `-setup.exe`, `.msi` | Authenticode, SHA-256 digest, RFC 3161 timestamp | `scripts/verify-windows-signatures.ps1` |
+| Windows | `.msi`, NSIS `-setup.exe`, and the `lockr.exe` payload inside them | Authenticode, SHA-256 digest, RFC 3161 timestamp | `scripts/verify-windows-signatures.ps1` |
 | macOS | `.app`, `.dmg` | Developer ID Application, hardened runtime, notarization + stapling | `scripts/verify-macos-signatures.sh` |
 | Linux | `.AppImage`, `.deb`, `.rpm` | GPG: embedded AppImage signature, plus a detached signature over `SHA256SUMS` | `scripts/verify-linux-signatures.sh` |
+
+The pre-bundle `src-tauri/target/release/lockr.exe` is not a release artefact. Tauri signs the copy
+of the executable that it packages into each installer, so the verifier checks the installer files
+and extracts the MSI payload to prove the shipped `lockr.exe` is signed too. Checking the
+intermediate would fail even on a correct release.
 
 Linux has no OS-enforced installer signing. The AppImage signature is the platform's native
 mechanism but is **not checked by the OS**; the detached `SHA256SUMS.asc` is what covers the `.deb`
@@ -57,7 +62,7 @@ script prints the commands that remove the certificate and the local config.
    thumbprint is written to `windows-signing.conf.json`, which `tauri build` merges with
    `--config`. The repository's `tauri.conf.json` pins `digestAlgorithm: sha256`, the DigiCert
    timestamp URL and `tsp: true`; the thumbprint stays out of the tree because it is
-   environment-specific.
+   environment-specific. Tauri signs the executable copy it packages and then the NSIS/MSI.
 3. **macOS.** The Tauri CLI reads `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD` and
    `APPLE_SIGNING_IDENTITY`, signs the `.app`, notarizes it with the Apple ID credentials and
    staples the ticket. `hardenedRuntime` is on.
@@ -98,9 +103,10 @@ trusting the signature.
 ## 5. Status and what is still missing
 
 **T-15 is not met.** The pipeline is implemented and statically checked
-(`static:release-signing-config`), and an unsigned local build was verified as unsigned in
-`release-verification.md`. A control that says "installers are code-signed" is only met by a
-**signed artefact**, and no signing material exists yet:
+(`static:release-signing-config`). A self-signed dry run at `d001c13` produced `Valid` and
+timestamped MSI/NSIS installers and MSI payload, which proves the mechanism but not trust: the
+certificate is trusted only on the build machine. A control that says "installers are code-signed"
+is only met by a **publicly trusted** signed artefact, and no trusted signing material exists yet:
 
 - no Windows OV/EV code-signing certificate;
 - no Apple Developer ID certificate or notarization credentials;

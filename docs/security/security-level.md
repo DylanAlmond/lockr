@@ -120,7 +120,7 @@ OS inspection and were not claimed; the partial and deviated rows are recorded, 
 | Row | Status | Why |
 |---|---|---|
 | T-09 | unchecked | An unsigned release was built at `bdea025`; confirming no inspector opens still needs a launch test. The `devtools` Cargo feature is absent (`static:devtools-absent`) |
-| T-15 | unchecked | The release pipeline signs all three platforms and fails closed when secrets are missing or a signature is invalid (`release-signing.md`). No signing material exists yet, and the local `bdea025` build is `NotSigned`; a signed release is required |
+| T-15 | unchecked | The release pipeline signs all three platforms and fails closed when secrets are missing or a signature is invalid (`release-signing.md`). A self-signed dry run at `d001c13` produced Valid, timestamped MSI/NSIS installers and MSI payload, which proves the mechanism but not trust; a CA-issued certificate or Azure Trusted Signing is still required |
 | 13.4.1 | unchecked | The installer artefacts exist, but the payload could not be enumerated (`lessmsi`/`7z` unavailable); `dist/` contains no VCS metadata or maps |
 | 13.4.2 | unchecked | The release build succeeded and has no source maps; a launch check of the installed release is still needed |
 | 3.4.5 | partial | Tauri 2.11 cannot set `Referrer-Policy`; no outbound path remains to leak a referrer (`tauri-config-baseline.md` §3) |
