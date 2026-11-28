@@ -203,7 +203,10 @@ or edits something.
 **Evidence:** `AccountDetails.vue:125-140`; `CardDetails.vue:167`; zero
 `addEventListener('blur'|'visibilitychange')` in `src/`; the only timer in the secret path is
 `ItemField`'s two-second label cooldown.
-**Fix:** `secret-lifetime.md` R-S2. **Status:** fix-specified.
+**Fix:** applied in `97a6599`. `useSecretReveal` enforces a 10 s bound and hides every reveal on
+window blur or document visibility, dropping the reference on hide and on unmount. Pinned by
+`renderer:reveal-timeout` (`tests/compliance/secret-reveal.test.ts`).
+**Status:** fixed.
 
 ### F-11 — Clipboard retains secrets indefinitely · P2
 
@@ -217,7 +220,11 @@ The only clipboard interaction is `navigator.clipboard.writeText`. The two-secon
 process in the User's session can read the password long after the copy.
 
 **Evidence:** `ItemField.vue:64-70`; no `clipboard.readText` or clear anywhere in `src/`.
-**Fix:** `secret-lifetime.md` R-S4, plus the backend copy path in §5. **Status:** fix-specified.
+**Fix:** applied in `97a6599`. `copy_item_secret` writes the secret in the core and never returns it
+over IPC; the clipboard is cleared after 30 s only if it still holds that value, a newer copy keeps
+its own window, and logout/window close compare-and-clear. Pinned by `rust:clipboard-expiry`. The
+copier no longer fetches plaintext into the renderer, and the cosmetic cooldown is gone.
+**Status:** fixed.
 
 ### A rule refinement this sweep forced
 
