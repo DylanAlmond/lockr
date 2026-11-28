@@ -128,6 +128,9 @@ control.
 | `rust:update-allowlist` | `update_item` with an id/timestamp argument | not accepted |
 | `rust:command-bounds` | strings beyond the per-field maximum | rejected (after F-17) |
 
+**Implemented:** `tests/compliance_auth.rs` covers `rust:password-policy`, `rust:login-rate-limit` and
+`rust:auth-logging`.
+
 ## 5. Renderer suite
 
 `tests/compliance/*.test.ts`, vitest with jsdom and `@vue/test-utils`. Fake timers for anything

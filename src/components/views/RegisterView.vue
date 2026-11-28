@@ -17,13 +17,16 @@ const masterPassword = ref('');
 const error = ref('');
 const isLoading = ref(false);
 
+// Count code points, matching Rust's `chars().count()` rather than UTF-16 units.
+const passwordLength = computed(() => [...masterPassword.value].length);
+
 const canSubmit = computed(
-  () => !!name.value && masterPassword.value.length >= MASTER_PASSWORD_MIN_LENGTH
+  () => !!name.value && passwordLength.value >= MASTER_PASSWORD_MIN_LENGTH
 );
 
 async function handleRegister() {
-  if (!name.value || !masterPassword.value) {
-    error.value = 'Please enter a name and a master password.';
+  if (!canSubmit.value) {
+    error.value = `Enter a name and a master password of at least ${MASTER_PASSWORD_MIN_LENGTH} characters.`;
     return;
   }
 

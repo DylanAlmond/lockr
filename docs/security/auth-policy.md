@@ -52,7 +52,9 @@ Each attempt is appended to `auth.log` in the app data directory:
 ```
 
 The log contains identifiers and timestamps only, never a password, key, or
-secret. It is best-effort: a logging failure never blocks authentication.
+secret. It is best-effort: a logging failure never blocks authentication. An
+attempt for an unknown user id returns before decryption and is not recorded;
+only registered-user attempts are counted and logged.
 
 ## 3. Session lifetime
 

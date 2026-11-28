@@ -33,7 +33,7 @@ The version stamp on a vault's on-disk format (`schema_version`). It tells the a
 
 ## Session
 
-The in-memory state between login and logout: the active user, the cached master password and secret key, and the unlocked vaults. A session ends at logout, at user deletion, at the start of any login or registration, and when the idle (15 min) or absolute (12 h) timeout expires (`auth-policy.md`). Switching users never leaves the previous session's vaults unlocked. Ending a session flushes unsaved changes (best-effort when a timeout forces it), drops every unlocked vault, zeroizes the cached password and secret key, and clears the clipboard.
+The in-memory state between login and logout: the active user, the cached master password and secret key, and the unlocked vaults. A session ends at logout, at user deletion, at the start of any successful login or registration (a rejected registration leaves the current session intact), and when the idle (15 min) or absolute (12 h) timeout expires (`auth-policy.md`). Switching users never leaves the previous session's vaults unlocked. Ending a session flushes unsaved changes (best-effort when a timeout forces it), drops every unlocked vault, zeroizes the cached password and secret key, and clears the clipboard.
 
 ## Migration Backup
 

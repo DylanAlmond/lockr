@@ -635,7 +635,9 @@ policy saying so, and no way for a User to see that someone tried their master p
 **Evidence:** no `log`/`tracing` dependency; only two ad-hoc prints (`commands.rs:84`,
 `user_manager.rs:59`).
 **Fix:** a minimal local audit log, or a written decision that logging is deliberately absent plus
-the consequence. **Status:** open.
+the consequence. **Status:** open. Authentication events are now recorded in `auth.log`
+(`auth-policy.md` §2, F-15); authorisation denials and unexpected errors still are not, and there is
+no logging policy.
 
 ### F-29 — Error strings and debug prints leak paths and identifiers · P3
 

@@ -4,7 +4,7 @@ mod crypto;
 mod error;
 mod icons;
 mod models;
-mod user_manager;
+pub mod user_manager;
 mod vault_manager;
 
 use std::sync::Mutex;

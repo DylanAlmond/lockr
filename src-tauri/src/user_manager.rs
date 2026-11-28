@@ -143,12 +143,9 @@ impl UserManager {
 
     /// Append one authentication event to `auth.log`. Best-effort and never
     /// contains secret material.
-    fn audit(&self, event: &str, user: Option<&UserId>) {
+    fn log_auth_event(&self, event: &str, user: &UserId) {
         let timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-        let line = match user {
-            Some(id) => format!("{timestamp} {event} user={id}\n"),
-            None => format!("{timestamp} {event}\n"),
-        };
+        let line = format!("{timestamp} {event} user={user}\n");
 
         let _ = std::fs::OpenOptions::new()
             .create(true)
@@ -196,6 +193,11 @@ impl UserManager {
     /// Create a brand new user profile.
     /// Generates a random Secret Key and encrypts it with the Master Password.
     pub fn register(&mut self, name: String, master_password: &str) -> Result<User, VaultError> {
+        // The profile-creation layer enforces the policy so no caller can
+        // bypass it; the command layer also checks early to preserve the
+        // current session on rejection.
+        validate_master_password(&name, master_password)?;
+
         let mut secret_key_bytes = [0u8; 32];
         OsRng.fill_bytes(&mut secret_key_bytes);
 
@@ -213,13 +215,16 @@ impl UserManager {
             vault_ids: Vec::new(),
         };
 
+        // Write the profile before making it active: a failed write must not
+        // leave an active user pointing at a missing file.
+        let path = self
+            .app_data_dir
+            .join(format!("{}.json", user.id.to_string()));
+        std::fs::write(&path, serde_json::to_string_pretty(&user)?)?;
+
         self.active_user_id = Some(user.id);
-        self.active_path = Some(
-            self.app_data_dir
-                .join(format!("{}.json", user.id.to_string())),
-        );
-        self.save_user(&user)?;
-        self.audit("registered", Some(&user.id));
+        self.active_path = Some(path);
+        self.log_auth_event("registered", &user.id);
 
         Ok(user)
     }
@@ -227,7 +232,7 @@ impl UserManager {
     /// Verify the Master Password and decrypt the Secret Key.
     pub fn login(&mut self, id: &UserId, master_password: &str) -> Result<Vec<u8>, VaultError> {
         if let Err(error) = self.check_login_allowed(id) {
-            self.audit("login_blocked", Some(id));
+            self.log_auth_event("login_blocked", id);
             return Err(error);
         }
 
@@ -246,13 +251,13 @@ impl UserManager {
                 Ok(key) => key,
                 Err(error) => {
                     self.record_failed_login(id);
-                    self.audit("login_failed", Some(id));
+                    self.log_auth_event("login_failed", id);
                     return Err(error);
                 }
             };
 
         self.record_successful_login(id);
-        self.audit("login_success", Some(id));
+        self.log_auth_event("login_success", id);
 
         self.active_user_id = Some(user_file.id);
         self.active_path = Some(path);
@@ -284,7 +289,7 @@ impl UserManager {
         let user = self.active_user()?;
 
         if let Err(error) = self.check_login_allowed(&user.id) {
-            self.audit("reauth_blocked", Some(&user.id));
+            self.log_auth_event("reauth_blocked", &user.id);
             return Err(error);
         }
 
@@ -293,7 +298,7 @@ impl UserManager {
                 Ok(key) => key,
                 Err(error) => {
                     self.record_failed_login(&user.id);
-                    self.audit("reauth_failed", Some(&user.id));
+                    self.log_auth_event("reauth_failed", &user.id);
                     return Err(error);
                 }
             };
@@ -489,16 +494,18 @@ mod tests {
     }
 
     #[test]
-    fn test_audit_log_records_events_without_secrets() {
+    fn test_auth_log_records_events_without_secrets() {
         let temp_dir = setup();
         let manager = UserManager::new(temp_dir.clone()).unwrap();
         let id = Uuid::new_v4();
+        let secret = "correct horse battery staple";
 
-        manager.audit("login_failed", Some(&id));
+        manager.log_auth_event("login_failed", &id);
 
         let log = std::fs::read_to_string(temp_dir.join("auth.log")).unwrap();
         assert!(log.contains("login_failed"));
         assert!(log.contains(&id.to_string()));
+        assert!(!log.contains(secret), "the log must never contain a secret");
 
         std::fs::remove_dir_all(temp_dir).ok();
     }
@@ -537,7 +544,7 @@ mod tests {
 
         // Setup: Register a user
         let user = manager
-            .register("Charlie".to_string(), "RightPassword")
+            .register("Charlie".to_string(), "correct horse battery staple")
             .unwrap();
 
         // Action: Attempt to login with the wrong password
@@ -554,9 +561,9 @@ mod tests {
     fn test_verify_password_checks_the_active_users_master_password() {
         let temp_dir = setup();
         let mut manager = UserManager::new(temp_dir.clone()).unwrap();
-        manager.register("Frank".to_string(), "CorrectHorse").unwrap();
+        manager.register("Frank".to_string(), "correct horse battery staple").unwrap();
 
-        manager.verify_password("CorrectHorse").unwrap();
+        manager.verify_password("correct horse battery staple").unwrap();
 
         let wrong = manager.verify_password("WrongHorse");
         assert!(
@@ -571,7 +578,7 @@ mod tests {
     fn test_owns_vault_reflects_the_active_users_vault_list() {
         let temp_dir = setup();
         let mut manager = UserManager::new(temp_dir.clone()).unwrap();
-        manager.register("Grace".to_string(), "Password").unwrap();
+        manager.register("Grace".to_string(), "correct horse battery staple").unwrap();
 
         let owned = Uuid::new_v4();
         let foreign = Uuid::new_v4();
@@ -587,7 +594,7 @@ mod tests {
     fn test_update_profile_rejects_a_remote_icon() {
         let temp_dir = setup();
         let mut manager = UserManager::new(temp_dir.clone()).unwrap();
-        let user = manager.register("Heidi".to_string(), "Password").unwrap();
+        let user = manager.register("Heidi".to_string(), "correct horse battery staple").unwrap();
 
         let result = manager.update_profile(
             None,
@@ -608,7 +615,7 @@ mod tests {
     fn test_user_reads_withhold_a_tampered_icon() {
         let temp_dir = setup();
         let mut manager = UserManager::new(temp_dir.clone()).unwrap();
-        let user = manager.register("Ivan".to_string(), "Password").unwrap();
+        let user = manager.register("Ivan".to_string(), "correct horse battery staple").unwrap();
 
         // A tampered profile file can carry any stored icon string.
         let path = temp_dir.join(format!("{}.json", user.id));
@@ -632,7 +639,7 @@ mod tests {
         let mut manager = UserManager::new(temp_dir.clone()).unwrap();
 
         let user = manager
-            .register("Dave".to_string(), "SomePassword")
+            .register("Dave".to_string(), "correct horse battery staple")
             .unwrap();
 
         // Action: Call get_user (should not require a password)
@@ -650,7 +657,7 @@ mod tests {
         let temp_dir = setup();
         let mut manager = UserManager::new(temp_dir.clone()).unwrap();
 
-        let user = manager.register("Eve".to_string(), "Password").unwrap();
+        let user = manager.register("Eve".to_string(), "correct horse battery staple").unwrap();
 
         let vault_id_1 = Uuid::new_v4();
         let vault_id_2 = Uuid::new_v4();

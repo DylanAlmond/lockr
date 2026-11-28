@@ -40,7 +40,7 @@ type AppState<'a> = State<'a, Mutex<ManagerState>>;
 const DEFAULT_VAULT_NAME: &str = "Personal";
 const DEFAULT_VAULT_COLOUR: &str = "#6240BF";
 
-/// Session policy (docs/security/session-policy.md).
+/// Session policy (docs/security/auth-policy.md).
 const IDLE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const ABSOLUTE_TIMEOUT: Duration = Duration::from_secs(12 * 60 * 60);
 const SESSION_CHECK_INTERVAL: Duration = Duration::from_secs(10);
@@ -1182,7 +1182,7 @@ mod tests {
         // the state a compromised renderer can create.
         let bob = state
             .user_manager
-            .register("Bob".to_string(), "BobPassword")
+            .register("Bob".to_string(), "correct horse battery staple")
             .unwrap();
         assert!(
             state.vault_manager.get_vault(owned).is_ok(),
@@ -1190,7 +1190,7 @@ mod tests {
         );
 
         state
-            .login_user(bob.id, "BobPassword".to_string())
+            .login_user(bob.id, "correct horse battery staple".to_string())
             .unwrap();
 
         assert!(
@@ -1212,7 +1212,7 @@ mod tests {
         // failed.
         let bob = state
             .user_manager
-            .register("Bob".to_string(), "BobPassword")
+            .register("Bob".to_string(), "correct horse battery staple")
             .unwrap();
 
         let result = state.login_user(bob.id, "WrongPassword".to_string());
